@@ -140,3 +140,61 @@ This explains why one mutable DLL candidate only differed beginning exactly at o
 ### Current state
 
 Exact template identity (`CFG70`, `CFG90`, or another 224-byte source) still needs to be proven before any Linux upload.
+
+## 12. CFG70 selection and exact runtime parity — resolved
+
+Offline extraction found one unique 224-byte CFG70 structural family. The live-OTP Linux builder applied the six proven calibration mutations, recomputed the config checksum, and matched a private Windows runtime reference byte-for-byte. One controlled Linux `0x90` upload was accepted and post-upload calibration state was verified.
+
+The full runtime bytes and unit-specific hash remain private.
+
+## 13. Factory TLS reconfirmed after config work
+
+TLS 1.2 PSK with `PSK-AES128-GCM-SHA256` and identity `Client_identity` succeeded, followed by an encrypted-session NOP.
+
+## 14. FDT manual seed interpretation corrected
+
+The 12-byte `goodix.dat` FDT block is six duplicated manual threshold bytes. It is not six raw `u16` values and not six already encoded down-threshold pairs.
+
+Manual `0x36` returns six live zone measurements. Down thresholds derived as `floor(raw/2)` were accepted by `0x32` and produced real finger-down events.
+
+## 15. Activation-state bug resolved
+
+After earlier FDT experiments, direct reads returned `06000000` and `enable_chip(True)` could timeout. A read-only pending-frame probe showed no stale queued packet.
+
+The working activation sequence was proven as:
+
+```text
+NOP -> 0xd4 -> NOP -> 0x96 -> NOP -> firmware -> 0xa2 reset -> chip read
+```
+
+Three reads then returned `a2042500`.
+
+## 16. FDT down/up complete
+
+A corrected probe completed:
+
+```text
+manual 0x36 PASS
+down 0x32 ACK/event PASS
+up 0x34 ACK/event PASS
+```
+
+Finger-up returned IRQ `0x0200`, touchflag `0x0000`, and 0/6 active zones.
+
+## 17. First TLS-protected image transport complete
+
+With a finger held after FDT-down, command `0x20` payload `01 00` received a normal ACK then a Goodix pack with flags `0xb0`, length `7722`.
+
+The TLS record decrypted to exactly `7693` bytes. Safe metadata parsing proved:
+
+```text
+command 0x20
+declared length 7690
+trailer 0x88
+no-checksum protocol mode
+payload 7689 bytes
+```
+
+Upstream `[8:-5]` image slicing leaves exactly `7680` packed bytes, consistent with 5120 12-bit pixels at 80x64.
+
+The private capture was saved locally only and must never be committed.

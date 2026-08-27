@@ -99,3 +99,48 @@ payload: 0xe0 bytes (224)
 ```
 
 Do not use a 256-byte blind upload. Earlier 256-byte binary-template scans accidentally included 32 bytes of adjacent DLL data.
+
+## Verified 5135 activation ordering
+
+A state-dependent `enable_chip` timeout / `06000000` register-0 read was resolved by:
+
+```text
+NOP -> 0xd4 -> NOP -> 0x96 -> NOP -> firmware -> 0xa2 reset -> register read
+```
+
+This produced stable `a2042500` chip reads.
+
+## FDT event payloads
+
+Manual/down/up event bodies on this path are handled as:
+
+```text
+IRQ        u16 little-endian
+touchflag  u16 little-endian
+6 zones    6 * u16 little-endian
+```
+
+Manual command `0x36` uses `0d01 + 12-byte private manual seed`.
+
+Down command `0x32` uses `0801 + 12 encoded threshold bytes + timestampLE`.
+
+Up command `0x34` uses `0a02 + 12 encoded threshold bytes`.
+
+## Image response flags and inner framing
+
+For the successful 5135 image capture:
+
+```text
+request command          0x20
+request payload          01 00
+first response           normal ACK
+second Goodix pack flags 0xb0
+second pack length       7722
+TLS plaintext            7693
+inner command            0x20
+inner declared length    7690
+inner trailer            0x88
+inner payload            7689
+```
+
+The inner protocol must be decoded with `checksum=False`; the trailing `0x88` is the protocol marker for that mode.

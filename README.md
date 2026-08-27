@@ -1,136 +1,107 @@
 # Goodix 27c6:5135 Linux research
 
-Reverse-engineering notes and Linux enablement research for the **Goodix USB fingerprint sensor `27c6:5135`** using firmware **`GF_HC460SEC_APP_12508`**.
+Reverse-engineering and Linux enablement research for the **Goodix USB fingerprint sensor `27c6:5135`** with firmware **`GF_HC460SEC_APP_12508`**.
 
-> Status: research / bring-up. **Not yet a production libfprint driver.**
+> Status: end-to-end transport bring-up is far along; **not yet a production libfprint driver**.
 
-This repository documents a device-specific investigation intended to help Linux users with the same hardware and to preserve enough context that development can resume without repeating destructive experiments.
+## Current milestone
+
+As of 2026-08-27 Linux has successfully reproduced:
+
+- exact device identification (`0x2504`, ChicagoHS, sensor type 12, 80x64);
+- factory TLS 1.2 PSK session without changing the factory key;
+- exact 224-byte CFG70 runtime reconstruction from live OTP;
+- one controlled, volatile `0x90` config upload;
+- FDT manual/down/up finger detection;
+- command `0x20` image request and ACK;
+- TLS-protected image response transport and decryption;
+- Goodix image-message framing to a private 7693-byte TLS plaintext frame.
+
+The immediate next task is **image CRC validation and 12-bit unpacking**, not config/TLS/FDT discovery.
+
+See [`AI_START_HERE.md`](AI_START_HERE.md) and [`docs/CURRENT_STATUS_2026-08-27.md`](docs/CURRENT_STATUS_2026-08-27.md).
 
 ## Confirmed hardware
 
 | Item | Value |
 |---|---|
 | USB VID:PID | `27c6:5135` |
-| Vendor | Shenzhen Goodix Technology Co., Ltd. |
 | Firmware | `GF_HC460SEC_APP_12508` |
-| Chip ID | `0x2504` |
-| Windows sensor path | `ChicagoHS` / functions named `ChicagoHU*` |
+| Raw chip response | `a2042500` |
+| Logical chip ID | `0x2504` |
+| Sensor path | ChicagoHS / ChicagoHU |
 | Sensor type | `12` |
 | Geometry | `80 x 64` |
-| Pixel count | `5120` |
-| USB transport | CDC-like, bulk IN `0x81`, bulk OUT `0x01` |
-| Windows driver | Goodix FP `1.1.125.12`, `gfusb.inf` |
+| Pixels | `5120` |
+| USB Bulk IN / OUT | `0x81` / `0x01` |
 
-## What works / is proven
+## Major protocol results
 
-- USB communication with the device.
-- Firmware version read.
-- OTP read.
-- Sensor register reads.
-- MCU state query.
-- Factory TLS 1.2 PSK handshake using `PSK-AES128-GCM-SHA256`.
-- A post-handshake encrypted-session NOP.
-- Windows profile selection: chip `0x2504`, ChicagoHS, type `12`, `80 x 64`.
-- MCU configuration upload command `0x90`.
-- Exact MCU configuration payload length: `0xe0` / 224 bytes.
-- Static template selection: **CFG70**.
-- OTP-derived modification of six logical sensor-register fields.
-- Goodix 16-bit little-endian config checksum reconstruction.
-- Clean reconstruction of the Windows runtime config with **zero byte differences across all 224 bytes**.
+### Runtime config
 
-## Major resolved blocker
+Windows sends command `0x90` with exactly `224` bytes. The tested device uses the CFG70 family. Linux can rebuild the exact private Windows runtime payload from live OTP and the proven checksum rule. The full per-device payload is intentionally not published. Public evidence is preserved in [`docs/CFG70_RUNTIME_PROOF_2026-08-27.md`](docs/CFG70_RUNTIME_PROOF_2026-08-27.md), [`docs/ISSUE_1_RESOLUTION_2026-08-27.md`](docs/ISSUE_1_RESOLUTION_2026-08-27.md), and [`docs/LINUX_CFG70_UPLOAD_PROOF_2026-08-27.md`](docs/LINUX_CFG70_UPLOAD_PROOF_2026-08-27.md).
 
-For the tested `27c6:5135` / HC460 / ChicagoHS unit, the Windows runtime path is now proven:
+### TLS
 
 ```text
-CFG70 static template
-  -> OTP-derived ChicagoHS calibration
-  -> checksum recalculation
-  -> exact 224-byte runtime configuration
-  -> upload with MCU command 0x90
+TLS 1.2
+PSK-AES128-GCM-SHA256
+identity Client_identity
 ```
 
-The `0x90` command ID and the CFG70 template name are different concepts. The command number is not evidence for a template named CFG90.
+The factory key remains private/local and is not reprovisioned.
 
-Full public evidence:
+### FDT
 
-- [`docs/CFG70_RUNTIME_PROOF_2026-08-27.md`](docs/CFG70_RUNTIME_PROOF_2026-08-27.md)
-- [`docs/ISSUE_1_RESOLUTION_2026-08-27.md`](docs/ISSUE_1_RESOLUTION_2026-08-27.md)
+Linux reproduces:
 
-## Current blocker
+```text
+0x36 manual baseline
+0x32 finger-down ACK/event
+0x34 finger-up ACK/event
+```
 
-The remaining blocker is implementation on Linux, not identification of the Windows payload.
+### Image transport
 
-The next step is a **dry-run ChicagoHS config builder** that:
+```text
+0x20 payload 01 00
+normal ACK
+second Goodix pack flags 0xb0, length 7722
+TLS plaintext 7693 bytes
+inner command 0x20
+inner trailer 0x88 (no-checksum mode)
+inner payload 7689 bytes
+```
 
-1. reads OTP,
-2. derives the six calibration fields,
-3. applies them to CFG70,
-4. recomputes the checksum,
-5. requires exactly 224 bytes,
-6. compares locally against the private Windows-derived reference,
-7. performs no USB write until exact parity is proven.
+The frame shape is consistent with 5 bytes image metadata + 7680 packed 12-bit pixels + 4 bytes image CRC.
 
-Only after byte-for-byte parity should the project perform a single controlled **volatile** `upload_config_mcu()` and verify MCU state before continuing to TLS/image capture.
+## Safety and privacy
 
-See [`docs/NEXT_STEPS.md`](docs/NEXT_STEPS.md).
-
-## Safety boundary
-
-**Do not blindly run 5117/5125 provisioning scripts on this device.**
-
-This project intentionally avoids:
-
-- firmware erase,
-- firmware replacement,
-- PSK write/re-provisioning,
-- arbitrary persistent register writes,
-- speculative/unverified MCU config upload,
-- publishing biometric frames/templates,
-- publishing the factory PSK,
-- publishing full OTP/process-memory dumps,
-- committing reconstructed per-device 224-byte configs.
-
-The goal is to preserve Windows Hello functionality and the factory firmware/key material throughout the Linux bring-up.
+This project intentionally avoids firmware erase/flash and PSK provisioning. Never commit factory secrets or real biometric material.
 
 See [`docs/SAFETY.md`](docs/SAFETY.md).
 
 ## Repository map
 
-- [`AI_START_HERE.md`](AI_START_HERE.md) — canonical handoff/current state.
-- [`docs/CFG70_RUNTIME_PROOF_2026-08-27.md`](docs/CFG70_RUNTIME_PROOF_2026-08-27.md) — byte-for-byte CFG70 runtime reconstruction proof.
-- [`docs/ISSUE_1_RESOLUTION_2026-08-27.md`](docs/ISSUE_1_RESOLUTION_2026-08-27.md) — Issue #1 resolution summary.
-- [`docs/HARDWARE.md`](docs/HARDWARE.md) — USB, firmware, chip, geometry and cache layout.
-- [`docs/WINDOWS_DRIVER.md`](docs/WINDOWS_DRIVER.md) — Windows package identity and reverse-engineered runtime behavior.
-- [`docs/PROTOCOL.md`](docs/PROTOCOL.md) — known Goodix USB commands and TLS behavior.
-- [`docs/CONFIG_UPLOAD_TRACE.md`](docs/CONFIG_UPLOAD_TRACE.md) — Windows cold-init/config upload evidence.
-- [`docs/CONFIG_TEMPLATES.md`](docs/CONFIG_TEMPLATES.md) — CFG30/CFG70/CFG90 analysis and resolved CFG70 selection.
-- [`docs/RESEARCH_LOG.md`](docs/RESEARCH_LOG.md) — chronological findings and corrections.
-- [`docs/NEXT_STEPS.md`](docs/NEXT_STEPS.md) — evidence-driven next tasks.
-- [`docs/SAFETY.md`](docs/SAFETY.md) — destructive operations to avoid.
-- [`scripts/`](scripts/) — offline parsers and read-only probes only.
+- `AI_START_HERE.md` — canonical next-session handoff.
+- `docs/CURRENT_STATUS_2026-08-27.md` — current proof matrix.
+- `docs/CFG70_RUNTIME_PROOF_2026-08-27.md` — exact Windows CFG70 runtime reconstruction proof.
+- `docs/ISSUE_1_RESOLUTION_2026-08-27.md` — original Issue #1/config blocker resolution.
+- `docs/FDT_5135_PROOF_2026-08-27.md` — FDT manual/down/up proof.
+- `docs/IMAGE_TRANSPORT_5135_PROOF_2026-08-27.md` — first image transport proof.
+- `docs/LINUX_CFG70_UPLOAD_PROOF_2026-08-27.md` — config reconstruction/upload proof.
+- `docs/FAILURES_AND_RECOVERIES_2026-08-27.md` — negative results and recoveries.
+- `docs/DEVELOPER_ROADMAP.md` — path to libfprint.
+- `docs/LEARNING_GUIDE.md` — conceptual guide for future developers.
+- `scripts/inspect_private_image_capture_5135.py` — private local framing/CRC/decode inspector.
+- `scripts/build_cfg70_dry_run.py` — public-safe local CFG70 builder.
+- `scripts/upload_cfg70_5135.py` — guarded public-safe config uploader.
+- `scripts/recover_transport_5135.sh` — sysfs USB transport recovery.
 
-## Image geometry and packing
+## Related work
 
-Windows reports `80 x 64 = 5120` pixels. The encrypted image response ultimately contains 7680 packed image bytes, matching 12-bit packing:
+- `goodix-fp-linux-dev/goodix-fp-dump` provides shared Goodix protocol primitives and the known 12-bit unpacker.
+- `goodix-fp-linux-dev/sigfm` is relevant when evaluating matcher integration.
+- ChicagoHS/chip `0x2504` SPI projects can provide sensor-layer comparison, but they are **not** proof for USB `27c6:5135` transport/firmware behavior.
 
-```text
-5120 pixels * 12 bits = 7680 bytes
-```
-
-The Windows regroup stage outputs `10240` bytes (`5120 * 2`) as 16-bit host samples.
-
-## Contribution policy
-
-Evidence is preferred over guesses. If submitting findings, include:
-
-- exact VID:PID,
-- firmware string,
-- chip ID if known,
-- operating system/driver version,
-- command lengths/statuses,
-- whether the observation occurred before or after power loss/re-enumeration.
-
-Do **not** post plaintext PSKs, biometric images/templates, private Windows account data, proprietary driver binaries, full OTP, process-memory dumps, or reconstructed per-device runtime configs.
-
-See [`CONTRIBUTING.md`](CONTRIBUTING.md).
+This repository does not claim priority or "world first" status without an external literature/repository survey; it records reproducible evidence for this exact tested USB device.

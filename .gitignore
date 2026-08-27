@@ -28,3 +28,21 @@ __pycache__/
 *-events.txt
 config-candidate-*
 *.log
+
+# Private Goodix material / biometric captures
+goodix-psk.hex
+goodix-psk.bin
+Goodix_Cache.bin
+goodix.dat
+goodix_calib.dat
+*.tls-plain.bin
+*.raw
+*.pgm
+*.png
+*.fingerprint
+*.template
+*.dmp
+*.dll
+*.exe
+*.cat
+*.private.bin
