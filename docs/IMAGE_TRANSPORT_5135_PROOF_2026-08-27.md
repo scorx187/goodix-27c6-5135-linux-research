@@ -4,7 +4,7 @@ Date: 2026-08-27
 
 ## Scope
 
-This proves USB command transport, TLS transport, TLS decryption, and Goodix image-message framing for one local capture. It does not publish or include biometric bytes.
+This proves USB command transport, TLS transport, TLS decryption, Goodix image-message framing, packed RAW12 decoding, and a Windows-compatible image CRC check for one local capture. It does not publish or include biometric bytes, CRC values, OTP, PSK material, or per-unit runtime configuration.
 
 ## Windows reference behavior
 
@@ -81,7 +81,7 @@ For the 5135 frame:
 5120 = 80 * 64
 ```
 
-Strong structural model:
+Proven structural model:
 
 ```text
 Goodix protocol header  3
@@ -93,17 +93,52 @@ protocol trailer        1
 total                 7693
 ```
 
-The upstream 12-bit unpacker works on 6-byte groups and emits four 12-bit samples per group.
+The upstream 12-bit unpacker works on 6-byte groups and emits four 12-bit samples per group. The local private inspector decoded exactly 5120 samples, all in the 12-bit range 0..4095.
+
+## Windows-compatible image CRC proof
+
+Reverse engineering of the local Windows `gfusb.dll` found the generic CRC implementation and a checker with the same signature and data shape used by the image path.
+
+The CRC implementation initializes its table with polynomial `0x04C11DB7` and uses an initial state of `0xFFFFFFFF`, non-reflected input/output, and no final XOR. This is CRC-32/MPEG-2.
+
+The checker computes CRC over the first `length - 4` bytes, then reconstructs the trailing four-byte field in this order. For stored bytes `[a, b, c, d]`:
+
+```text
+crcchip = (c << 24) | (d << 16) | (a << 8) | b
+```
+
+Equivalently, the wire field stores the CRC with its two 16-bit halves swapped relative to normal big-endian byte order.
+
+The Windows image receive path passes a pointer five bytes past the image-message metadata and a length equal to the message length minus six. For this 5135 frame that corresponds exactly to:
+
+```text
+7680 packed RAW12 bytes + 4 CRC bytes = 7684 bytes
+```
+
+A private local reimplementation of that Windows-compatible checker was run against the captured image and returned:
+
+```text
+WINDOWS IMAGE CRC MATCH: PASS
+CRC domain              : packed RAW12 only (7680 bytes)
+Checked block           : packed RAW12 + CRC (7684 bytes)
+```
+
+No image bytes, pixel values, CRC values, or private hashes were printed or committed.
+
+### Confidence note
+
+The indirect image-checker function pointer is populated at runtime in a BSS-backed slot, so its exact static target could not be read directly from the PE file. However, the reconstructed Windows checker, its CRC implementation, the image-path pointer/length arithmetic, and the successful real-capture comparison all agree. A second independent capture is still recommended as a cross-capture confirmation before treating the field layout as invariant across every firmware/unit.
+
+## Safety gate for local image output
+
+The public private-capture inspector now refuses `--write-pgm` unless the Windows-compatible image CRC check passes. This prevents visual decoding of a frame that failed integrity verification.
+
+The repository must never contain the capture itself, a fingerprint image, raw/template biometric data, PSK/OTP material, or private per-unit configuration.
 
 ## Next proof
 
-Before declaring image decoding complete:
-
-1. determine whether the 4-byte image CRC is CRC32/MPEG over packed pixels only, metadata+pixels, or another exact range;
-2. determine CRC byte order;
-3. require a successful CRC check;
-4. decode the 7680 packed bytes to exactly 5120 12-bit samples;
-5. save an `80x64` image locally/private only;
-6. visually validate locally without uploading it.
-
-The repository must never contain the capture itself.
+1. confirm the same CRC rule on a second independent private capture;
+2. write a private `80x64` PGM only after CRC verification passes;
+3. visually validate locally without uploading the image;
+4. determine the ChicagoHU regroup/orientation expected by the downstream matcher;
+5. integrate the proven image path into the libfprint driver without changing firmware or factory PSK state.
