@@ -21,7 +21,7 @@ USB bulk OUT:0x01
 
 ## Current state — do not repeat solved work
 
-As of 2026-08-27 the project is **past config, TLS, FDT, image transport, image CRC, RAW12 decode, ChicagoHU regroup, and ImageBase/live spatial-order proof**.
+As of 2026-08-27 the project is **past config, TLS, FDT, image transport, image CRC, RAW12 decode, ChicagoHU regroup, ImageBase/live spatial-order proof, and the gfusb.dll post-detection request handoff**.
 
 ```text
 CFG70 reconstruction              DONE
@@ -41,7 +41,9 @@ ChicagoHU regroup                 PROVEN
 ImageBase/live relative layout    PROVEN
 Candidate A                       PROVEN
 Candidate B double-regroup        REJECTED
-exact matcher preprocessing       NEXT
+post-detection callback           RESOLVED: 0x180013280
+gfusb.dll request handoff         PROVEN
+higher-layer matcher preprocessing NEXT
 ```
 
 Read first:
@@ -57,11 +59,25 @@ Read first:
 
 ## Immediate next task
 
-**Stop investigating transport and stop re-proving ImageBase orientation.**
+**Stop investigating transport, ImageBase orientation, the detector, callback `0x180013280`, and request helper `0x18001393c`.**
 
-The current target is the Windows post-detection image-preparation path before the matcher/feature extractor.
+The concrete post-detection callback is proven:
 
-The capture path calls runtime callback slot `0x18059cb60` with the runtime object, persisted ImageBase, captured live image, and a mode/flag byte. Resolve who registers `0x18059cb60`, inspect its concrete target, and prove the actual image processing it performs.
+```text
+0x18059cb60 -> 0x180013280
+```
+
+It receives:
+
+```text
+(context, persisted ImageBase, regrouped live image, flags)
+```
+
+and copies the two image planes as blocks into a large result package. No pixel-wise baseline subtraction, normalization, clamp/saturation, or crop occurs in this callback.
+
+The package is submitted through `0x18001393c`, which copies `0xeb70` bytes into a pending request output buffer, reports total result size `0xeb88`, completes the request through `0x18001d64c`, and clears the pending request state. This is the boundary where the examined `gfusb.dll` hands the image result to the next Windows layer.
+
+Therefore the current target is the **Windows component that opens/reads this driver interface and consumes the `0xeb88` result**. Identify that local Goodix/Windows biometric DLL/EXE/service from the installed driver/software files, then statically trace the two `10240`-byte `80x64 u16` planes into the actual matcher/feature extractor.
 
 Need exact proof, if present, for:
 
@@ -72,6 +88,8 @@ Need exact proof, if present, for:
 5. crop/output dimensions;
 6. any role of `goodix_calib.dat`;
 7. exact buffer handed to matcher/feature extraction.
+
+Do not request or upload proprietary binaries; inspect the user's local files in place using metadata/disassembly only.
 
 ## Windows live-image layout proof — critical checkpoint
 
