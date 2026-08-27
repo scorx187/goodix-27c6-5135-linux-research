@@ -4,7 +4,7 @@ Date: 2026-08-27
 
 ## Scope
 
-This document records the static Windows proof that the full 5135 live image is decoded/regrouped into the same 16-bit spatial layout consumed alongside the persisted `ImageBase`. It closes the previous Candidate A vs Candidate B ambiguity.
+This document records the static Windows proof that the full 5135 live image is decoded/regrouped into the same 16-bit spatial layout consumed alongside the persisted `ImageBase`. It also records the now-resolved post-detection callback and the boundary where `gfusb.dll` hands the image package to the next Windows layer.
 
 No proprietary binary, fingerprint bytes, image values, OTP, PSK material, private calibration data, or unit-specific runtime configuration is included here.
 
@@ -18,13 +18,18 @@ packed RAW12 image (0x1e00 bytes)
         -> Chicago decode/regroup routine
         -> 80x64 / 5120-sample 16-bit live-image buffer
         -> same-index comparison with persisted ImageBase
+        -> post-detection callback packages ImageBase + live image unchanged
+        -> request output buffer
+        -> next Windows biometric layer
 ```
 
-The persisted `ImageBase` is therefore already in the downstream regrouped spatial order. Applying the Chicago regroup transform to `ImageBase` a second time is incorrect.
+The persisted `ImageBase` is already in the downstream regrouped spatial order. Applying the Chicago regroup transform to `ImageBase` a second time is incorrect.
 
 **Candidate A: PROVEN.**
 
 **Candidate B (regroup ImageBase again): rejected.**
+
+The examined `gfusb.dll` post-detection callback does **not** perform baseline subtraction, normalization, clamp/saturation, crop, or other per-pixel matcher preparation. It packages the already-regrouped ImageBase/live planes and completes the pending request. Exact matcher preprocessing therefore lies in the consumer above this driver handoff, not in this callback.
 
 ## 0x2504 family registration
 
@@ -135,9 +140,60 @@ The base/live routine at `0x180022178` is a detector/classifier, not the matcher
 
 This detector is now sufficiently understood for image-layout purposes and should not be the focus of further preprocessing work.
 
-## What remains unproven
+## Post-detection callback resolved
 
-This proof does **not** yet establish the exact image preparation handed to the biometric matcher. Remaining work includes locating the post-detection processing callback and proving, if present:
+Runtime slot `0x18059cb60` is registered through setter `0x1800621b8`.
+
+The registration call loads:
+
+```text
+RCX = 0x180013280
+DL  = 1
+call 0x1800621b8
+```
+
+and the setter stores the supplied RCX value into `0x18059cb60`. Therefore the concrete post-detection callback is:
+
+```text
+0x18059cb60 -> 0x180013280
+```
+
+Capture call sites invoke it with the effective signature:
+
+```text
+callback(context, ImageBase, live_image, flags)
+```
+
+## What callback 0x180013280 actually does
+
+`0x180013280` allocates a large local package, copies both image planes into that package using the family image-plane byte count, fills metadata/flags, and submits the package through `0x18001393c`.
+
+Critically, between entry and submission there is no per-pixel arithmetic over ImageBase/live data: no baseline subtraction loop, no normalization loop, no clamp/saturation loop, and no crop transform. The two image planes are copied as blocks.
+
+For the 5135 path the package submitted to `0x18001393c` is `0xeb88` bytes total, with `0xeb70` bytes of payload passed by pointer.
+
+## Request-completion boundary at 0x18001393c
+
+`0x18001393c` is a request-output/completion helper, not an image-processing routine.
+
+On the successful payload path it:
+
+1. locks the request/context synchronization object;
+2. verifies a pending request at `context + 0x188` and output buffer at `context + 0x198`;
+3. writes output metadata including total result size `0xeb88` and payload length `0xeb70`;
+4. copies exactly `0xeb70` bytes from the supplied package pointer into output buffer offset `+0x14`;
+5. completes the pending request via `0x18001d64c` with the supplied status/length;
+6. clears the pending request/output-buffer pointers and request-active flag.
+
+Other call sites use the same helper to complete requests with Windows error statuses such as `0xc0000120` and `0xc000000d`, further confirming that this is a generic request completion path.
+
+Therefore the full 5135 image pair crosses the `gfusb.dll` boundary as a packaged request result. Matcher/feature-extractor preprocessing, if any, occurs in the higher Windows component consuming this result.
+
+## Current next target
+
+Do **not** keep searching `0x180013280` or `0x18001393c` for matcher preprocessing.
+
+The next task is to identify the Windows component that opens/reads this driver interface and consumes the `0xeb88` image result. From that consumer, trace the two 10240-byte 80x64 `u16` planes into the actual matcher/feature extractor and prove, if present:
 
 - baseline subtraction direction;
 - clamp/saturation rules;
@@ -145,8 +201,4 @@ This proof does **not** yet establish the exact image preparation handed to the 
 - additional per-pixel calibration;
 - crop/output dimensions;
 - any role of `goodix_calib.dat`;
-- exact buffer passed into the matcher/feature extractor.
-
-## Immediate next target
-
-The capture path calls runtime callback slot `0x18059cb60` with the runtime object, persisted ImageBase, captured live image, and a mode/flag byte. The next static-analysis task is to resolve who registers that callback and then inspect its concrete target as the likely post-detection preprocessing path.
+- exact matcher input buffer.
