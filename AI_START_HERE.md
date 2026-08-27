@@ -17,7 +17,7 @@ Geometry:    80 x 64
 
 ## Current Linux state
 
-The device is currently responsive after USB re-enumeration, but the runtime MCU configuration is absent.
+The device is responsive after USB re-enumeration, but the runtime MCU configuration is absent.
 
 Last read-only probe:
 
@@ -35,8 +35,6 @@ Previously, while Windows-loaded runtime configuration was still present, Linux 
 register 0x0220: f80b
 ```
 
-which is little-endian `0x0bf8`, matching the Windows OTP-calibrated DAC.
-
 ## Major confirmed results
 
 ### Factory TLS works from Linux
@@ -48,7 +46,7 @@ PSK-AES128-GCM-SHA256
 identity: Client_identity
 ```
 
-was accepted by the sensor. The factory 32-byte host PSK was recovered locally from Windows DPAPI data and **must never be committed or pasted into public logs**.
+was accepted by the sensor. The factory host PSK was recovered locally from Windows DPAPI data and **must never be committed or pasted into public logs**.
 
 The Linux sequence successfully completed:
 
@@ -59,108 +57,111 @@ TLS successfully established
 secured NOP
 ```
 
-### Windows driver
+### Windows driver and profile
 
 ```text
 Provider: Goodix FP
 Driver:   1.1.125.12
 Date:     2021-05-25
-INF:      gfusb.inf (published as oem173.inf)
+INF:      gfusb.inf
 ```
 
-Package files include:
-
-```text
-gfusb.dll
-EngineAdapter.dll
-AlgoMilan.dll
-AlgoChicago.dll
-AlgoChicagoT.dll
-GoodixEventLog.dll
-SessionService.exe
-```
-
-The INF supports both:
-
-```text
-USB\VID_27C6&PID_5125
-USB\VID_27C6&PID_5135
-```
-
-### Windows profile selection is proven
-
-Windows event logs show:
+Windows event logs prove:
 
 ```text
 Get Chip ID: 0x2504
-device_enable_init_by_chip ... to init device by chipid 0x2504
 !!!! to Open ChicagoHS, sensor type: 12
 sensor info ready, chipid:0x2504, sensorType:12, col:80, row:64
 ```
 
-Functions used in the driver include `ChicagoHUSetMode`, `ChicagoHU_check_and_parse_otp`, `ChicagoHUsetDac`, and `chicagoHUget_*`.
+### Resolved: exact Windows runtime config construction
 
-### OTP-derived config changes
+The former blocker is closed for the tested unit.
 
-Windows logs show exactly:
-
-```text
-0x0220: 0x0808 -> 0x0bf8
-0x0236: 0x0080 -> 0x00c0
-0x0238: 0x0080 -> 0x00bf
-0x023a: 0x0080 -> 0x00bf
-0x005c: 0x0180 -> 0x0120
-0x0082: 0x1580 -> 0x1d80
-```
-
-and:
+Windows uses this path:
 
 ```text
-dac=0xbf8, dac1=0xc0, dac2=0xbf, dac3=0xbf
-tcode=288
-fdt_delta=29
+CFG70 static template
+  -> OTP-derived ChicagoHS calibration
+  -> Goodix 16-bit config checksum
+  -> exact 224-byte runtime config
+  -> MCU upload-config command 0x90
 ```
 
-### IMPORTANT: MCU config length is 224 bytes, not 256
+Important terminology:
+
+- **CFG70** is the selected static template family.
+- **`0x90`** is the MCU upload-config command ID.
+- The command number does **not** imply a template named CFG90.
+
+The six logical calibration fields are:
+
+```text
+0x005c
+0x0220
+0x0236
+0x0238
+0x023a
+0x0082
+```
+
+The final two bytes (`0xde`, `0xdf`) are the recomputed 16-bit little-endian checksum.
+
+Verified checksum algorithm:
+
+```c
+uint16_t sum = 0xa5a5;
+
+for (size_t offset = 0; offset < 222; offset += 2) {
+    uint16_t word =
+        config[offset] |
+        ((uint16_t)config[offset + 1] << 8);
+
+    sum = (uint16_t)(sum + word);
+}
+
+uint16_t checksum = (uint16_t)(0 - sum);
+
+config[222] = checksum & 0xff;
+config[223] = checksum >> 8;
+```
+
+The clean reconstruction test was:
+
+1. copy static CFG70,
+2. apply only the six Windows-observed OTP-derived substitutions,
+3. recompute checksum,
+4. compare all 224 bytes with the Windows runtime buffer.
+
+Result:
+
+```text
+remaining differences: 0
+full 224-byte match: true
+checksum verification: true
+```
+
+Public proof:
+
+- [`docs/CFG70_RUNTIME_PROOF_2026-08-27.md`](docs/CFG70_RUNTIME_PROOF_2026-08-27.md)
+- [`docs/ISSUE_1_RESOLUTION_2026-08-27.md`](docs/ISSUE_1_RESOLUTION_2026-08-27.md)
+
+Per-device OTP values, process-memory dumps, and reconstructed per-device 224-byte payloads remain private.
+
+### MCU config length is 224 bytes, not 256
 
 The Windows trace around `gf_download_config` proves:
-
-```text
-cmd0-cmd1-Len-ackt-ec:0x9-0-0xe0-1000-0
-get ack for cmd 0x90
-recvd data cmd-len: 0x90-3
-OTP data valid, download config 1
-have config 1
-```
-
-So:
 
 ```text
 COMMAND_UPLOAD_CONFIG_MCU = 0x90
 payload length             = 0xe0 = 224 bytes
 ```
 
-This explains an earlier reverse-engineering observation: candidate template differences began exactly at offset `+0xe0`; bytes after that are neighboring data, not part of the uploaded config.
-
-## Candidate config templates found in gfusb.dll
-
-Repeated templates were found beginning with:
-
-```text
-CFG30: 30 11 64 75 ...
-CFG70: 70 11 74 85 ...
-CFG90: 90 11 74 85 ...
-```
-
-CFG70 and CFG90 both contain the six default register/value tuples above at the same offsets.
-
-**Do not yet assume CFG90 is the HC460 config.** Direct xrefs were absent because the binary appears to access these through an indirect table/descriptor mechanism or copies them dynamically.
-
-The current next task is to determine whether the 224-byte upload begins with `70...`, `90...`, or another template by extracting the outgoing Windows payload or reversing the descriptor selection.
+Bytes after offset `0xdf` are not part of this configuration upload.
 
 ## Windows `goodix.dat`
 
-Exact size and validated layout:
+Validated layout:
 
 ```text
 13520 total
@@ -170,8 +171,6 @@ Exact size and validated layout:
 10240 IMAGE base
    4 CRC
 ```
-
-The CRC calculation matched the stored little-endian value.
 
 Do not publish the full device-specific file.
 
@@ -188,31 +187,65 @@ packed payload: 7680 bytes (12 bits/pixel)
 regrouped data: 10240 bytes (5120 x 16-bit)
 ```
 
-Do not request a frame until MCU config is verified and loaded.
+Do not request a frame until MCU config is verified and loaded on Linux.
 
 ## Safety rules — mandatory
 
 Never:
 
-- run `run_5117.py` on this device,
+- run destructive 51x7/5117 flows on this device,
 - erase MCU application firmware,
 - flash ST411/5117 firmware,
-- write/re-provision PSK,
+- write or re-provision PSK,
 - publish the factory PSK,
-- upload an unverified config,
+- upload a speculative/unverified config,
 - publish fingerprint images/templates,
+- commit full OTP, process-memory dumps, or reconstructed per-device runtime payloads,
 - assume 5125 == 5135 merely because the Windows INF lists both.
 
 Volatile/read operations and device-specific, evidence-backed runtime configuration work are acceptable.
 
 ## Next task
 
-1. Recover the exact **224-byte** payload sent by Windows command `0x90`, or prove which 224-byte template the ChicagoHS path selects.
-2. Compare it against the DLL template.
-3. Reproduce the six OTP substitutions locally.
-4. Determine/check the config checksum over exactly 224 bytes.
-5. Print the final diff and checksum **without USB writes**.
-6. Only after exact parity is proven, perform one volatile MCU config upload.
-7. Read back state/registers and verify `have config=1` and `0x0220=f80b`.
-8. Then restore factory TLS and test one image frame.
-9. Move the working sequence into a libfprint driver.
+The next blocker is **implementation**, not template identification.
+
+### Phase A — Linux dry-run ChicagoHS config builder
+
+1. Require USB PID `27c6:5135`.
+2. Read and verify firmware; require the expected HC460 family before mutation logic.
+3. Read the 64-byte OTP without printing it by default.
+4. Derive the six ChicagoHS calibration fields.
+5. Start from the proven CFG70 template.
+6. Apply the six logical substitutions.
+7. Recompute the 16-bit checksum.
+8. Require exactly 224 bytes.
+9. Validate only; **do not upload**.
+
+### Phase B — local parity proof
+
+On the original test machine, compare the Linux-built config against the private Windows-derived reference.
+
+Public tests should validate structure and checksum without embedding private per-device material.
+
+### Phase C — controlled volatile upload
+
+Only after exact local parity:
+
+1. perform the understood volatile initialization/reset sequence,
+2. upload the validated 224-byte config with command `0x90`,
+3. query MCU state and verify `have config`,
+4. read back expected calibrated state/registers,
+5. restore the already-proven factory TLS path.
+
+No firmware or PSK writes are required.
+
+### Phase D — capture pipeline
+
+After config + TLS are stable:
+
+- reproduce FDT down/up,
+- request image mode,
+- decode 12-bit wire data,
+- regroup to 80×64 samples,
+- keep fingerprint captures private,
+- integrate into libfprint only after the userspace protocol path is reliable.
