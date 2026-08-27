@@ -1,10 +1,10 @@
 # Current status — 2026-08-27
 
-Target: Goodix USB fingerprint sensor `27c6:5135`, firmware `GF_HC460SEC_APP_12508`, logical chip ID `0x2504`, ChicagoHS sensor type 12, geometry `80x64`.
+Target: Goodix USB fingerprint sensor `27c6:5135`, firmware `GF_HC460SEC_APP_12508`, logical chip ID `0x2504`, ChicagoHS / ChicagoHU sensor type 12.
 
 This document is the canonical current-state checkpoint. Older documents are retained as historical evidence and may describe blockers that have since been resolved.
 
-## End-to-end milestones proven on Linux
+## End-to-end milestones
 
 ```text
 USB transport                                  PASS
@@ -23,10 +23,15 @@ MCU_GET_IMAGE ACK (0x20)                       PASS
 TLS-protected image transport                  PASS
 TLS application-data decrypt                   PASS
 Goodix image framing                           PASS
-12-bit image payload structural split          PROVEN BY LENGTH / upstream slicing
-Image CRC domain                               NEXT
-12-bit -> 5120 pixel decode                    NEXT
-80x64 local image validation                   NEXT
+Windows-compatible image CRC                   PASS (one private capture)
+RAW12 -> 5120 sample decode                     PASS
+ChicagoHU regroup mapping                      PROVEN
+Windows live-image layout                      PROVEN
+ImageBase/live same-index order                PROVEN
+Candidate A: ImageBase stored as downstream    PROVEN
+Candidate B: regroup ImageBase again            REJECTED
+Naive direct PGM                               STRUCTURAL BUT VISUALLY WRONG
+Exact matcher preprocessing                    NEXT
 Matcher/enrollment                             LATER
 libfprint/fprintd integration                  LATER
 ```
@@ -82,20 +87,9 @@ Linux sequence:
 6. Send `0x34` with `0a 02 + 12 FDT-up threshold bytes` from a private Windows trace for this unit.
 7. Receive finger-up event.
 
-Successful observed Linux event metadata:
+The current FDT-up proof uses a private per-unit Windows-traced threshold set; a generic FDT-up derivation remains future work.
 
-```text
-manual IRQ       0x0100
-manual touchflag 0x0000
-finger-down      5/6 or 6/6 zones depending on press
-finger-up IRQ    0x0200
-finger-up flag   0x0000
-finger-up zones  0/6
-```
-
-No fingerprint image is needed to prove FDT.
-
-## First TLS-protected image transport — success
+## TLS image transport and framing
 
 With the finger held after a successful FDT-down event, Linux sent:
 
@@ -104,74 +98,135 @@ COMMAND_MCU_GET_IMAGE = 0x20
 payload               = 01 00
 ```
 
-The sensor returned:
+The sensor returned a normal `0x20` ACK followed by a Goodix transport frame with flags `0xb0`. TLS 1.2 application data decrypted to exactly 7693 bytes.
 
-1. a normal message-protocol ACK for command `0x20`;
-2. a second Goodix pack with transport flags `0xb0`, declared payload length `7722`;
-3. that second payload began directly with a TLS 1.2 application-data record;
-4. OpenSSL decrypted it to exactly `7693` bytes.
-
-The decrypted frame metadata was inspected without printing biometric bytes:
+Proven structural model:
 
 ```text
-total plaintext length = 7693
-command byte           = 0x20
-declared protocol len  = 7690
-protocol trailer       = 0x88
-checksum=True parse    = FAIL
-checksum=False parse   = PASS
-protocol payload len   = 7689
+Goodix protocol header  3
+image metadata          5
+packed RAW12         7680
+image CRC               4
+protocol trailer         1
+--------------------------
+total                 7693
 ```
 
-So image message protocol uses the no-checksum `0x88` trailer path.
+The protocol trailer is `0x88` / no-checksum mode. The old `0xb2` expectation for this second frame was incorrect.
 
-## Image payload structure — strongest current interpretation
+## Windows-compatible image CRC
 
-Upstream `goodix-fp-dump` `driver_51x0.py` passes decrypted image data through:
-
-```python
-tool.decode_image(tls_server.stdout.read(...)[8:-5])
-```
-
-For this exact 5135 frame:
+The Windows image checker uses CRC-32/MPEG-2:
 
 ```text
-7693 - 8 - 5 = 7680
+poly    0x04C11DB7
+init    0xFFFFFFFF
+refin   false
+refout  false
+xorout  0
 ```
 
-and `7680 * 8 / 12 = 5120` pixels, exactly `80*64`.
-
-Therefore the framing is structurally consistent with:
+For the four stored field bytes `[a,b,c,d]`, Windows reconstructs:
 
 ```text
-3 bytes  Goodix protocol header
-5 bytes  image metadata/status
-7680     packed 12-bit pixels
-4 bytes  image CRC
-1 byte   Goodix protocol trailer 0x88
----------------------------------------
-7693 total TLS plaintext
+(c << 24) | (d << 16) | (a << 8) | b
 ```
 
-Equivalently, within the decoded 7689-byte protocol payload:
+The checked domain for the 5135 image path is exactly:
 
 ```text
-5-byte image metadata
-7680-byte packed pixel stream
-4-byte image CRC
+7680 packed RAW12 bytes + 4 stored CRC bytes
 ```
 
-The next task is to determine the exact image CRC32/MPEG input domain and byte order, then run the known 6-byte -> 4-pixel unpacking algorithm locally.
+A private local reimplementation matched one real capture. No image bytes or CRC value were published. A second independent capture is still desirable as cross-capture confirmation.
+
+## RAW12 and ChicagoHU regroup
+
+The 7680 packed bytes decode to exactly 5120 12-bit samples.
+
+Keep the geometry distinction explicit:
+
+```text
+packed transport : 64 fast x 80 slow
+samples          : 5120
+Chicago output   : 80 columns x 64 rows
+16-bit plane     : 10240 bytes
+```
+
+The Windows-compatible Chicago regroup mapping is:
+
+```text
+dst = (n % 64) * 80 + (n / 64)
+```
+
+The mapping is proven from Windows disassembly and agrees with the public ChicagoHU implementation in upstream research.
+
+## Windows ImageBase/live layout — now proven end-to-end
+
+The 0x2504 family path selects family/type `0x0c` and initializes the Chicago object at `0x180588dc0`.
+
+The initializer installs full-image callback `0x1800289f8` at `object + 0x13d48`.
+
+On a full 5135 image, that callback:
+
+1. checks image CRC;
+2. selects packed length `0x1e00` (7680);
+3. calls `0x180023e38` to decode/regroup into a temporary 16-bit plane;
+4. copies that plane into the pointer stored at `object + 0x13cc0`.
+
+The key identity is:
+
+```text
+0x180588dc0 + 0x13cc0 = 0x18059ca80
+```
+
+`0x18059ca80` is the runtime live-image buffer pointer allocated by the common layer. Therefore the Chicago callback writes its regrouped full-image output into the exact live-image buffer later copied into the capture routine.
+
+The capture routine then compares that live image with persisted ImageBase from runtime slot `0x18059ca88` using the same pixel index. The persisted ImageBase load/save paths copy the 10240-byte image plane directly and do not apply another regroup.
+
+Therefore:
+
+```text
+Candidate A: persisted ImageBase is already in the downstream regrouped layout  PROVEN
+Candidate B: regroup persisted ImageBase again                                  WRONG
+```
+
+Detailed proof: `docs/WINDOWS_IMAGE_LAYOUT_5135_PROOF_2026-08-27.md`.
+
+## Detector/classifier role
+
+The base/live classifier computes same-index tile statistics and directional pixel differences. Windows labels its return states:
+
+```text
+0 = temperature
+1 = finger down
+2 = void
+3 = bad
+```
+
+It is a base/live detector/classifier, not the final matcher-image preprocessing stage.
+
+## Current blocker / immediate next task
+
+Transport, CRC, RAW12 decoding, spatial regroup, and ImageBase/live relative ordering are no longer the blocker.
+
+The current task is to trace the post-detection callback used by the capture path, especially runtime slot `0x18059cb60`, and prove the exact image preparation before the matcher/feature extractor:
+
+- subtraction direction;
+- clamp/saturation;
+- scaling/normalization;
+- per-pixel correction;
+- crop/output dimensions;
+- possible `goodix_calib.dat` involvement;
+- exact matcher input buffer.
 
 ## Privacy state
 
-The first decrypted image capture was saved locally/private with mode `0600`. It must not be committed, uploaded, pasted, hashed publicly, or attached to issues.
+Private captures and calibration material remain local-only. Never publish or request:
 
-Do not publish:
-
-- factory PSK or any PSK file/hash;
+- plaintext factory PSK or any PSK file/hash;
 - full OTP;
-- full 224-byte unit-specific runtime config or its unit-specific hash;
+- full 224-byte unit-specific runtime config or its private hash;
 - `goodix.dat`, `goodix_calib.dat`, `Goodix_Cache.bin`;
 - fingerprint images, raw captures, templates;
 - proprietary Goodix Windows binaries;
