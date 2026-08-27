@@ -12,7 +12,8 @@ Firmware:    GF_HC460SEC_APP_12508
 Chip ID:     raw a2042500 / logical 0x2504
 Profile:     ChicagoHS / ChicagoHU
 Sensor type: 12
-Geometry:    80 x 64
+Packed axis: 64 fast x 80 slow
+Output plane:80 columns x 64 rows
 Pixels:      5120
 USB bulk IN: 0x81
 USB bulk OUT:0x01
@@ -20,62 +21,153 @@ USB bulk OUT:0x01
 
 ## Current state — do not repeat solved work
 
-As of 2026-08-27 the project is **past config, TLS, FDT, and first image transport**.
+As of 2026-08-27 the project is **past config, TLS, FDT, image transport, image CRC, RAW12 decode, ChicagoHU regroup, and ImageBase/live spatial-order proof**.
 
 ```text
-CFG70 reconstruction            DONE
-command 0x90 upload             DONE
-factory TLS                     DONE
-verified activation sequence    DONE
-FDT manual 0x36                 DONE
-FDT-down 0x32                   DONE
-FDT-up 0x34                     DONE
-image command 0x20 ACK          DONE
-TLS image transport             DONE
-TLS image decrypt               DONE
-image Goodix framing            DONE
-CRC range / image decode        NEXT
+CFG70 reconstruction              DONE
+command 0x90 upload               DONE
+factory TLS                       DONE
+verified activation sequence      DONE
+FDT manual 0x36                   DONE
+FDT-down 0x32                     DONE
+FDT-up 0x34                       DONE
+image command 0x20 ACK            DONE
+TLS image transport               DONE
+TLS image decrypt                 DONE
+Goodix image framing              DONE
+Windows-compatible image CRC      DONE (one private capture)
+RAW12 -> 5120 samples             DONE
+ChicagoHU regroup                 PROVEN
+ImageBase/live relative layout    PROVEN
+Candidate A                       PROVEN
+Candidate B double-regroup        REJECTED
+exact matcher preprocessing       NEXT
 ```
 
 Read first:
 
 1. `docs/CURRENT_STATUS_2026-08-27.md`
-2. `docs/IMAGE_TRANSPORT_5135_PROOF_2026-08-27.md`
-3. `docs/FDT_5135_PROOF_2026-08-27.md`
-4. `docs/LINUX_CFG70_UPLOAD_PROOF_2026-08-27.md`
-5. `docs/FAILURES_AND_RECOVERIES_2026-08-27.md`
-6. `docs/SAFETY.md`
-7. `docs/DEVELOPER_ROADMAP.md`
+2. `docs/WINDOWS_IMAGE_LAYOUT_5135_PROOF_2026-08-27.md`
+3. `docs/IMAGE_TRANSPORT_5135_PROOF_2026-08-27.md`
+4. `docs/FDT_5135_PROOF_2026-08-27.md`
+5. `docs/LINUX_CFG70_UPLOAD_PROOF_2026-08-27.md`
+6. `docs/FAILURES_AND_RECOVERIES_2026-08-27.md`
+7. `docs/SAFETY.md`
+8. `docs/DEVELOPER_ROADMAP.md`
 
 ## Immediate next task
 
-A private local TLS plaintext capture already exists on the user's machine. **Do not ask the user to upload it.**
+**Stop investigating transport and stop re-proving ImageBase orientation.**
 
-Its safe metadata is:
+The current target is the Windows post-detection image-preparation path before the matcher/feature extractor.
+
+The capture path calls runtime callback slot `0x18059cb60` with the runtime object, persisted ImageBase, captured live image, and a mode/flag byte. Resolve who registers `0x18059cb60`, inspect its concrete target, and prove the actual image processing it performs.
+
+Need exact proof, if present, for:
+
+1. baseline subtraction direction;
+2. clamp/saturation rules;
+3. normalization/gain scaling;
+4. per-pixel calibration/noise correction;
+5. crop/output dimensions;
+6. any role of `goodix_calib.dat`;
+7. exact buffer handed to matcher/feature extraction.
+
+## Windows live-image layout proof — critical checkpoint
+
+For logical chip `0x2504`, the family path selects type `0x0c` and initializes the Chicago object at `0x180588dc0`.
+
+The initializer at `0x1800266a4` installs full-image callback:
 
 ```text
-total plaintext       7693 bytes
-command               0x20
-declared protocol len 7690
-protocol trailer      0x88
-protocol checksum     disabled / 0x88 mode
-protocol payload      7689 bytes
+object + 0x13d48 -> 0x1800289f8
 ```
 
-Upstream `driver_51x0.py` uses decrypted image slice `[8:-5]`. For this frame that produces exactly `7680` packed bytes, which is exactly `5120 * 12 / 8`.
+Inside that callback, after image CRC success:
 
-Therefore next:
+```text
+packed length 0x1e00
+    -> 0x180023e38 decode/regroup
+    -> temporary 16-bit plane
+    -> copy into pointer at object + 0x13cc0
+```
 
-1. run `scripts/inspect_private_image_capture_5135.py` against the private local capture;
-2. determine the exact 4-byte image CRC32/MPEG domain/endian;
-3. require CRC PASS before calling the image format fully proven;
-4. decode the 7680 bytes using the known 6-byte -> 4x12-bit algorithm;
-5. write an 80x64 PGM locally/private and visually inspect it locally;
-6. never upload/paste the image or capture.
+The key identity is:
+
+```text
+0x180588dc0 + 0x13cc0 = 0x18059ca80
+```
+
+`0x18059ca80` is the common runtime live-image buffer pointer. Thus the Chicago callback writes regrouped output into the exact buffer later copied into the capture routine.
+
+The capture routine compares that live plane with persisted ImageBase from `0x18059ca88` using identical indices. ImageBase load/save does not apply another regroup.
+
+Therefore:
+
+```text
+Candidate A: ImageBase already stored in downstream regrouped order  PROVEN
+Candidate B: regroup ImageBase again                                 WRONG
+```
+
+## ChicagoHU geometry
+
+Do not conflate packed transport orientation with downstream plane orientation.
+
+```text
+packed stream: 64 fast x 80 slow
+samples:       5120
+packed bytes:  7680
+output plane:  80 columns x 64 rows
+u16 bytes:     10240
+```
+
+Proven regroup mapping:
+
+```text
+dst = (n % 64) * 80 + (n / 64)
+```
+
+## Detector/classifier — solved enough
+
+Wrapper `0x180023acc` reaches classifier `0x180022178`.
+
+It compares ImageBase and live image at the same pixel index, computes tile statistics and directional differences, and Windows logs label its numeric returns:
+
+```text
+0 = temperature
+1 = finger down
+2 = void
+3 = bad
+```
+
+This is a base/live detector/classifier, **not** the final matcher preprocessing output routine. Do not spend more time reverse engineering it unless required by a later dependency.
+
+## Image CRC
+
+Windows-compatible image integrity rule is proven on one private capture:
+
+```text
+CRC-32/MPEG-2
+poly    0x04C11DB7
+init    0xFFFFFFFF
+refin   false
+refout  false
+xorout  0
+```
+
+For stored bytes `[a,b,c,d]`, Windows reconstructs:
+
+```text
+(c << 24) | (d << 16) | (a << 8) | b
+```
+
+CRC domain is the 7680 packed RAW12 bytes; checker input block is packed RAW12 + 4-byte stored CRC (`7684` bytes total).
+
+A second independent private capture is desirable as cross-capture confirmation, but it is not the current blocker.
 
 ## Verified 5135 activation sequence
 
-When `enable_chip(True)` times out or register 0 reads `06000000`, use the **tested sequence** rather than assuming hardware damage:
+When `enable_chip(True)` times out or register 0 reads `06000000`, use the tested sequence rather than assuming hardware damage:
 
 ```text
 NOP
@@ -105,27 +197,20 @@ The factory host PSK was recovered privately from the user's own Windows DPAPI-p
 The original config blocker is solved.
 
 - Windows upload length: exactly 224 bytes (`0xe0`).
-- Correct static family: CFG70, not inferred from command number but proven by private exact parity.
+- Correct static family: CFG70.
 - Linux rebuild from live OTP matched the private Windows runtime reference byte-for-byte.
 - Config checksum rule is proven.
 - One controlled Linux `0x90` upload was accepted and post-upload calibration verified.
 - Do not publish the full unit-specific runtime config or its private hash.
 
-Public proof chain:
-
-- `docs/CFG70_RUNTIME_PROOF_2026-08-27.md` — Windows runtime reconstruction proof.
-- `docs/ISSUE_1_RESOLUTION_2026-08-27.md` — original config blocker closure.
-- `docs/LINUX_CFG70_UPLOAD_PROOF_2026-08-27.md` — Linux build/upload proof and limitations.
-
 ## FDT
 
-- `goodix.dat` layout: `OTP64 + FDT12 + NAV3200 + IMAGE10240 + CRC4`.
-- FDT12 is six duplicated manual seed bytes.
-- manual `0x36`: `0d01 + seed12`.
-- manual event: IRQ/touchflag/six u16 zone values.
-- down thresholds: `floor(raw/2)`, encoded as six `80 xx` pairs.
-- down `0x32`: `0801 + regs12 + timestampLE`.
-- up `0x34`: `0a02 + regs12`.
+- private `goodix.dat` layout: `OTP64 + FDT12 + NAV3200 + IMAGE10240 + CRC4`;
+- FDT12 is six duplicated manual seed bytes;
+- manual `0x36`: `0d01 + seed12`;
+- down thresholds: `floor(raw/2)`, encoded as six `80 xx` pairs;
+- down `0x32`: `0801 + regs12 + timestampLE`;
+- up `0x34`: `0a02 + regs12`;
 - current FDT-up success uses a private Windows-traced per-unit threshold set; generic derivation remains future work.
 
 ## Image transport facts
@@ -169,4 +254,4 @@ A runtime config upload (`0x90`) is a volatile MCU write. Describe it accurately
 
 ## Working style
 
-The user prefers one terminal block at a time and pastes output. Avoid unnecessary questions. Preserve successful checkpoints in this repository frequently so a chat/session limit cannot destroy progress.
+The user prefers one terminal block at a time and pastes output. Avoid unnecessary questions. Preserve decisive checkpoints in this repository so a chat/session limit cannot destroy progress.
