@@ -4,7 +4,9 @@ Date: 2026-08-27
 
 ## Scope
 
-This proves USB command transport, TLS transport, TLS decryption, Goodix image-message framing, packed RAW12 decoding, and a Windows-compatible image CRC check for one local capture. It does not publish or include biometric bytes, CRC values, OTP, PSK material, or per-unit runtime configuration.
+This proves USB command transport, TLS transport, TLS decryption, Goodix image-message framing, packed RAW12 decoding, and a Windows-compatible image CRC check for one local capture. Follow-up Windows static analysis has also proven the downstream ChicagoHU live-image layout and its same-index relationship with persisted ImageBase.
+
+It does not publish or include biometric bytes, CRC values, OTP, PSK material, private calibration data, or per-unit runtime configuration.
 
 ## Windows reference behavior
 
@@ -127,18 +129,73 @@ No image bytes, pixel values, CRC values, or private hashes were printed or comm
 
 ### Confidence note
 
-The indirect image-checker function pointer is populated at runtime in a BSS-backed slot, so its exact static target could not be read directly from the PE file. However, the reconstructed Windows checker, its CRC implementation, the image-path pointer/length arithmetic, and the successful real-capture comparison all agree. A second independent capture is still recommended as a cross-capture confirmation before treating the field layout as invariant across every firmware/unit.
+The CRC field/layout match is currently confirmed on one real private capture. A second independent capture is recommended as a cross-capture confirmation before treating the field layout as invariant across every firmware/unit. It is no longer the immediate blocker for this device.
+
+## Windows ChicagoHU spatial-layout follow-up
+
+Subsequent static analysis closed the live-image orientation question for logical chip `0x2504`.
+
+The 0x2504 family path initializes the Chicago object at `0x180588dc0` and installs full-image callback `0x1800289f8` at `object + 0x13d48`.
+
+On CRC success that callback:
+
+```text
+packed RAW12 length 0x1e00
+    -> 0x180023e38 decode/regroup
+    -> temporary 16-bit image plane
+    -> copy into pointer at object + 0x13cc0
+```
+
+The key address identity is:
+
+```text
+0x180588dc0 + 0x13cc0 = 0x18059ca80
+```
+
+`0x18059ca80` is the runtime live-image buffer pointer allocated by the common capture layer. Therefore the Chicago full-image callback writes directly into the exact live-image buffer later consumed by capture.
+
+The proven regroup mapping is:
+
+```text
+dst = (n % 64) * 80 + (n / 64)
+```
+
+with:
+
+```text
+packed transport : 64 fast x 80 slow
+Chicago output   : 80 columns x 64 rows
+samples          : 5120
+u16 output bytes : 10240
+```
+
+The capture-side detector compares this live plane against persisted ImageBase at the same pixel index. Persisted ImageBase load/save does not apply another regroup.
+
+Therefore:
+
+```text
+Candidate A: ImageBase already in downstream regrouped order  PROVEN
+Candidate B: regroup ImageBase again                           REJECTED
+```
+
+Detailed proof: `docs/WINDOWS_IMAGE_LAYOUT_5135_PROOF_2026-08-27.md`.
 
 ## Safety gate for local image output
 
-The public private-capture inspector now refuses `--write-pgm` unless the Windows-compatible image CRC check passes. This prevents visual decoding of a frame that failed integrity verification.
+The public private-capture inspector refuses `--write-pgm` unless the Windows-compatible image CRC check passes. This prevents visual decoding of a frame that failed integrity verification.
 
-The repository must never contain the capture itself, a fingerprint image, raw/template biometric data, PSK/OTP material, or private per-unit configuration.
+The repository must never contain the capture itself, a fingerprint image, raw/template biometric data, PSK/OTP material, private calibration data, or private per-unit configuration.
 
-## Next proof
+## Current next proof
 
-1. confirm the same CRC rule on a second independent private capture;
-2. write a private `80x64` PGM only after CRC verification passes;
-3. visually validate locally without uploading the image;
-4. determine the ChicagoHU regroup/orientation expected by the downstream matcher;
-5. integrate the proven image path into the libfprint driver without changing firmware or factory PSK state.
+Transport, image CRC, RAW12 decode, regroup, and ImageBase/live relative spatial ordering are solved for the current research stage.
+
+The next task is to resolve the post-detection Windows callback used before matcher/feature extraction, especially runtime slot `0x18059cb60`, and prove the exact preprocessing behavior:
+
+1. subtraction direction;
+2. clamp/saturation;
+3. normalization/gain scaling;
+4. per-pixel calibration/noise correction;
+5. crop/output dimensions;
+6. possible `goodix_calib.dat` involvement;
+7. exact matcher input buffer.
