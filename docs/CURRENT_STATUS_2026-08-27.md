@@ -30,8 +30,10 @@ Windows live-image layout                      PROVEN
 ImageBase/live same-index order                PROVEN
 Candidate A: ImageBase stored as downstream    PROVEN
 Candidate B: regroup ImageBase again            REJECTED
+Post-detection callback target                 PROVEN (0x180013280)
+gfusb.dll image request handoff boundary       PROVEN
 Naive direct PGM                               STRUCTURAL BUT VISUALLY WRONG
-Exact matcher preprocessing                    NEXT
+Higher-layer matcher preprocessing             NEXT
 Matcher/enrollment                             LATER
 libfprint/fprintd integration                  LATER
 ```
@@ -161,7 +163,7 @@ dst = (n % 64) * 80 + (n / 64)
 
 The mapping is proven from Windows disassembly and agrees with the public ChicagoHU implementation in upstream research.
 
-## Windows ImageBase/live layout — now proven end-to-end
+## Windows ImageBase/live layout — proven end-to-end
 
 The 0x2504 family path selects family/type `0x0c` and initializes the Chicago object at `0x180588dc0`.
 
@@ -182,7 +184,7 @@ The key identity is:
 
 `0x18059ca80` is the runtime live-image buffer pointer allocated by the common layer. Therefore the Chicago callback writes its regrouped full-image output into the exact live-image buffer later copied into the capture routine.
 
-The capture routine then compares that live image with persisted ImageBase from runtime slot `0x18059ca88` using the same pixel index. The persisted ImageBase load/save paths copy the 10240-byte image plane directly and do not apply another regroup.
+The capture routine compares that live image with persisted ImageBase from runtime slot `0x18059ca88` using the same pixel index. The persisted ImageBase load/save paths copy the 10240-byte image plane directly and do not apply another regroup.
 
 Therefore:
 
@@ -206,11 +208,29 @@ The base/live classifier computes same-index tile statistics and directional pix
 
 It is a base/live detector/classifier, not the final matcher-image preprocessing stage.
 
+## Post-detection callback and gfusb.dll handoff boundary
+
+Runtime slot `0x18059cb60` is registered through setter `0x1800621b8`. The concrete callback registered into that slot is `0x180013280`.
+
+Capture call sites invoke it with the effective shape:
+
+```text
+callback(context, ImageBase, live_image, flags)
+```
+
+Static analysis of `0x180013280` proves that it copies the ImageBase and live 10240-byte planes into a large result package and fills metadata. It does not perform per-pixel subtraction, normalization, clamping, or cropping before submission.
+
+The package is then handed to `0x18001393c` with total result size `0xeb88` and payload size `0xeb70`.
+
+`0x18001393c` is a generic pending-request completion helper. On the success path it copies the `0xeb70` payload into the request output buffer at offset `+0x14`, completes the request via `0x18001d64c`, then clears the pending request/output pointers. Other call sites use the same helper for Windows error completions, confirming this role.
+
+Therefore the examined `gfusb.dll` path hands the two already-regrouped image planes to a higher Windows component without matcher preprocessing in the post-detection callback.
+
 ## Current blocker / immediate next task
 
-Transport, CRC, RAW12 decoding, spatial regroup, and ImageBase/live relative ordering are no longer the blocker.
+Do not keep searching the detector, `0x180013280`, or `0x18001393c` for matcher arithmetic.
 
-The current task is to trace the post-detection callback used by the capture path, especially runtime slot `0x18059cb60`, and prove the exact image preparation before the matcher/feature extractor:
+The next task is to identify the Windows user-mode/biometric component that opens this driver interface and consumes the `0xeb88` image result. Trace the two 10240-byte 80x64 `u16` planes from that consumer into the actual matcher/feature extractor and prove, if present:
 
 - subtraction direction;
 - clamp/saturation;
