@@ -1,0 +1,30 @@
+# Secrets
+*psk*
+Goodix_Cache.bin
+
+# Device-specific calibration / proprietary blobs
+goodix.dat
+goodix_calib.dat
+*.evtx
+*.dll
+*.exe
+*.cat
+
+# Biometric data
+*.pgm
+*.pnm
+*.raw
+*.bin
+fingerprint*
+template*
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Local analysis output
+*-messages.txt
+*-events.txt
+config-candidate-*
+*.log
