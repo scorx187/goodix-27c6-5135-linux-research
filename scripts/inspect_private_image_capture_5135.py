@@ -2,11 +2,16 @@
 """Inspect/decode a PRIVATE decrypted Goodix 27c6:5135 image capture.
 
 The input file is expected to be TLS plaintext saved locally from a successful
-command-0x20 capture. The script never prints image bytes or pixel values.
+command-0x20 capture. The script never prints image bytes, pixel values, or CRC
+values.
 
-It reports framing, tests several CRC32/MPEG candidate domains/byte orders,
-and can decode the 7680-byte packed plane to a local PGM only when explicitly
-requested.
+For the 5135 image path, the Windows driver checks a 7684-byte block containing
+7680 packed RAW12 bytes followed by a 4-byte CRC field. The CRC algorithm is
+CRC-32/MPEG-2 (poly 0x04C11DB7, init 0xFFFFFFFF, non-reflected, xorout 0), and
+the four stored bytes use the 16-bit-half-swapped ordering reconstructed from
+the Windows checker.
+
+A private PGM can be written only after the Windows-compatible CRC check passes.
 """
 
 from __future__ import annotations
@@ -19,11 +24,14 @@ WIDTH = 80
 HEIGHT = 64
 PIXELS = WIDTH * HEIGHT
 PACKED_LEN = PIXELS * 12 // 8
+CRC_LEN = 4
+IMAGE_BLOCK_LEN = PACKED_LEN + CRC_LEN
 TOTAL_LEN = 7693
 PROTO_PAYLOAD_LEN = 7689
 
 
 def crc32_mpeg(data: bytes) -> int:
+    """CRC-32/MPEG-2: poly 0x04C11DB7, init FFFFFFFF, no reflection/xorout."""
     crc = 0xFFFFFFFF
     poly = 0x04C11DB7
     for byte in data:
@@ -34,6 +42,20 @@ def crc32_mpeg(data: bytes) -> int:
             else:
                 crc = (crc << 1) & 0xFFFFFFFF
     return crc
+
+
+def windows_image_crc_value(stored: bytes) -> int:
+    """Reconstruct the 32-bit chip CRC exactly as the Windows checker does.
+
+    For stored bytes [a, b, c, d], the Windows checker forms:
+        c<<24 | d<<16 | a<<8 | b
+
+    Equivalently, the stored field is the CRC's two 16-bit halves swapped.
+    """
+    if len(stored) != CRC_LEN:
+        raise ValueError("image CRC field must be exactly 4 bytes")
+    a, b, c, d = stored
+    return (c << 24) | (d << 16) | (a << 8) | b
 
 
 def decode_12bit(data: bytes) -> list[int]:
@@ -90,36 +112,30 @@ def main() -> int:
         raise SystemExit("unexpected protocol payload length")
 
     meta = payload[:5]
-    packed = payload[5:-4]
-    stored_crc = payload[-4:]
+    image_block = payload[5:]
+    if len(image_block) != IMAGE_BLOCK_LEN:
+        raise SystemExit("unexpected Windows image-checker block length")
+
+    packed = image_block[:-CRC_LEN]
+    stored_crc = image_block[-CRC_LEN:]
 
     print("Command                : 0x20")
     print("Protocol trailer       : 0x88")
     print("Image metadata length  :", len(meta))
+    print("Windows checker block  :", len(image_block))
     print("Packed image length    :", len(packed))
     print("Image CRC length       :", len(stored_crc))
     print("Biometric bytes printed: NO")
+    print("CRC values printed     : NO")
 
-    candidates = {
-        "packed-only": packed,
-        "metadata+packed": meta + packed,
-        "protocol-payload-without-crc": payload[:-4],
-    }
-    matches = []
-    for name, blob in candidates.items():
-        calc = crc32_mpeg(blob)
-        if stored_crc == calc.to_bytes(4, "little"):
-            matches.append(name + " / little-endian")
-        if stored_crc == calc.to_bytes(4, "big"):
-            matches.append(name + " / big-endian")
+    host_crc = crc32_mpeg(packed)
+    chip_crc = windows_image_crc_value(stored_crc)
+    crc_ok = host_crc == chip_crc
 
-    if matches:
-        print("CRC32/MPEG candidate   : PASS")
-        for match in matches:
-            print("CRC match domain       :", match)
-    else:
-        print("CRC32/MPEG candidate   : NO MATCH")
-        print("CRC domain remains     : unresolved")
+    print("CRC algorithm           : CRC-32/MPEG-2")
+    print("CRC domain              : packed RAW12 only (7680 bytes)")
+    print("CRC field ordering      : 16-bit-half swapped")
+    print("Windows image CRC check :", "PASS" if crc_ok else "FAIL")
 
     pixels = decode_12bit(packed)
     print("Decoded pixels         :", len(pixels))
@@ -127,13 +143,15 @@ def main() -> int:
     print("12-bit range check     : PASS")
 
     if args.write_pgm:
+        if not crc_ok:
+            raise SystemExit("refusing PGM write because Windows image CRC verification failed")
         private_write_pgm(args.write_pgm, pixels)
         print("Private PGM written    :", args.write_pgm)
         print("PGM mode               : 0600")
     else:
         print("PGM written            : NO")
 
-    return 0
+    return 0 if crc_ok else 2
 
 
 if __name__ == "__main__":
