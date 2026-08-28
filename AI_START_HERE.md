@@ -24,20 +24,19 @@ USB bulk OUT:0x01
 Read first:
 
 1. `docs/CURRENT_STATUS_2026-08-28.md`
-2. `docs/RELEASE_READINESS_AND_SAFETY_GATES.md`
-3. `docs/DEVELOPER_ROADMAP.md`
-4. `docs/WINDOWS_IMAGE_LAYOUT_5135_PROOF_2026-08-27.md`
-5. `docs/IMAGE_TRANSPORT_5135_PROOF_2026-08-27.md`
-6. `docs/FDT_5135_PROOF_2026-08-27.md`
-7. `docs/LINUX_CFG70_UPLOAD_PROOF_2026-08-27.md`
-8. `docs/FAILURES_AND_RECOVERIES_2026-08-27.md`
-9. `docs/SAFETY.md`
+2. `docs/CHICAGO_PREPROCESS_CORE_2026-08-28.md`
+3. `docs/RELEASE_READINESS_AND_SAFETY_GATES.md`
+4. `docs/DEVELOPER_ROADMAP.md`
+5. `docs/WINDOWS_IMAGE_LAYOUT_5135_PROOF_2026-08-27.md`
+6. `docs/IMAGE_TRANSPORT_5135_PROOF_2026-08-27.md`
+7. `docs/FDT_5135_PROOF_2026-08-27.md`
+8. `docs/LINUX_CFG70_UPLOAD_PROOF_2026-08-27.md`
+9. `docs/FAILURES_AND_RECOVERIES_2026-08-27.md`
+10. `docs/SAFETY.md`
 
-Older current-status/handoff documents are historical evidence and may describe blockers that have already been solved.
+Older current-status/handoff documents are historical evidence and may describe blockers already solved.
 
 ## Current state — do not repeat solved work
-
-The project is **past config, TLS, FDT, image transport, image CRC, RAW12 decode, ChicagoHU regroup, ImageBase/live layout proof, gfusb.dll result packaging/handoff, Windows algorithm selection, and the outer Chicago preprocessor routine boundary**.
 
 ```text
 CFG70 reconstruction                         DONE
@@ -59,87 +58,97 @@ Windows engine component                     IDENTIFIED: EngineAdapter.dll
 AlgoChicago preprocessor export              PROVEN: RVA 0x0000b560
 real preprocessor entry                      PROVEN: 0x18000e780
 outer semantic preprocessor routine          PROVEN: 0x18000e780..0x18000e947
-core preprocessing helper                    IDENTIFIED: 0x1800484e0
-exact preprocessing arithmetic               CURRENT TASK
+core preprocessing orchestrator              PROVEN: 0x1800484e0
+first image/state-plane combiner             PROVEN: 0x180044970
+first type-0x0c pixel subtraction            PROVEN
+next preprocessing stage                     CURRENT TASK: 0x180043c40
 matcher/enrollment                           LATER
 libfprint/fprintd integration                 LATER
 release/safety matrix                        FINAL STAGE
 ```
 
+## Most important new proof
+
+`0x1800484e0` copies:
+
+1. the source image into a temporary u16 plane;
+2. a second u16 plane from AlgoChicago internal preprocessing state at `state+0x9924`.
+
+It then calls:
+
+```text
+0x180044970(source_temp, state_plane_temp, result, selector)
+```
+
+For the tested type/family `0x0c`, `0x180044970` takes the selector-`!=4` path and performs the exact first pixel-wise operation:
+
+```text
+diff16[i] = source_u16[i] - state_plane_u16[i]
+```
+
+The vector loop uses `psubw`; the scalar tail uses WORD subtraction. There is no clamp, saturation or gain in this subtraction step.
+
+Later code reads the difference plane with `movsx`, proving it is intentionally interpreted as **signed 16-bit**. Negative differences survive as two's-complement values.
+
+A separate selector-4-only path applies `source - state_plane + 0x0fff`; that is **not** the tested 5135/type-0x0c path.
+
+Important terminology boundary:
+
+- gfusb persisted `ImageBase` layout/order is already proven;
+- AlgoChicago `state+0x9924` is proven to be an internal preprocessing/calibration-state plane;
+- **do not claim these two planes are identical until population/data flow into `state+0x9924` is proven.**
+
+## What `0x180044970` does after subtraction
+
+It also computes block/window statistics over the signed difference plane, derives dynamic threshold-like values, creates/updates a byte mask, contains explicit type-`0x0c` branches, and stores a percentage-like field computed as:
+
+```text
+count * 100 / pixel_count
+```
+
+at result offset `+0x0e`.
+
+Exact semantic names of all threshold/mask fields are still open.
+
 ## Immediate next task
 
-**Do not return to transport, ImageBase orientation, the detector, callback `0x180013280`, request helper `0x18001393c`, or the outer boundary of `0x18000e780` unless a new dependency requires it.**
+**Do not return to transport, ImageBase orientation, gfusb detector, callback `0x180013280`, request helper `0x18001393c`, outer preprocessor boundary, or the first subtraction loop unless a new dependency requires it.**
 
-The current reverse-engineering target is:
-
-```text
-AlgoChicago.dll 0x1800484e0
-```
-
-The complete logical outer `preprocessor_wrapper` implementation is now proven to span four adjacent compiler-split x64 runtime-function regions:
+The next reverse-engineering target is:
 
 ```text
-0x18000e780 .. 0x18000e880
-0x18000e880 .. 0x18000e8e0
-0x18000e8e0 .. 0x18000e91a
-0x18000e91a .. 0x18000e947
+AlgoChicago.dll 0x180043c40
 ```
 
-with the real return at `0x18000e946`.
-
-The outer routine validates state, calls `0x1800484e0`, copies processed bytes from the returned temporary object into its output descriptor, writes quality/coverage bytes, cleans the temporary object, and propagates the core-helper return code.
-
-### Proven outer data-shape facts
-
-- outer argument 1 behaves as a source descriptor: `+0x00` data pointer, `+0x14` size/count;
-- outer argument 4 behaves as result descriptor: `+0x00` destination pointer, `+0x14` output byte count, `+0x28` quality byte, `+0x29` coverage byte;
-- outer argument 5 points to two DWORD outputs: `+0x00` coverage, `+0x04` quality;
-- outer argument 7 is a byte mode selector; value `1` maps to internal mode `0`, otherwise mode `2`;
-- outer argument 6 remains unnamed/unproven;
-- original outer arguments 2 and 3 are forwarded into `0x1800484e0` and must not yet be labeled ImageBase/live/calibration without data-flow proof.
-
-### Proven core-helper call shape
-
-Immediately before `0x1800484e0`:
+Call site from `0x1800484e0`:
 
 ```text
-RCX = &local temporary processed-image object
-RDX = outer_arg1->data
-R8D = outer_arg1->size/count
-R9  = global preprocessor/calibration state 0x18009aa00
-
-stack arg5  = packed global preprocessing configuration bits
-stack arg6  = &global calibrated flag 0x18009a9f4
-stack arg7  = global value 0x18009a9dc
-stack arg8  = outer_arg5 + 4  (quality output)
-stack arg9  = outer_arg5      (coverage output)
-stack arg10 = original outer_arg2
-stack arg11 = original outer_arg3
-stack arg12 = 0
+RCX = copied source u16 image
+RDX = copied internal state+0x9924 u16 plane
+R8D = flag/mode decoded from packed preprocessing config
+R9D = another flag decoded from packed preprocessing config
+stack arg5 = type/selector field (0x0c for tested device)
+stack arg6 = copied result structure produced from 0x180044970 path
 ```
 
-Need exact proof, if present, for:
+Need to prove:
 
-1. meaning of original outer arguments 2 and 3;
-2. exact ImageBase input;
-3. exact live-image input;
-4. calibration state/data consumption;
-5. first pixel-wise transformation;
-6. subtraction direction and signedness;
-7. clamp/saturation;
-8. normalization/gain;
-9. per-pixel correction/noise handling;
-10. crop/grow/output dimensions;
-11. quality/coverage calculations;
-12. exact buffer passed into identification/enrollment.
+1. whether `0x180043c40` consumes or recomputes the signed difference plane;
+2. how it uses the mask/statistics produced by `0x180044970`;
+3. exact normalization/gain/clamp behavior, if any;
+4. crop/grow/geometry effects;
+5. exact output buffer it produces;
+6. how that output reaches the temporary result returned by `0x1800484e0`;
+7. exact matcher/enrollment input;
+8. independently, how `state+0x9924` is populated and whether it derives from gfusb ImageBase.
 
-Do not name unexplained status values such as EngineAdapter's observed special `0x84` result until its producer/meaning is proven from the core algorithm.
+Do not give semantic names to unexplained result codes such as `0x7531`, `0x7532`, `0xc351`, or EngineAdapter's special `0x84` until proven.
 
 ## Windows biometric architecture checkpoint
 
-The installed package configures Windows Biometric Framework with the Windows sensor/storage adapters and Goodix `EngineAdapter.dll` as the vendor engine adapter.
+The installed package uses Windows built-in sensor/storage adapters and Goodix `EngineAdapter.dll` as the vendor engine adapter.
 
-Static EngineAdapter analysis proves family selection includes:
+Static EngineAdapter selection:
 
 ```text
 family 0x03 -> Milan algorithm path
@@ -147,51 +156,49 @@ family 0x0c -> AlgoChicago.dll
 family 0x0e -> AlgoChicagoT.dll
 ```
 
-For this device, logical chip `0x2504` maps to family/type `0x0c`, therefore the active algorithm DLL is `AlgoChicago.dll`.
+For logical chip `0x2504`, active family/type is `0x0c`, therefore the tested algorithm DLL is `AlgoChicago.dll`.
 
-EngineAdapter resolves algorithm functions dynamically through `LoadLibraryW` / `GetProcAddress`, including preprocessing, calibration, sensor check, identify, enroll, and template operations.
+EngineAdapter resolves preprocessing, calibration, sensor check, identify, enroll and template functions dynamically with `LoadLibraryW` / `GetProcAddress`.
 
-This establishes that final preprocessing/matching is above `gfusb.dll`; do not search the USB driver for final matcher arithmetic.
+Final matcher preprocessing therefore lives above `gfusb.dll`.
 
-## Windows live-image layout proof — critical checkpoint
+## Windows live-image layout proof — solved
 
-For logical chip `0x2504`, the family path selects type `0x0c` and initializes the Chicago object at `0x180588dc0`.
+For logical chip `0x2504`, family path selects type `0x0c` and initializes the Chicago object at `0x180588dc0`.
 
-The initializer at `0x1800266a4` installs full-image callback:
+Full-image callback:
 
 ```text
 object + 0x13d48 -> 0x1800289f8
 ```
 
-Inside that callback, after image CRC success:
+After CRC success:
 
 ```text
-packed length 0x1e00
-    -> 0x180023e38 decode/regroup
-    -> temporary 16-bit plane
-    -> copy into pointer at object + 0x13cc0
+packed 0x1e00
+ -> 0x180023e38 decode/regroup
+ -> temporary 16-bit plane
+ -> object + 0x13cc0
 ```
 
-The key identity is:
+Key alias:
 
 ```text
 0x180588dc0 + 0x13cc0 = 0x18059ca80
 ```
 
-`0x18059ca80` is the common runtime live-image buffer pointer. Thus the Chicago callback writes regrouped output into the exact buffer later copied into the capture routine.
+Thus Chicago callback writes regrouped live image directly into the runtime live-image buffer later used by capture.
 
-The capture routine compares that live plane with persisted ImageBase from `0x18059ca88` using identical indices. ImageBase load/save does not apply another regroup.
+Persisted ImageBase is at `0x18059ca88`, and load/save do not apply another regroup.
 
 Therefore:
 
 ```text
-Candidate A: ImageBase already stored in downstream regrouped order  PROVEN
-Candidate B: regroup ImageBase again                                 WRONG
+Candidate A: persisted ImageBase already downstream-regrouped  PROVEN
+Candidate B: regroup ImageBase again                           WRONG
 ```
 
-## ChicagoHU geometry
-
-Do not conflate packed transport orientation with downstream plane orientation.
+## Geometry
 
 ```text
 packed stream: 64 fast x 80 slow
@@ -201,44 +208,15 @@ output plane:  80 columns x 64 rows
 u16 bytes:     10240
 ```
 
-Proven regroup mapping:
+Regroup:
 
 ```text
 dst = (n % 64) * 80 + (n / 64)
 ```
 
-## Detector/classifier — solved enough
-
-Wrapper `0x180023acc` reaches classifier `0x180022178`.
-
-It compares ImageBase and live image at the same pixel index, computes tile statistics and directional differences, and Windows logs label its numeric returns:
-
-```text
-0 = temperature
-1 = finger down
-2 = void
-3 = bad
-```
-
-This is a base/live detector/classifier, **not** the final matcher preprocessing output routine.
-
-## gfusb.dll result handoff — solved
-
-The concrete post-detection callback registered in `0x18059cb60` is `0x180013280`.
-
-It receives the effective shape:
-
-```text
-(context, persisted ImageBase, regrouped live image, flags)
-```
-
-and packages the two image planes with metadata. No final per-pixel matcher preprocessing occurs there.
-
-`0x18001393c` then completes the pending Windows request and hands the result to the higher biometric layer. This boundary is solved; do not spend more time there.
-
 ## Image CRC
 
-Windows-compatible image integrity rule is proven on one private capture:
+Windows-compatible image integrity rule, proven on one private capture:
 
 ```text
 CRC-32/MPEG-2
@@ -249,23 +227,15 @@ refout  false
 xorout  0
 ```
 
-For stored bytes `[a,b,c,d]`, Windows reconstructs:
+Stored field transform and exact domain are documented in the current status / image transport proof. A second independent private capture is desirable before release.
 
-```text
-(c << 24) | (d << 16) | (a << 8) | b
-```
+## Verified activation sequence
 
-CRC domain is the 7680 packed RAW12 bytes; checker input block is packed RAW12 + 4-byte stored CRC (`7684` bytes total).
-
-A second independent private capture is desirable before release as cross-capture confirmation.
-
-## Verified 5135 activation sequence
-
-When `enable_chip(True)` times out or register 0 reads `06000000`, use the tested sequence rather than assuming hardware damage:
+When `enable_chip(True)` times out or register 0 reads `06000000`, use the tested sequence:
 
 ```text
 NOP
-0xd4 TLS_SUCCESSFULLY_ESTABLISHED (transient activation-state command)
+0xd4 TLS_SUCCESSFULLY_ESTABLISHED
 NOP
 0x96 ENABLE_CHIP true
 NOP
@@ -284,27 +254,11 @@ cipher:      PSK-AES128-GCM-SHA256
 identity:    Client_identity
 ```
 
-The factory host PSK was recovered privately from the user's own Windows DPAPI-protected Goodix cache. **Never request, print, commit, or re-provision it.**
+Factory host PSK was recovered privately from the user's own Windows DPAPI-protected Goodix cache. **Never request, print, commit, hash publicly, or re-provision it.**
 
-## CFG70 / command 0x90
+## FDT caveat
 
-- Windows upload length: exactly 224 bytes (`0xe0`).
-- Correct static family: CFG70.
-- Linux rebuild from live OTP matched the private Windows runtime reference byte-for-byte.
-- Config checksum rule is proven.
-- One controlled Linux `0x90` upload was accepted and post-upload calibration verified.
-- Runtime `0x90` is a volatile MCU write; describe it accurately.
-- Do not publish the full unit-specific runtime config or its private hash.
-
-## FDT
-
-- private `goodix.dat` layout: `OTP64 + FDT12 + NAV3200 + IMAGE10240 + CRC4`;
-- FDT12 is six duplicated manual seed bytes;
-- manual `0x36`: `0d01 + seed12`;
-- down thresholds: `floor(raw/2)`, encoded as six `80 xx` pairs;
-- down `0x32`: `0801 + regs12 + timestampLE`;
-- up `0x34`: `0a02 + regs12`;
-- current FDT-up success uses a private Windows-traced per-unit threshold set; generic derivation remains future work.
+Current FDT-up success uses a private Windows-traced per-unit threshold set; generic derivation remains open and should be solved before claiming a broadly reusable upstream driver.
 
 ## Mandatory privacy/safety
 
@@ -324,8 +278,8 @@ Never erase/flash firmware or write/re-provision PSK.
 
 Preserving Windows Hello is a release requirement.
 
-For completion criteria, use `docs/RELEASE_READINESS_AND_SAFETY_GATES.md`. Do not claim universal mathematical `100% safety`; the practical engineering target is **all defined safety gates passed and no known unsafe behavior**.
+For completion criteria, use `docs/RELEASE_READINESS_AND_SAFETY_GATES.md`. Do not claim universal mathematical `100% safety`; practical completion means all defined safety gates pass with no known unsafe behavior.
 
 ## Working style
 
-The user prefers one terminal block at a time and pastes output. Avoid unnecessary questions. Preserve decisive checkpoints in this repository so a chat/session limit cannot destroy progress.
+The user prefers one terminal block at a time and pastes output. Avoid unnecessary questions. Preserve decisive checkpoints in this repository so a session/chat limit cannot destroy progress.
