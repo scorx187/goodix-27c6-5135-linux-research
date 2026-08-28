@@ -13,6 +13,8 @@ EngineAdapter.dll
   -> core helper/orchestrator 0x1800484e0
   -> first image/state-plane combiner 0x180044970
   -> full mask cleanup/filter routine 0x180043c40..0x180043ff6
+  -> post-mask join in 0x1800484e0
+  -> next heavy helper 0x18004aea0
 ```
 
 `0x1800484e0` is a preprocessing orchestrator with many allocations, scratch buffers and specialized helper calls. It is not one simple flat pixel loop.
@@ -180,7 +182,7 @@ Conceptually:
 
 ```text
 axisA_sum[a] = sum(mask[a,b])
-axisB_sum[b] = sum(mask[a,b])
+axisB_sum[b] += mask[a,b]
 ```
 
 The exact physical row/column naming is intentionally deferred until the local dimension fields are tied to physical orientation at this layer.
@@ -258,19 +260,61 @@ mask geometry cleanup
 
 It does **not** perform image normalization, gain, baseline subtraction, or cropping of the image buffer itself.
 
+## Post-mask control flow in `0x1800484e0` — PROVEN
+
+The call to `0x180043c40` occurs at `0x1800489cd` on the branch where the selector is not `0x0b` and the relevant mode/config branch selected the `0x180044970` + `0x180043c40` path.
+
+Immediately after it returns:
+
+```asm
+0x1800489cd call 0x180043c40
+0x1800489d2 jmp  0x180048a43
+```
+
+Therefore `0x1800447d0` and `0x180044010` are **not downstream stages after `0x180043c40`**. They belong to alternative pre-join branches:
+
+- `0x1800447d0` is reached from the selector-`0x0b` branch under the relevant mode/config condition;
+- `0x180044010` is reached from the alternate mode/config branch before the same join;
+- all these branches converge at `0x180048a43`.
+
+For the tested selector/type `0x0c` path that actually executes `0x180043c40`, the next common sequence after the join is bookkeeping/logging and allocation of scratch buffers.
+
+The first substantial downstream helper after that common join is:
+
+```text
+0x18004aea0
+```
+
+called at `0x180048b02`.
+
+Its call site passes a broad set of preprocessing inputs:
+
+```text
+RCX = r14                       # copied source-image-side pointer from orchestrator
+RDX = [rbp-0x50]                # second image/state-side pointer used earlier in pipeline
+R8  = rbx                       # large state/context-derived object
+R9D = global/config DWORD       # 0x1800ec6c8
+stack arg5 = &local/rbp+0x80
+stack arg6 = &local/rbp+0x20
+stack arg7 = &local/rbp+0x50
+stack arg8 = r15                # current mask/statistics result structure
+```
+
+Exact semantic names for every argument remain intentionally open, but this call combines more of the image/state/mask pipeline than the intervening allocation/logging helpers and is therefore the next primary reverse-engineering target.
+
+After `0x18004aea0`, the orchestrator calls `0x1800435a0` with state arrays including offsets `+0x13244` and `+0x1cb64`, so `0x1800435a0` remains a later stage rather than the immediate next target.
+
 ## Immediate next target
 
-Return to `0x1800484e0` and identify the **next active helper call after `0x180043c40` for selector/type `0x0c`**.
+Reverse-engineer `0x18004aea0` first.
 
-Do not guess from the remaining helper list. Extract the call-site order and branch conditions around the `0x180043c40` call, then select the next helper that is definitely on the tested type-0x0c path.
+Goals:
 
-For that next helper, determine whether it:
-
-1. consumes the signed difference plane or source image;
-2. consumes the cleaned mask;
-3. performs normalization/gain/clamp;
-4. creates a cropped/grown image;
-5. writes the actual processed-image buffer returned to the outer preprocessor.
+1. establish its complete logical function boundary, including any compiler-split unwind regions;
+2. identify which arguments are source image, calibration/state plane, cleaned mask/statistics structure, and scratch/output buffers;
+3. locate any per-pixel loops and determine whether they operate on `u16`, signed `s16`, bytes, or floats;
+4. prove whether this helper performs normalization, gain, clamp, local contrast correction, crop/grow, or some other transform;
+5. identify the exact output buffer(s) consumed by `0x1800435a0` and later matcher-facing stages.
 
 Separately, continue tracing how `state+0x9924` is initialized before calling it equivalent to gfusb ImageBase.
 
@@ -278,7 +322,7 @@ Separately, continue tracing how `state+0x9924` is initialized before calling it
 
 - two internal state arrays at offsets `+0x1cb64` and `+0x217f4` are zeroed for `pixel_count` bytes before later stages;
 - temporary structures/buffers include sizes `0x4ca0`, `0x4fc4`, and `2 * pixel_count`;
-- later stages call helpers including `0x18004aea0`, `0x1800435a0`, `0x180046930`, `0x1800441c0`, `0x1800547c0`, and `0x180010720`;
+- later stages call helpers including `0x1800435a0`, `0x180046930`, `0x1800441c0`, `0x1800547c0`, and `0x180010720`;
 - allocation failure returns `0x80000004`;
 - unexplained status values such as `0x7531`, `0x7532`, `0xc351`, and EngineAdapter's special `0x84` remain intentionally unnamed until their semantics are proven.
 
