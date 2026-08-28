@@ -17,8 +17,6 @@ EngineAdapter.dll
  -> 0x18004aea0
 ```
 
-The alternative helpers `0x1800447d0` and `0x180044010` occur on pre-join branches and are not downstream stages after the tested `0x180043c40` path.
-
 ## Exact function boundary
 
 The PE x64 runtime-function table gives:
@@ -26,120 +24,237 @@ The PE x64 runtime-function table gives:
 ```text
 RVA 0x0004aea0 .. 0x0004b289
 size 0x3e9 = 1001 bytes
+normal return = 0x18004b288
 ```
 
-Normal return is at `0x18004b288`.
+## Exact stack/original-argument recovery
 
-## Call-site argument mapping
-
-At the proven call site `0x180048b02`:
+After the seven register pushes and `sub rsp,0x70`, the original Windows x64 arguments are recoverable as:
 
 ```text
-RCX        = r14
-RDX        = [rbp-0x50]
-R8         = rbx
-R9D        = global/config DWORD at 0x1800ec6c8
-stack arg5 = &local at rbp+0x80
-stack arg6 = &local at rbp+0x20
-stack arg7 = &local at rbp+0x50
-stack arg8 = r15
+[rsp+0xb0] = original RCX  = arg1
+[rsp+0xc0] = original R8   = arg3
+[rsp+0xc8] = original R9D  = arg4
+[rsp+0xd0] = stack arg5
+[rsp+0xd8] = stack arg6   (later reused as a local scratch slot)
+[rsp+0xe0] = stack arg7
+[rsp+0xe8] = stack arg8
 ```
 
-Inside `0x18004aea0`, the third register argument (`R8`) is treated as a large state/context object: the routine derives pointers at offsets including `+0x13244` and `+0x4` from it. Exact semantic names for all arguments remain intentionally open.
+The original `RDX` is preserved immediately in `r12`.
 
-The seventh argument is a structure whose fields at `+0`, `+4`, `+8`, `+0x0c`, `+0x10`, and `+0x18` control dimensions/modes/selectors. Do not rename these fields until their producers/consumers are fully tied together.
-
-## Three full-size 16-bit scratch planes — PROVEN
-
-The routine multiplies two dimension fields, doubles the product, and performs three allocations of that byte count.
-
-Conceptually:
+At the known call site from `0x1800484e0`:
 
 ```text
-pixel_count = dimensionA * dimensionB
-scratch_bytes = pixel_count * 2
-allocate scratch_bytes
-allocate scratch_bytes
-allocate scratch_bytes
+arg1 = source-image-side u16 plane
+arg2 = second image/state-side pointer from the orchestrator
+arg3 = large AlgoChicago state/context object
+arg4 = configuration/global DWORD
+arg5 = caller-owned descriptor/work structure
+arg6 = optional structure containing two caller-visible output pointers
+arg7 = geometry/mode/type structure
+arg8 = cleaned mask/statistics result structure
 ```
 
-Therefore this stage operates heavily on full-image 16-bit planes rather than only scalar quality metadata.
+Exact semantic names remain intentionally conservative where not required by the data flow.
 
-One of the allocated full-size buffers receives a byte-for-byte copy of the original first argument through the common copy helper before further processing.
+## Geometry and three temporary u16 planes — PROVEN
 
-## Tested type-0x0c branch is active
+The routine reads `arg7+0` and `arg7+4`, multiplies them, doubles the product, and allocates that many bytes three times:
 
-The function examines a selector field at structure offset `+0x18` against bit mask:
+```text
+plane_words = *(u32 *)(arg7+0) * *(u32 *)(arg7+4)
+plane_bytes = plane_words * 2
+
+scratch_A = alloc(plane_bytes)
+scratch_B = alloc(plane_bytes)
+scratch_C = alloc(plane_bytes)
+```
+
+`scratch_C` receives a byte-for-byte copy of the original `arg1` source plane.
+
+The `arg5` descriptor is populated with pointers to `scratch_A`, `scratch_B`, several static/global work arrays, and associated metadata before the child helpers run.
+
+## Type-0x0c pre-scaling branch — PROVEN
+
+The field `arg7+0x18` is tested against bit mask:
 
 ```text
 0x02473932
 ```
 
-Selector `0x0c` is included in that bit set, so the corresponding branch is active for the tested 5135 path.
+The set bits include selector `0x0c`, so the tested 5135 path takes the special branch.
 
-Within that branch, full-plane WORD loops are visible. One loop scales WORD values in the copied plane and also references a WORD plane relative to the second argument at approximately `+0x9924` (`+0x9922` combined with the loop's post-increment addressing). This strongly ties the stage to calibration/state-derived per-pixel data, but the exact semantic relation is not yet named.
-
-## Integer-only arithmetic in this stage scan
-
-The static scan found no matching SIMD or floating-point instructions in the inspected region. Pixel-like processing is implemented through integer/WORD operations such as:
+For each processed WORD, that branch performs:
 
 ```text
-movzx WORD
-add/sub WORD
-shift
-integer divide
-conditional WORD replacement
+scratch_C[i] = 3 * scratch_C[i]
+global_0x1800ff920[i] = 3 * state_plus_0x9924[i]
 ```
 
-This does **not** mean the operation is not normalization-like; it means any such transformation here is fixed-point/integer rather than float/SIMD.
+The second relation follows exactly from the address algebra in the loop: `r10 = state - scratch_C`, the source load uses `[r10 + rdx + 0x9922]` after `rdx` has advanced by two bytes, yielding `state + 0x9924 + 2*i`.
 
-## Important internal calls
+For selector types not in the mask, the routine instead copies `arg2` directly into the global plane at `0x1800ff920` and leaves `scratch_C` as the copied source plane.
 
-Within the exact `0x18004aea0..0x18004b289` body the important calls are:
+This is a fixed integer pre-scaling step; it is not a clamp or floating-point normalization stage.
+
+## Child-helper sequence
+
+The exact significant order is:
 
 ```text
 0x18004d3b0
-0x18004b290   # conditional
+optional 0x18004b290
 0x180049ba0
+final per-WORD fixed-point loop in 0x18004aea0
+free scratch_B
+free scratch_A
+free scratch_C
+return 1
 ```
 
-along with allocation/copy/free helpers.
+### `0x18004d3b0`
 
-`0x180049ba0` is called before a final full-plane WORD loop. That final loop performs conditional value propagation/replacement and the routine then frees all three temporary full-size buffers and returns `1`.
+This helper is called with the geometry/config structure, the large state object, and several global work arrays. It does not receive the three scratch image planes directly in the first register arguments. Its exact semantic role remains open.
 
-Therefore `0x18004aea0` is now proven to be a real multi-stage full-image preprocessing/calibration helper, not a logging wrapper or trivial dispatcher.
+### Optional `0x18004b290`
 
-## What is NOT yet proven
+The call occurs only when `arg7+0x10 != 0`.
 
-Do not yet call `0x18004aea0` the final image normalizer or final processed-image producer.
-
-The remaining missing proof is the ownership/data flow of the caller-visible output across:
+Its primary arguments include:
 
 ```text
-0x18004d3b0
- -> optional 0x18004b290
- -> 0x180049ba0
- -> final WORD loop in 0x18004aea0
+RCX = scratch_C
+RDX = arg4
+R8  = global plane 0x1800ff920
 ```
 
-We still need to prove which caller-owned buffer survives after the three scratch planes are freed, and whether that buffer is the image later consumed by `0x1800435a0` and matcher-facing stages.
+plus dimension/config fields. Its exact transform remains open.
 
-## Immediate next task
+### `0x180049ba0`
 
-Before descending into a random child helper, reconstruct the exact middle/final portion of `0x18004aea0`, especially:
+Immediately before the final fixed-point output loop, the call receives:
 
 ```text
-0x18004b085 .. 0x18004b288
+RCX = scratch_C
+RDX = state/context
+R8  = original source plane (arg1)
+R9  = global/static work pointer 0x1800ff914
+arg5 = caller descriptor/work structure
+arg6 = geometry/mode/type structure
+arg7 = cleaned mask/statistics structure
 ```
+
+Therefore `0x180049ba0` is the primary remaining producer of the temporary denominator/work planes consumed immediately afterward.
+
+## Caller-visible reciprocal/gain-like auxiliary output — PROVEN
+
+If the second pointer stored in the optional `arg6` structure is non-null, `0x18004aea0` fills it from a global per-pixel WORD array using integer reciprocal-style fixed-point arithmetic.
+
+Conceptually, for each element:
+
+```text
+if denominator_word == 0:
+    out = constant << 13
+else:
+    out = round((constant << 13) / denominator_word)
+```
+
+The exact semantic label of this optional plane remains open, but it is clearly coefficient/gain-like rather than a raw copied image plane.
+
+## Persistent processed plane at `state+0x13244` — PROVEN
+
+The final loop resolves all relevant pointers relative to `scratch_A` and iterates over the WORD count from `arg7+0x08`.
+
+Its persistent destination is unequivocally:
+
+```text
+state + 0x13244
+```
+
+The three scratch planes are freed only after this destination has been written.
+
+For the tested type-0x0c branch, the earlier selector test is true, so the loop chooses fixed-point shift:
+
+```text
+shift = 14
+```
+
+For non-special types the selected shift is `13`.
+
+The principal destination relation is:
+
+```text
+if gate_word[i] != 0:
+    if scratch_A[i] == 0:
+        processed[i] = scratch_C[i] << shift
+    else:
+        processed[i] = round((scratch_C[i] << shift) / scratch_A[i])
+else:
+    processed[i] = scratch_C[i]
+```
+
+where:
+
+```text
+processed = state + 0x13244
+gate_word = state + 0x4
+```
+
+The division uses integer rounding by adding half the denominator before signed division:
+
+```text
+(numerator + denominator/2) / denominator
+```
+
+For the tested type-0x0c path, `scratch_C` has already been multiplied by three before this loop.
+
+If the first optional output pointer from `arg6` is non-null, a parallel relation is written using `scratch_B` as its denominator, with the same source numerator and fixed-point shift.
+
+This proves that `0x18004aea0` is not merely an orchestrator: it emits a persistent, state-owned **fixed-point ratio/corrected image-like plane** at `state+0x13244`.
+
+The conservative description is intentionally `fixed-point ratio/corrected plane`; calling it the final matcher-normalized fingerprint image still requires tracing its later consumers.
+
+## No float/SIMD in this exact stage
+
+The exact body contains no matching floating-point or SIMD normalization instructions. Its visible image arithmetic is scalar integer/WORD arithmetic:
+
+```text
+WORD loads/stores
+multiply-by-3
+left shifts
+integer divide with rounding
+conditional fallback/copy
+```
+
+## What remains unknown
+
+Two important links are still open:
+
+1. **How `0x180049ba0` constructs `scratch_A` and `scratch_B`.** These are the denominators that directly determine the persistent plane at `state+0x13244`.
+2. **How `state+0x9924` is populated.** It is statically proven to participate in this type-0x0c path, but it is not yet proven identical to gfusb.dll's persisted ImageBase.
+
+Also still open is the exact semantic meaning of the per-pixel gate plane beginning at `state+0x4`.
+
+## Immediate next target
+
+Reverse-engineer `0x180049ba0` next, not `0x18004d3b0` at random.
+
+Reason: `0x180049ba0` runs immediately before the final output loop and must establish or transform the temporary denominator planes (`scratch_A` and `scratch_B`) that are used directly in:
+
+```text
+processed[i] = round((scratch_C[i] << 14) / scratch_A[i])
+```
+
+for the tested type-0x0c path.
 
 Goals:
 
-1. map every live pointer to its original argument or one of the three temporary planes;
-2. identify the exact destination written by `0x180049ba0` and the final WORD loop;
-3. determine whether `0x18004d3b0` supplies gain/calibration coefficients, a transformed plane, or metadata;
-4. only then choose the next child helper to reverse-engineer in depth.
-
-Separately, the earlier open task remains: prove how the AlgoChicago internal state plane near `state+0x9924` is populated before equating it with the persisted `gfusb.dll` ImageBase.
+1. establish the complete logical function boundary of `0x180049ba0`;
+2. determine exactly where it writes `scratch_A` and `scratch_B` through the caller descriptor;
+3. recover the per-pixel/local-window formula producing those denominator values;
+4. identify whether they represent local illumination, background estimate, gain denominator, smoothed reference, or another correction surface;
+5. trace the resulting `state+0x13244` plane into `0x1800435a0` and later matcher-facing stages.
 
 ## Safety boundary
 
