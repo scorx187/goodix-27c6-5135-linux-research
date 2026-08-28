@@ -19,74 +19,74 @@ USB bulk IN: 0x81
 USB bulk OUT:0x01
 ```
 
-## Canonical current checkpoint
+## Canonical checkpoints
 
 Read first:
 
 1. `docs/CURRENT_STATUS_2026-08-28.md`
 2. `docs/CHICAGO_PREPROCESS_CORE_2026-08-28.md`
 3. `docs/CHICAGO_POST_MASK_STAGE_4AEA0_2026-08-28.md`
-4. `docs/RELEASE_READINESS_AND_SAFETY_GATES.md`
-5. `docs/DEVELOPER_ROADMAP.md`
-6. `docs/WINDOWS_IMAGE_LAYOUT_5135_PROOF_2026-08-27.md`
-7. `docs/IMAGE_TRANSPORT_5135_PROOF_2026-08-27.md`
-8. `docs/FDT_5135_PROOF_2026-08-27.md`
-9. `docs/LINUX_CFG70_UPLOAD_PROOF_2026-08-27.md`
-10. `docs/FAILURES_AND_RECOVERIES_2026-08-27.md`
-11. `docs/SAFETY.md`
+4. `docs/CHICAGO_Q13_BASE_UPDATE_D6F0_2026-08-28.md`
+5. `docs/RELEASE_READINESS_AND_SAFETY_GATES.md`
+6. `docs/DEVELOPER_ROADMAP.md`
+7. `docs/WINDOWS_IMAGE_LAYOUT_5135_PROOF_2026-08-27.md`
+8. `docs/IMAGE_TRANSPORT_5135_PROOF_2026-08-27.md`
+9. `docs/FDT_5135_PROOF_2026-08-27.md`
+10. `docs/LINUX_CFG70_UPLOAD_PROOF_2026-08-27.md`
+11. `docs/FAILURES_AND_RECOVERIES_2026-08-27.md`
+12. `docs/SAFETY.md`
 
 Older handoff/current-status documents are historical evidence and may describe blockers already solved.
 
-## Current state — do not repeat solved work
+## Do not repeat solved work
 
 ```text
 CFG70 reconstruction                         DONE
 command 0x90 upload                          DONE
 factory TLS                                  DONE
-verified activation sequence                 DONE
+activation/reset recovery                    DONE
 FDT manual/down/up                           DONE on tested unit
 image transport/decrypt                      DONE
 Windows-compatible image CRC                 DONE on one private capture
 RAW12 -> 5120 samples                        DONE
 ChicagoHU regroup                            PROVEN
-ImageBase/live relative layout               PROVEN
+ImageBase downstream layout                  PROVEN
 Candidate A                                  PROVEN
 Candidate B double-regroup                   REJECTED
-gfusb.dll post-detection packaging           PROVEN
-gfusb.dll Windows request handoff             PROVEN
-Windows engine component                     IDENTIFIED: EngineAdapter.dll
-0x2504 / family 0x0c algorithm selection     PROVEN: AlgoChicago.dll
-AlgoChicago preprocessor export              PROVEN: RVA 0x0000b560
-outer semantic preprocessor routine          PROVEN: 0x18000e780..0x18000e947
-core preprocessing orchestrator              PROVEN: 0x1800484e0
-first source/state subtraction               PROVEN: 0x180044970
-mask geometry/source-range cleanup            PROVEN: 0x180043c40
-post-mask correction stage                   PROVEN: 0x18004aea0
-persistent corrected plane                   PROVEN: state+0x13244
-primary Q13 correction surface               PROVEN: scratch_A
-type-0x0c late scratch_A composition         PROVEN
-type-0x0c scratch_B copy/compose logic       PROVEN
-current unresolved helper                    0x18004d6f0
+gfusb post-detection packaging               PROVEN
+WBDI EngineAdapter architecture              PROVEN
+family 0x0c -> AlgoChicago.dll               PROVEN
+preprocessor wrapper / real entry            PROVEN
+outer semantic preprocessor                  PROVEN 0x18000e780..0x18000e947
+core orchestrator                            PROVEN 0x1800484e0
+source/state signed subtraction              PROVEN 0x180044970
+mask geometry/source-range cleanup            PROVEN 0x180043c40
+post-mask parent correction                  PROVEN 0x18004aea0
+persistent corrected plane                   PROVEN state+0x13244
+Q13 primary/secondary surfaces               PROVEN
+late type-0x0c Q13 composition               PROVEN
+base scratch_A adaptive update               PROVEN 0x18004d6f0
+current decisive child                       0x18004c3b0
 matcher/enrollment                           LATER
 libfprint/fprintd integration                 LATER
-release/safety matrix                        FINAL STAGE
+release/safety matrix                        FINAL
 ```
 
-## Preprocessing proof so far
+## Preprocessing proof summary
 
-### 1. Signed source/state difference
+### Signed difference
 
-`0x1800484e0` copies the source u16 image and an AlgoChicago internal plane from `state+0x9924`, then `0x180044970` computes for type `0x0c`:
+For selector `0x0c`, `0x180044970` performs:
 
 ```text
-diff16[i] = source_u16[i] - state_plane_u16[i]
+diff16[i] = source_u16[i] - state_plus_0x9924_u16[i]
 ```
 
-The difference is intentionally signed 16-bit. Do **not** yet equate `state+0x9924` with gfusb persisted ImageBase.
+Negative values are intentionally retained as signed 16-bit. Do **not** equate AlgoChicago `state+0x9924` with gfusb persisted ImageBase until its producer is proven.
 
-### 2. Mask cleanup / coverage
+### Mask cleanup
 
-`0x180043c40` cleans mask geometry and applies source-range filtering. For type `0x0c`, a mask pixel is rejected when:
+`0x180043c40` cleans/fills mask geometry and recomputes coverage. For type `0x0c`, a mask pixel is rejected when:
 
 ```text
 source <= 100
@@ -94,26 +94,22 @@ or
 source >= 3800
 ```
 
-This stage is mask/coverage logic, not image normalization.
+### Post-mask parent correction
 
-### 3. Post-mask parent `0x18004aea0`
-
-The parent allocates full-size u16 planes `scratch_A`, `scratch_B`, `scratch_C`.
-
-For type `0x0c`:
+`0x18004aea0` allocates `scratch_A/B/C`. For type `0x0c`:
 
 ```text
 scratch_C[i] = 3 * source_side_word[i]
-global_0x1800ff920[i] = 3 * state_plus_0x9924[i]
+global_work[i] = 3 * state_plus_0x9924[i]
 ```
 
-It then runs `0x180049ba0` and writes a persistent corrected image-like plane at:
+It later writes the persistent corrected image-like plane:
 
 ```text
 state + 0x13244
 ```
 
-For type `0x0c` the parent uses shift 14:
+using shift 14 and the primary relation:
 
 ```text
 if gate_word[i] != 0:
@@ -125,118 +121,102 @@ else:
     processed[i] = scratch_C[i]
 ```
 
-`processed = state+0x13244`.
+### Q13 surface composition
 
-### 4. Q13 surfaces inside `0x180049ba0`
-
-For type `0x0c`, `scratch_A` is initialized to:
+Inside `0x180049ba0`, `scratch_A` starts at Q13 unity:
 
 ```text
-0x2000
+0x2000 == 8192
 ```
 
-per WORD, i.e. unity in Q13.
-
-Repeated scalar and SIMD composition is exactly:
+and surfaces compose with exact rounded Q13 multiplication:
 
 ```text
 Q13_mul(a,b) = (a*b + 0x1000) >> 13
 ```
 
-Descriptor/static surface mapping relevant to the tested branch:
+Late type-`0x0c` composition is proven for `scratch_A` and `scratch_B`; see `docs/CHICAGO_POST_MASK_STAGE_4AEA0_2026-08-28.md`.
+
+## New decisive proof: `0x18004d6f0`
+
+The exact function is:
 
 ```text
-scratch_A = descriptor+0x00
-scratch_B = descriptor+0x30
-F0 = 0x1801151b0
-F1 = 0x18010b890
-F2 = 0x18011ead0
-flag_G = *(u32 *)0x1800ff91c
+RVA 0x4d6f0 .. 0x4d882
+return 0x18004d881
 ```
 
-Late type-0x0c `scratch_B` behavior is proven:
+Caller mapping on the tested `0x0c` path:
 
 ```text
-if local_flag != 0:
-    scratch_B = copy(scratch_A)
-else if flag_G != 0:
-    scratch_B = copy(scratch_A)
+RCX = reference/global plane side
+RDX = work object; data pointer at +0x18
+R8  = scratch_A (in/out primary Q13 surface)
+R9D = one geometry dimension
+arg5 = other geometry dimension
+arg6 = selector 0x0c
+```
+
+It allocates a temporary full-plane WORD image object and first constructs:
+
+```text
+if scratch_A[i] == 0:
+    tmp[i] = reference[i] << 13
 else:
-    scratch_B[i] = Q13_mul(scratch_A[i], F2[i])
+    tmp[i] = round((reference[i] << 13) / scratch_A[i])
 ```
 
-Late type-0x0c `scratch_A` behavior is proven:
+Then it calls:
 
 ```text
-if flag_G != 0:
-    scratch_A[i] = Q13_mul(scratch_A[i], F0[i])
-else:
-    scratch_A[i] = Q13_mul(Q13_mul(scratch_A[i], F0[i]), F1[i])
+0x18004c3b0(tmp_object, original_work_object)
 ```
 
-Therefore the unresolved part is no longer the final Q13 composition. The unresolved part is the **base value of `scratch_A` before these late factors**.
+After that child returns, type `0x0c` uses threshold:
+
+```text
+0x708 = 1800
+```
+
+For each pixel:
+
+```text
+q = tmp_after_0x18004c3b0[i]
+x = original_work_object.data[i]
+
+if q != 0 and x != 0 and abs(q-x) > 1800:
+    scratch_A[i] = min(
+        round((scratch_A[i] * q) / x),
+        0x7fff
+    )
+else:
+    scratch_A[i] unchanged
+```
+
+Therefore `0x18004d6f0` is proven to be a thresholded adaptive per-pixel modifier of the Q13 correction surface.
 
 ## Immediate next task
 
-**Reverse exactly the PE runtime-function containing `AlgoChicago.dll 0x18004d6f0`.**
-
-Reason: on the tested selector `0x0c` path, when the surrounding condition enables the correction branch, `0x180049ba0` calls:
+Reverse exactly:
 
 ```text
-0x18004d6f0(
-    RCX = 0x1800ff920,
-    RDX = temporary full-image/work buffer,
-    R8  = scratch_A,
-    R9D = one geometry dimension,
-    stack = other geometry dimension + selector 0x0c
-)
+AlgoChicago.dll 0x18004c3b0
 ```
 
-So `0x18004d6f0` is the first unresolved helper that directly receives the primary Q13 denominator surface.
+Reason: it is now the **only unresolved operation inside the proven base `scratch_A` update equation**. It receives the temporary Q13 `reference/scratch_A` image object plus the original work object and transforms the former before the 1800-threshold comparison/update.
 
 Need to prove:
 
-1. exact runtime-function boundary;
-2. argument roles from first reads/writes;
-3. whether `R8 = scratch_A` is output or in/out;
-4. exact per-pixel/spatial formula written to it;
-5. whether a deeper child actually creates the factor plane; descend only into that decisive child if necessary;
-6. only after this inspect `0x1800497c0` / `0x18004b460` if the type-0x0c data flow proves they further modify the denominator;
-7. later trace `state+0x13244` into matcher/enrollment-facing processing;
-8. independently prove the producer of `state+0x9924` before equating it with gfusb ImageBase.
+1. exact logical function boundary;
+2. which object is source vs destination/in-out;
+3. whether it smooths, filters, interpolates, fills, clips, or otherwise spatially transforms the temporary Q13 plane;
+4. exact neighborhood/window arithmetic if any;
+5. whether a deeper child performs the actual spatial kernel; descend only into that decisive child;
+6. then combine that proof with `0x18004d6f0` to close the base `scratch_A` formula;
+7. after that trace `state+0x13244` into matcher-facing processing;
+8. independently prove the producer of `state+0x9924` before equating it to gfusb ImageBase.
 
-Do not return to transport/TLS/CRC/regroup/gfusb callbacks, `0x180044970`, or `0x180043c40` unless a newly discovered dependency requires it.
-
-## Windows biometric architecture checkpoint
-
-```text
-Goodix 27c6:5135
- -> gfusb.dll UMDF sensor driver
- -> Windows WinBioSensorAdapter.DLL
- -> EngineAdapter.dll vendor WBDI engine adapter
- -> family/type 0x0c -> AlgoChicago.dll
- -> preprocessing / identify / enroll / matcher
-```
-
-EngineAdapter resolves algorithm functions dynamically with `LoadLibraryW` / `GetProcAddress`.
-
-## Solved image layout
-
-```text
-packed stream: 64 fast x 80 slow
-samples:       5120
-packed bytes:  7680
-output plane:  80 columns x 64 rows
-u16 bytes:     10240
-```
-
-Regroup:
-
-```text
-dst = (n % 64) * 80 + (n / 64)
-```
-
-Persisted gfusb ImageBase is already downstream-regrouped. Do not regroup it again.
+Do not return to USB/TLS/CRC/regroup/gfusb callbacks, `0x180044970`, or `0x180043c40` unless a newly discovered dependency requires it.
 
 ## Safety / privacy
 
