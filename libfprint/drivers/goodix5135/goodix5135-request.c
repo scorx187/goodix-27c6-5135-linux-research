@@ -121,3 +121,39 @@ goodix5135_request_complete (Goodix5135IoLifecycle *io,
 
   return current;
 }
+
+Goodix5135RequestCompletion
+goodix5135_request_finish (Goodix5135IoLifecycle *io,
+                           Goodix5135Request     *request,
+                           gboolean               action_cancelled)
+{
+  gboolean request_cancelled = FALSE;
+  gboolean current;
+
+  g_return_val_if_fail (io != NULL,
+                        GOODIX5135_REQUEST_COMPLETION_INVALID);
+  g_return_val_if_fail (request != NULL,
+                        GOODIX5135_REQUEST_COMPLETION_INVALID);
+
+  if (!request->in_flight || !request->token.outstanding)
+    return GOODIX5135_REQUEST_COMPLETION_INVALID;
+
+  current = goodix5135_request_complete (io,
+                                         request,
+                                         &request_cancelled);
+
+  /*
+   * Cancellation wins over generation state.
+   *
+   * In particular, the action cancellable may already be cancelled while
+   * FpImageDevice's idle cancel dispatch has not yet called deactivate().
+   * Such a callback must still never advance the protocol state machine.
+   */
+  if (action_cancelled || request_cancelled)
+    return GOODIX5135_REQUEST_COMPLETION_CANCELLED;
+
+  if (!current)
+    return GOODIX5135_REQUEST_COMPLETION_STALE;
+
+  return GOODIX5135_REQUEST_COMPLETION_CURRENT;
+}

@@ -312,6 +312,191 @@ test_reuse_after_completion (void)
 }
 
 static void
+test_finish_current (void)
+{
+  Goodix5135IoLifecycle io;
+  Goodix5135Request request;
+
+  goodix5135_io_init (&io);
+  goodix5135_request_init (&request);
+
+  g_assert_true (goodix5135_io_start (&io));
+
+  g_assert_true (
+    goodix5135_request_begin (&io,
+                              &request,
+                              GOODIX5135_REQUEST_BULK_IN,
+                              GOODIX5135_EP_IN,
+                              64,
+                              1000));
+
+  g_assert_cmpuint (
+    goodix5135_request_finish (&io,
+                               &request,
+                               FALSE),
+    ==,
+    GOODIX5135_REQUEST_COMPLETION_CURRENT);
+
+  g_assert_cmpuint (io.pending, ==, 0);
+}
+
+static void
+test_finish_action_cancel_before_stop (void)
+{
+  Goodix5135IoLifecycle io;
+  Goodix5135Request request;
+
+  goodix5135_io_init (&io);
+  goodix5135_request_init (&request);
+
+  g_assert_true (goodix5135_io_start (&io));
+
+  g_assert_true (
+    goodix5135_request_begin (&io,
+                              &request,
+                              GOODIX5135_REQUEST_BULK_IN,
+                              GOODIX5135_EP_IN,
+                              64,
+                              1000));
+
+  /*
+   * Models the important race:
+   *
+   * current_cancellable is already cancelled, but libfprint's idle
+   * cancel dispatch has not called the image-device deactivate vfunc yet.
+   */
+  g_assert_true (io.running);
+
+  g_assert_cmpuint (
+    goodix5135_request_finish (&io,
+                               &request,
+                               TRUE),
+    ==,
+    GOODIX5135_REQUEST_COMPLETION_CANCELLED);
+
+  g_assert_true (io.running);
+  g_assert_cmpuint (io.pending, ==, 0);
+
+  goodix5135_io_stop (&io);
+
+  g_assert_true (goodix5135_io_can_finish_stop (&io));
+}
+
+static void
+test_finish_action_cancel_after_stop (void)
+{
+  Goodix5135IoLifecycle io;
+  Goodix5135Request request;
+
+  goodix5135_io_init (&io);
+  goodix5135_request_init (&request);
+
+  g_assert_true (goodix5135_io_start (&io));
+
+  g_assert_true (
+    goodix5135_request_begin (&io,
+                              &request,
+                              GOODIX5135_REQUEST_BULK_IN,
+                              GOODIX5135_EP_IN,
+                              64,
+                              1000));
+
+  goodix5135_io_stop (&io);
+
+  g_assert_false (goodix5135_io_can_finish_stop (&io));
+
+  g_assert_cmpuint (
+    goodix5135_request_finish (&io,
+                               &request,
+                               TRUE),
+    ==,
+    GOODIX5135_REQUEST_COMPLETION_CANCELLED);
+
+  g_assert_cmpuint (io.pending, ==, 0);
+  g_assert_true (goodix5135_io_can_finish_stop (&io));
+}
+
+static void
+test_finish_stale_without_cancel (void)
+{
+  Goodix5135IoLifecycle io;
+  Goodix5135Request request;
+
+  goodix5135_io_init (&io);
+  goodix5135_request_init (&request);
+
+  g_assert_true (goodix5135_io_start (&io));
+
+  g_assert_true (
+    goodix5135_request_begin (&io,
+                              &request,
+                              GOODIX5135_REQUEST_BULK_OUT,
+                              GOODIX5135_EP_OUT,
+                              32,
+                              500));
+
+  goodix5135_io_stop (&io);
+
+  g_assert_cmpuint (
+    goodix5135_request_finish (&io,
+                               &request,
+                               FALSE),
+    ==,
+    GOODIX5135_REQUEST_COMPLETION_STALE);
+
+  g_assert_cmpuint (io.pending, ==, 0);
+  g_assert_true (goodix5135_io_can_finish_stop (&io));
+}
+
+static void
+test_finish_request_cancelled (void)
+{
+  Goodix5135IoLifecycle io;
+  Goodix5135Request request;
+
+  goodix5135_io_init (&io);
+  goodix5135_request_init (&request);
+
+  g_assert_true (goodix5135_io_start (&io));
+
+  g_assert_true (
+    goodix5135_request_begin (&io,
+                              &request,
+                              GOODIX5135_REQUEST_BULK_IN,
+                              GOODIX5135_EP_IN,
+                              64,
+                              1000));
+
+  g_assert_true (goodix5135_request_cancel (&request));
+
+  g_assert_cmpuint (
+    goodix5135_request_finish (&io,
+                               &request,
+                               FALSE),
+    ==,
+    GOODIX5135_REQUEST_COMPLETION_CANCELLED);
+
+  g_assert_cmpuint (io.pending, ==, 0);
+}
+
+static void
+test_finish_invalid (void)
+{
+  Goodix5135IoLifecycle io;
+  Goodix5135Request request;
+
+  goodix5135_io_init (&io);
+  goodix5135_request_init (&request);
+
+  g_assert_cmpuint (
+    goodix5135_request_finish (&io,
+                               &request,
+                               FALSE),
+    ==,
+    GOODIX5135_REQUEST_COMPLETION_INVALID);
+}
+
+static void
 test_cancel_inactive_rejected (void)
 {
   Goodix5135Request request;
@@ -352,6 +537,24 @@ main (int argc, char **argv)
 
   g_test_add_func ("/goodix5135/request/reuse-after-completion",
                    test_reuse_after_completion);
+
+  g_test_add_func ("/goodix5135/request/finish-current",
+                   test_finish_current);
+
+  g_test_add_func ("/goodix5135/request/finish-action-cancel-before-stop",
+                   test_finish_action_cancel_before_stop);
+
+  g_test_add_func ("/goodix5135/request/finish-action-cancel-after-stop",
+                   test_finish_action_cancel_after_stop);
+
+  g_test_add_func ("/goodix5135/request/finish-stale",
+                   test_finish_stale_without_cancel);
+
+  g_test_add_func ("/goodix5135/request/finish-request-cancelled",
+                   test_finish_request_cancelled);
+
+  g_test_add_func ("/goodix5135/request/finish-invalid",
+                   test_finish_invalid);
 
   g_test_add_func ("/goodix5135/request/cancel-inactive",
                    test_cancel_inactive_rejected);
