@@ -30,14 +30,15 @@ Read first:
 5. `docs/CHICAGO_SPATIAL_MEDIAN_FILTER_C3B0_2026-08-28.md`
 6. `docs/CHICAGO_497C0_GATE_TO_B460_2026-08-28.md`
 7. `docs/CHICAGO_GATED_FACTOR_UPDATE_B460_2026-08-28.md`
-8. `docs/RELEASE_READINESS_AND_SAFETY_GATES.md`
-9. `docs/DEVELOPER_ROADMAP.md`
-10. `docs/WINDOWS_IMAGE_LAYOUT_5135_PROOF_2026-08-27.md`
-11. `docs/IMAGE_TRANSPORT_5135_PROOF_2026-08-27.md`
-12. `docs/FDT_5135_PROOF_2026-08-27.md`
-13. `docs/LINUX_CFG70_UPLOAD_PROOF_2026-08-27.md`
-14. `docs/FAILURES_AND_RECOVERIES_2026-08-27.md`
-15. `docs/SAFETY.md`
+8. `docs/CHICAGO_E110_WRAPPER_TO_FFF0_2026-08-28.md`
+9. `docs/RELEASE_READINESS_AND_SAFETY_GATES.md`
+10. `docs/DEVELOPER_ROADMAP.md`
+11. `docs/WINDOWS_IMAGE_LAYOUT_5135_PROOF_2026-08-27.md`
+12. `docs/IMAGE_TRANSPORT_5135_PROOF_2026-08-27.md`
+13. `docs/FDT_5135_PROOF_2026-08-27.md`
+14. `docs/LINUX_CFG70_UPLOAD_PROOF_2026-08-27.md`
+15. `docs/FAILURES_AND_RECOVERIES_2026-08-27.md`
+16. `docs/SAFETY.md`
 
 Older handoff/current-status documents are historical evidence and may describe blockers already solved.
 
@@ -62,7 +63,7 @@ family 0x0c -> AlgoChicago.dll               PROVEN
 preprocessor wrapper / real entry            PROVEN
 outer semantic preprocessor                  PROVEN 0x18000e780..0x18000e947
 core orchestrator                            PROVEN 0x1800484e0
-source/state signed subtraction              PROVEN 0x180044970
+state-source signed subtraction              PROVEN 0x180044970
 mask geometry/source-range cleanup            PROVEN 0x180043c40
 post-mask parent correction                  PROVEN 0x18004aea0
 persistent corrected plane                   PROVEN state+0x13244
@@ -72,7 +73,9 @@ base scratch_A adaptive update               PROVEN 0x18004d6f0
 spatial ratio median filter                  PROVEN 0x18004c3b0
 0x1800497c0 caller role                      PROVEN boolean gate
 gated late-factor updater                    PROVEN 0x18004b460
-current decisive helper                      0x18004e110
+0x18004e110 role                             PROVEN generic wrapper/orchestrator
+current decisive helper                      0x18004e820 context builder
+next execution helper                        0x18004fff0
 matcher/enrollment                           LATER
 libfprint/fprintd integration                 LATER
 release/safety matrix                        FINAL
@@ -80,15 +83,31 @@ release/safety matrix                        FINAL
 
 ## Preprocessing proof summary
 
-### Signed difference
+### Signed difference — IMPORTANT CORRECT DIRECTION
 
 For selector `0x0c`, `0x180044970` performs:
 
 ```text
-diff16[i] = source_u16[i] - state_plus_0x9924_u16[i]
+diff16[i] = state_plus_0x9924_u16[i] - source_u16[i]
 ```
 
-Negative values are intentionally retained as signed 16-bit. Do **not** equate AlgoChicago `state+0x9924` with gfusb persisted ImageBase until its producer is proven.
+This direction is proven independently by both SIMD and scalar code:
+
+```asm
+xmm1 = state_plane
+xmm0 = source
+psubw xmm1,xmm0
+```
+
+and the scalar tail loads state then subtracts source. Negative values are intentionally retained as signed 16-bit. Do **not** equate AlgoChicago `state+0x9924` with gfusb persisted ImageBase until its producer is proven.
+
+For selector `4` only, the special relation is:
+
+```text
+state_plane - source + 0x0fff
+```
+
+Older text claiming `source - state_plane` is stale and must not be reused.
 
 ### Mask cleanup
 
@@ -227,7 +246,7 @@ Then it calls:
 
 ```text
 0x1800501a0(...)
-0x18004e110(temp_object, work_object, ..., 9, -1, -1)
+0x18004e110(temp_object, work_object, packed_dims, 9, -1, -1)
 ```
 
 After this child stage:
@@ -256,33 +275,63 @@ observation_count = min(observation_count + 1, 30)
 
 The two calls update the two late factor surfaces used by the already-proven Q13 composition path. See `docs/CHICAGO_GATED_FACTOR_UPDATE_B460_2026-08-28.md`.
 
+## `0x18004e110` — PROVEN wrapper, not the pixel filter
+
+Exact PE runtime function:
+
+```text
+RVA 0x0004e110 .. 0x0004e378
+normal ret 0x18004e377
+```
+
+It has no pixel loop. It validates/reconciles two image objects, temporarily rewrites their format metadata, builds a context using `0x18004e820`, dispatches the actual operation through `0x18004fff0`, restores metadata and frees context allocations.
+
+Authoritative call path:
+
+```text
+0x18004e820(
+    object1_format & 0x0fff,
+    object2_format & 0x0fff,
+    packed two-DWORD value from 0x1800501a0,
+    mode = 9,
+    -1,
+    -1
+) -> ctx
+
+0x18004fff0(ctx, ratio_object, output/work_object)
+```
+
+For mode `9`, `ctx+0x88` is set to `0`. The same flag is set to `1` only for modes `6` or `8`.
+
+Therefore **do not call the constant 9 a 9x9 window**. At this level it is a mode/operation selector.
+
+See `docs/CHICAGO_E110_WRAPPER_TO_FFF0_2026-08-28.md`.
+
 ## Immediate next task
 
-Reverse exactly:
+Reverse the small context builder first:
 
 ```text
-AlgoChicago.dll 0x18004e110
+AlgoChicago.dll 0x18004e820
 ```
 
-Authoritative callsite from `0x18004b460`:
+Need to prove for `mode=9`:
+
+1. what context fields it initializes;
+2. whether it selects kernel/filter coefficients, callbacks or geometry;
+3. how the packed two-DWORD value from `0x1800501a0` is interpreted;
+4. what mode 9 selects without guessing a semantic label;
+5. identify the exact mode-9-selected path consumed by `0x18004fff0`.
+
+Then reverse only that selected path in:
 
 ```text
-RCX = temporary u16 ratio object
-RDX = original work/image object
-R8  = return value from 0x1800501a0
-R9D = 9
-stack arg5 = -1
-stack arg6 = -1
+0x18004fff0(ctx, ratio_object, output/work_object)
 ```
 
-Need to prove:
+to recover the exact transform that reaches the near-unity gate in `0x18004b460`.
 
-1. whether `0x18004e110` filters/smooths/normalizes the temporary ratio plane;
-2. exact role of constant `9` and the two `-1` arguments;
-3. which object is modified and what exact per-pixel formula reaches the later near-unity gate;
-4. whether `0x1800501a0` only constructs an auxiliary kernel/config object or materially changes the algorithm;
-5. after closing `0x18004b460`, return to final Q13 composition and trace `state+0x13244` toward matcher/enrollment;
-6. independently prove the producer of `state+0x9924` before equating it with gfusb ImageBase.
+After closing this gated factor update, return to final Q13 composition and trace `state+0x13244` toward matcher/enrollment. Independently prove the producer of `state+0x9924` before equating it with gfusb ImageBase.
 
 Do not return to USB/TLS/CRC/regroup/gfusb callbacks, `0x180044970`, `0x180043c40`, `0x18004d6f0`, `0x18004c3b0`, `0x1800497c0`, or `0x18004b460` unless a newly discovered dependency requires it.
 
