@@ -27,14 +27,15 @@ Read first:
 2. `docs/CHICAGO_PREPROCESS_CORE_2026-08-28.md`
 3. `docs/CHICAGO_POST_MASK_STAGE_4AEA0_2026-08-28.md`
 4. `docs/CHICAGO_Q13_BASE_UPDATE_D6F0_2026-08-28.md`
-5. `docs/RELEASE_READINESS_AND_SAFETY_GATES.md`
-6. `docs/DEVELOPER_ROADMAP.md`
-7. `docs/WINDOWS_IMAGE_LAYOUT_5135_PROOF_2026-08-27.md`
-8. `docs/IMAGE_TRANSPORT_5135_PROOF_2026-08-27.md`
-9. `docs/FDT_5135_PROOF_2026-08-27.md`
-10. `docs/LINUX_CFG70_UPLOAD_PROOF_2026-08-27.md`
-11. `docs/FAILURES_AND_RECOVERIES_2026-08-27.md`
-12. `docs/SAFETY.md`
+5. `docs/CHICAGO_SPATIAL_MEDIAN_FILTER_C3B0_2026-08-28.md`
+6. `docs/RELEASE_READINESS_AND_SAFETY_GATES.md`
+7. `docs/DEVELOPER_ROADMAP.md`
+8. `docs/WINDOWS_IMAGE_LAYOUT_5135_PROOF_2026-08-27.md`
+9. `docs/IMAGE_TRANSPORT_5135_PROOF_2026-08-27.md`
+10. `docs/FDT_5135_PROOF_2026-08-27.md`
+11. `docs/LINUX_CFG70_UPLOAD_PROOF_2026-08-27.md`
+12. `docs/FAILURES_AND_RECOVERIES_2026-08-27.md`
+13. `docs/SAFETY.md`
 
 Older handoff/current-status documents are historical evidence and may describe blockers already solved.
 
@@ -66,7 +67,8 @@ persistent corrected plane                   PROVEN state+0x13244
 Q13 primary/secondary surfaces               PROVEN
 late type-0x0c Q13 composition               PROVEN
 base scratch_A adaptive update               PROVEN 0x18004d6f0
-current decisive child                       0x18004c3b0
+spatial ratio filter                         PROVEN 0x18004c3b0
+current task                                 caller region after 0x1800497c0
 matcher/enrollment                           LATER
 libfprint/fprintd integration                 LATER
 release/safety matrix                        FINAL
@@ -137,14 +139,7 @@ Q13_mul(a,b) = (a*b + 0x1000) >> 13
 
 Late type-`0x0c` composition is proven for `scratch_A` and `scratch_B`; see `docs/CHICAGO_POST_MASK_STAGE_4AEA0_2026-08-28.md`.
 
-## New decisive proof: `0x18004d6f0`
-
-The exact function is:
-
-```text
-RVA 0x4d6f0 .. 0x4d882
-return 0x18004d881
-```
+## Base adaptive update `0x18004d6f0` — PROVEN
 
 Caller mapping on the tested `0x0c` path:
 
@@ -157,32 +152,32 @@ arg5 = other geometry dimension
 arg6 = selector 0x0c
 ```
 
-It allocates a temporary full-plane WORD image object and first constructs:
+It builds a temporary ratio plane:
 
 ```text
 if scratch_A[i] == 0:
-    tmp[i] = reference[i] << 13
+    ratio_raw[i] = reference[i] << 13
 else:
-    tmp[i] = round((reference[i] << 13) / scratch_A[i])
+    ratio_raw[i] = round((reference[i] << 13) / scratch_A[i])
 ```
 
-Then it calls:
+and calls:
 
 ```text
-0x18004c3b0(tmp_object, original_work_object)
+0x18004c3b0(ratio_raw_object, work_object)
 ```
 
-After that child returns, type `0x0c` uses threshold:
+For type `0x0c`, the post-filter threshold is:
 
 ```text
 0x708 = 1800
 ```
 
-For each pixel:
+and the update is:
 
 ```text
-q = tmp_after_0x18004c3b0[i]
-x = original_work_object.data[i]
+q = ratio_filtered[i]
+x = work_object.data[i]
 
 if q != 0 and x != 0 and abs(q-x) > 1800:
     scratch_A[i] = min(
@@ -193,30 +188,75 @@ else:
     scratch_A[i] unchanged
 ```
 
-Therefore `0x18004d6f0` is proven to be a thresholded adaptive per-pixel modifier of the Q13 correction surface.
+## Spatial filter `0x18004c3b0` — PROVEN
+
+`0x18004c3b0` is a deterministic integer separable median-of-three filter.
+
+For interior pixels define:
+
+```text
+H(y,x) = median(src[y][x-1], src[y][x], src[y][x+1])
+```
+
+then:
+
+```text
+out[y][x] = median(H(y-1,x), H(y,x), H(y+1,x))
+```
+
+for:
+
+```text
+1 <= x < width-1
+1 <= y < height-1
+```
+
+The border is copied unchanged. The routine uses two temporary u16 rows and ends via tail-call to the allocation-release helper `0x180064d60`.
+
+This is a separable median-style 3x3 filter; it is not generally equal to the true median of all nine 3x3 samples.
+
+Combined with `0x18004d6f0`:
+
+```text
+ratio_raw
+ -> separable median-of-3 horizontal
+ -> separable median-of-3 vertical
+ -> ratio_filtered
+ -> compare against work plane
+ -> thresholded scratch_A rescale
+```
+
+So the base type-`0x0c` Q13 update is now closed at this level.
 
 ## Immediate next task
 
-Reverse exactly:
+Return to the tested selector-`0x0c` caller path in `0x180049ba0`.
+
+The next call in execution order is:
 
 ```text
-AlgoChicago.dll 0x18004c3b0
+0x1800497c0
 ```
 
-Reason: it is now the **only unresolved operation inside the proven base `scratch_A` update equation**. It receives the temporary Q13 `reference/scratch_A` image object plus the original work object and transforms the former before the 1800-threshold comparison/update.
+but the already-recovered call arguments do **not** visibly pass `scratch_A` directly. Therefore do not descend into `0x1800497c0` yet.
+
+First inspect the caller region:
+
+```text
+0x18004a1d0 .. 0x18004a2f0
+```
 
 Need to prove:
 
-1. exact logical function boundary;
-2. which object is source vs destination/in-out;
-3. whether it smooths, filters, interpolates, fills, clips, or otherwise spatially transforms the temporary Q13 plane;
-4. exact neighborhood/window arithmetic if any;
-5. whether a deeper child performs the actual spatial kernel; descend only into that decisive child;
-6. then combine that proof with `0x18004d6f0` to close the base `scratch_A` formula;
-7. after that trace `state+0x13244` into matcher-facing processing;
-8. independently prove the producer of `state+0x9924` before equating it to gfusb ImageBase.
+1. complete control flow after `call 0x1800497c0`;
+2. what its return value controls;
+3. whether any path before `0x18004a2f0` modifies/copies `scratch_A` or `scratch_B`;
+4. descend into `0x1800497c0` only if its output/side effects are proven to feed the Q13 correction surfaces;
+5. otherwise skip it and continue to the next proven denominator-modifying stage;
+6. after the correction surface is fully closed, trace `state+0x13244` into matcher/enrollment-facing processing;
+7. independently prove the producer of `state+0x9924` before equating it with gfusb ImageBase.
 
-Do not return to USB/TLS/CRC/regroup/gfusb callbacks, `0x180044970`, or `0x180043c40` unless a newly discovered dependency requires it.
+Do not return to USB/TLS/CRC/regroup/gfusb callbacks, `0x180044970`, `0x180043c40`, `0x18004d6f0`, or `0x18004c3b0` unless a newly discovered dependency requires it.
 
 ## Safety / privacy
 
