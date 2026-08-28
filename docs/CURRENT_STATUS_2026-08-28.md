@@ -6,15 +6,20 @@ This is the canonical high-level checkpoint for the Linux enablement effort. Sta
 
 ## Plain-language position
 
-The device/transport side is solved on the tested unit: USB transport, volatile runtime configuration, factory-compatible TLS, activation, finger detection, image request/decrypt/framing/CRC, RAW12 decode, ChicagoHU regroup, and Windows-compatible 80x64 downstream layout are established.
+The tested device/transport path is solved: USB transport, volatile runtime configuration, factory-compatible TLS, activation, finger detection, image request/decrypt/framing/CRC, RAW12 decode, ChicagoHU regroup, and Windows-compatible `80x64` downstream layout are established.
 
-The preprocessing pipeline is also substantially closed through correction, normalization, texture/mask generation, quality/segmentation policy, final output-mask processing, and outer copy-out.
+The preprocessing pipeline is substantially closed through correction, normalization, texture/mask generation, quality/segmentation policy, final output-mask processing, and outer copy-out.
 
-Feature extraction is substantially mapped: retained minutiae are `0x3c` bytes each, their coordinates/direction are known, the local binary descriptors are structurally mapped, post-extraction spatial pruning is proven, and later per-feature quality/support refinement is substantially understood.
+Feature extraction is substantially mapped: retained minutiae are `0x3c` bytes each, coordinates/direction are known, local binary descriptors are structurally mapped, post-extraction spatial pruning is proven, and later per-feature quality/support refinement is substantially understood.
 
-The active work is now inside the matcher. A major new checkpoint is closed: `0x18005baf0` directly performs pairwise binary-descriptor comparison across the retained `0x3c` feature lists. It traverses both lists with nested loops, XORs descriptor DWORDs, converts XOR bytes through a fixed lookup table, produces pair costs/variant flags, and tracks best/second-best candidate indices per feature. This logic is implemented directly in `0x5baf0`; it is not delegated to another matcher child.
+The active work is now inside the matcher. The direct pairwise binary-descriptor comparator `0x18005baf0` is proven. The next two layers are also now structurally closed:
 
-The immediate next target is `0x18005a350`, which consumes the two directional `0x5baf0` result sets and is expected to consolidate them into the correspondence state reduced later by `0x18001f840`.
+- `0x18005a350` filters descriptor candidates using a best-vs-second-best ambiguity test, suppresses spatially duplicate correspondences using X/Y, keeps a bounded best-K set, and emits flat signed `int32` index pairs padded with `-1`.
+- `0x18001f840` expands those pair indices back into X/Y/direction geometry, applies geometric/directional filtering, and returns the **count of surviving correspondence inliers**.
+
+The immediate next target is the exact inlier policy delegated by `0x1f840` to `0x1800586c0` and the additional per-pair validity filter `0x180024880`.
+
+Detailed matcher checkpoint: `docs/CHICAGO_MATCHER_CORRESPONDENCE_REDUCTION_2026-08-28.md`.
 
 ## Milestones
 
@@ -77,7 +82,10 @@ early multi-channel matcher 0x180028de0                 PROVEN role
 spatial similarity channel 0x180050c80                  PROVEN role
 primary correspondence builder 0x180059580              PROVEN role
 pairwise descriptor-cost primitive 0x18005baf0          PROVEN
-correspondence consolidation 0x18005a350                CURRENT
+correspondence consolidation 0x18005a350                PROVEN structurally
+correspondence inlier reducer 0x18001f840               PROVEN structurally
+inlier geometry helper 0x1800586c0                      CURRENT
+additional pair filter 0x180024880                      CURRENT
 exact final matcher scoring/decision                    NOT YET CLOSED
 enrollment template update/storage representation       NOT YET CLOSED
 Linux feature extraction/matcher implementation         NOT YET IMPLEMENTED
@@ -107,10 +115,6 @@ Never regress to `source-state`.
 
 ## Retained feature record — current proven structure
 
-The final retained feature stride is exactly `0x3c` bytes.
-
-Current structure:
-
 ```text
 +0x00        local flag / quality-like field; exact name unclaimed
 +0x02        X Q8
@@ -127,122 +131,126 @@ Current structure:
 +0x39        neighborhood/spatial-support score
 ```
 
-`0x180056780` produces the four Pass-A sign/projection DWORDs at `+0x10..+0x1f`; `0x180056670` produces the Pass-B sign/projection DWORD at `+0x28..+0x2b`.
-
-`0x180056520` produces the median-threshold bitsets, using the lower median returned by `0x180056b10`.
-
-## Post-extraction list and quality finalization
-
-### `0x1800371c0` / `0x18003b820`
-
-`0x371c0` filters the retained list in-place using a local zero-count WORD map produced exactly by `0x3b820` via a summed-area/integral image. This stage is sufficiently closed; do not descend further unless a new dependency requires it.
-
-### `0x180016930`
-
-Computes one local image/map-derived score per retained feature. One caller writes these scores directly to the parallel `object+0x164` array.
-
-### `0x180016bd0`
-
-Performs pairwise local-neighborhood analysis between retained features and writes a clamped support-like score to `feature+0x39`. It also contributes to the final status refinement using local and neighbor-smoothed scores.
-
-### `0x18000ede0`
-
-Whole-feature-list reorder/finalizer. It partitions/reorders `0x3c` records based on low status bits and swaps the parallel `object+0x164` entries in lockstep. It writes a partition/count-like value at `output+0x108`.
-
-## Identify / matcher ABI checkpoint
-
-`identifyImageWrapper` enters `0x18000d6c0`.
-
-The identify path builds the probe through `0x180016920` and then loops over candidate templates.
-
-`0x180028c90` is the per-candidate matcher wrapper. Proven high-level ABI:
+## Matcher path — current reconstruction
 
 ```text
-first argument  = match-result/score output pointer
-second argument = probe fingerprint object
-third argument  = candidate/template container
-return EAX      = execution/status
+identify 0x18000d6c0
+  -> 0x180028c90 per-candidate matcher wrapper
+  -> 0x1800293c0 score/policy orchestrator
+       -> 0x180028de0 early matcher
+            -> 0x180059580 primary correspondence builder
+                 -> 0x18005baf0 descriptor comparator (twice)
+                 -> 0x18005a350 ambiguity/spatial/top-K consolidation
+            -> 0x18001f840 geometric/directional survivor reduction
+                 -> 0x1800586c0 inlier-mask helper          [CURRENT]
+                 -> 0x180024880 additional pair filter      [CURRENT]
+                 -> optional 0x180058f90 refinement
+            -> 0x180050c80 spatial/image similarity channel
+            -> 0x180058420 alternate/refined correspondence state
+            -> 0x18001f840 refined survivor reduction
+            -> 0x180051980 / 0x18005a6b0 additional relation metrics
+       -> policy gates including 0x1800258c0 / 0x18001c920
+       -> final score fusion / result write
 ```
 
-The actual match decision/result is written through the first argument, while nonzero `EAX` indicates execution failure/status.
+`0x1800258c0` and `0x18001c920` are threshold/policy predicates over already-computed metrics; they are not raw minutia descriptor comparators.
 
-`0x28c90` prepares matcher context and delegates the substantial work to `0x1800293c0`.
+## `0x18005baf0` — descriptor correspondence primitive
 
-## Matcher evidence channels
-
-The matcher combines multiple evidence channels rather than using one descriptor distance alone.
-
-Current reconstruction:
-
-```text
-binary minutia correspondence evidence
-  -> 0x59580 / 0x5baf0 / 0x5a350
-
-spatial/image representation similarity
-  -> 0x50c80 and helpers
-
-additional relation/geometry metrics
-  -> 0x51980 / 0x5a6b0 and surrounding orchestration
-
-quality / coverage / policy gates
-  -> 0x258c0 / 0x1c920 and other thresholds
-
-final score fusion
-  -> 0x293c0
-```
-
-`0x258c0` and `0x1c920` are threshold/policy predicates over already-computed metrics; they are not raw minutia descriptor comparators.
-
-`0x50c80` is primarily a spatial/image-representation similarity channel and does not directly traverse `output+0xf8` as `0x3c` minutiae.
-
-## `0x18005baf0` — pairwise binary descriptor correspondence primitive
-
-This is the newest major closed checkpoint.
-
-A previous run incorrectly stopped at the first PE `RUNTIME_FUNCTION` boundary. Full CFG recovery proves the logical function crosses three unwind entries and spans:
+Full CFG recovery proves one logical function across three unwind entries:
 
 ```text
 0x18005baf0 .. 0x18005bf35
 273 reachable instructions
 ```
 
-The function contains nested loops with explicit `0x3c` stride arithmetic over both retained-feature lists.
+It directly traverses both `0x3c` feature lists. The primary descriptor comparison covers `feature+0x10..+0x1f`, XORs corresponding DWORDs, splits the XOR results into bytes, and sums a fixed lookup value from `0x180079730`. Treat this as a Hamming-like byte-lookup binary-descriptor distance until the lookup table is independently verified.
 
-For each feature pair, the primary descriptor comparison starts at `feature+0x10` and covers the 16-byte Pass-A sign/projection descriptor. It XORs corresponding DWORDs, extracts the four bytes of each XOR result, and accumulates values from the fixed lookup table at:
+It also consumes selected later binary fields, emits pair costs/variant flags, and maintains best/second-best candidate indices. No deeper substantive matcher child performs this comparison.
+
+## `0x18005a350` — ambiguity, spatial duplicate suppression, top-K selection
+
+The recovered function is not a reciprocal-nearest-neighbor test.
+
+For each candidate pair it applies the integer ambiguity relation:
 
 ```text
-0x180079730
+best_cost * cfg_A < second_cost * cfg_B
 ```
 
-This is operationally a Hamming-like byte-lookup binary-descriptor distance. Do not yet label the table itself as an exact popcount table until its entries are independently verified.
+Then it loads X/Y from the referenced `0x3c` feature and suppresses spatial conflicts when:
 
-The function also performs additional XOR + lookup cost terms using selected later binary fields in the `0x3c` record.
+```text
+(dx_q8 * dx_q8) + (dy_q8 * dy_q8) < 0x10000
+```
 
-It writes pairwise byte costs/variant flags and maintains the best two observed pair costs plus associated opposite-list indices for each outer feature.
+When candidates conflict, it retains the lower-cost one.
 
-There is no substantive child below this comparison: the only direct call is the teardown/security-cookie helper `0x18000c170`.
+The selected correspondence set is bounded. If full, the function finds the currently worst retained cost and replaces it only when the new pair is better.
 
-Therefore the actual pairwise binary-descriptor comparison primitive has now been reached.
+Final output is a flat signed 32-bit pair array:
 
-Detailed checkpoint: `docs/CHICAGO_MATCHER_CORRESPONDENCE_5BAF0_2026-08-28.md`.
+```text
+[index_A0,index_B0,index_A1,index_B1,...]
+```
+
+Unused slots are set to `-1`.
+
+`0x5a350` does not consume minutia direction `+0x06`; direction enters in `0x1f840`.
+
+## `0x18001f840` — surviving inlier count
+
+The first 0x39-byte PE runtime entry is only a split-unwind fragment. Full CFG recovery proves:
+
+```text
+0x18001f840 .. 0x18001fbb0
+197 reachable instructions
+3 runtime/unwind entries
+```
+
+The function resolves candidate and probe feature arrays at `+0xf8`, reads each nonnegative correspondence pair, and copies for both referenced minutiae:
+
+```text
++0x02 X Q8
++0x04 Y Q8
++0x06 signed Q12-radian direction
+```
+
+It counts valid input pairs. If that count is not greater than the caller-supplied minimum threshold, it returns zero.
+
+It then calls `0x1800586c0`, which structurally produces an inlier-like byte mask and an auxiliary fixed-point/geometry metric. Pairs whose mask byte is zero are invalidated.
+
+Next it calls `0x180024880`, which contains its own `0x3c` traversal and reads direction `+0x06` from both sides. Pairs invalidated by this helper clear the corresponding mask byte.
+
+Finally `0x1f840` counts nonzero mask entries and returns exactly:
+
+```text
+EAX = surviving_correspondence_count
+```
+
+On the early matcher path this value is written to `match_record+0x00` and `match_record+0x04`.
+
+If the survivor count is at least 4 and the metric returned through the `0x586c0` work state exceeds `0x4000`, `0x1f840` calls `0x180058f90`. It does not recount before returning, so `0x58f90` is not required to define the returned integer; it likely refines side-state/context used later.
 
 ## Immediate task
 
-Reverse `0x18005a350` next.
+Reverse only:
 
-It is called immediately after the two directional `0x18005baf0` passes from `0x180059580`.
+```text
+0x1800586c0
+0x180024880
+```
 
 Determine:
 
-1. whether it enforces reciprocal/mutual nearest-neighbor correspondences;
-2. how best/second-best costs and indices are filtered;
-3. the exact correspondence list/record it emits;
-4. how that state is reduced by `0x18001f840`;
-5. where geometry/direction consistency joins the descriptor-distance evidence.
+1. the exact geometric transform/consistency model used by `0x586c0`;
+2. how its byte inlier mask is produced;
+3. the meaning/scaling of the metric checked against `0x4000`;
+4. the exact direction/feature-consistency rule by which `0x24880` invalidates pairs.
 
-After that, continue only the minimum decisive path needed to close final matcher scoring and then enrollment update/template storage.
+Do not descend into `0x58f90` unless a later consumer proves that side effect is needed for final score reproduction.
 
-Do not return to USB/TLS/preprocessing/Gaussian or previously closed feature-pruning helpers unless a newly proven dependency requires it.
+After these are closed, continue only the minimum decisive path needed for final matcher score/policy fusion, then enrollment update/template storage.
 
 ## Completion / safety gates
 
