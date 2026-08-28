@@ -28,14 +28,15 @@ Read first:
 3. `docs/CHICAGO_POST_MASK_STAGE_4AEA0_2026-08-28.md`
 4. `docs/CHICAGO_Q13_BASE_UPDATE_D6F0_2026-08-28.md`
 5. `docs/CHICAGO_SPATIAL_MEDIAN_FILTER_C3B0_2026-08-28.md`
-6. `docs/RELEASE_READINESS_AND_SAFETY_GATES.md`
-7. `docs/DEVELOPER_ROADMAP.md`
-8. `docs/WINDOWS_IMAGE_LAYOUT_5135_PROOF_2026-08-27.md`
-9. `docs/IMAGE_TRANSPORT_5135_PROOF_2026-08-27.md`
-10. `docs/FDT_5135_PROOF_2026-08-27.md`
-11. `docs/LINUX_CFG70_UPLOAD_PROOF_2026-08-27.md`
-12. `docs/FAILURES_AND_RECOVERIES_2026-08-27.md`
-13. `docs/SAFETY.md`
+6. `docs/CHICAGO_497C0_GATE_TO_B460_2026-08-28.md`
+7. `docs/RELEASE_READINESS_AND_SAFETY_GATES.md`
+8. `docs/DEVELOPER_ROADMAP.md`
+9. `docs/WINDOWS_IMAGE_LAYOUT_5135_PROOF_2026-08-27.md`
+10. `docs/IMAGE_TRANSPORT_5135_PROOF_2026-08-27.md`
+11. `docs/FDT_5135_PROOF_2026-08-27.md`
+12. `docs/LINUX_CFG70_UPLOAD_PROOF_2026-08-27.md`
+13. `docs/FAILURES_AND_RECOVERIES_2026-08-27.md`
+14. `docs/SAFETY.md`
 
 Older handoff/current-status documents are historical evidence and may describe blockers already solved.
 
@@ -67,8 +68,9 @@ persistent corrected plane                   PROVEN state+0x13244
 Q13 primary/secondary surfaces               PROVEN
 late type-0x0c Q13 composition               PROVEN
 base scratch_A adaptive update               PROVEN 0x18004d6f0
-spatial ratio filter                         PROVEN 0x18004c3b0
-current task                                 caller region after 0x1800497c0
+spatial ratio median filter                  PROVEN 0x18004c3b0
+0x1800497c0 caller role                      PROVEN boolean gate
+current decisive helper                      0x18004b460
 matcher/enrollment                           LATER
 libfprint/fprintd integration                 LATER
 release/safety matrix                        FINAL
@@ -141,17 +143,6 @@ Late type-`0x0c` composition is proven for `scratch_A` and `scratch_B`; see `doc
 
 ## Base adaptive update `0x18004d6f0` — PROVEN
 
-Caller mapping on the tested `0x0c` path:
-
-```text
-RCX = reference/global plane side
-RDX = work object; data pointer at +0x18
-R8  = scratch_A (in/out primary Q13 surface)
-R9D = one geometry dimension
-arg5 = other geometry dimension
-arg6 = selector 0x0c
-```
-
 It builds a temporary ratio plane:
 
 ```text
@@ -161,19 +152,15 @@ else:
     ratio_raw[i] = round((reference[i] << 13) / scratch_A[i])
 ```
 
-and calls:
+then calls `0x18004c3b0`.
+
+For type `0x0c`:
 
 ```text
-0x18004c3b0(ratio_raw_object, work_object)
+threshold = 1800
 ```
 
-For type `0x0c`, the post-filter threshold is:
-
-```text
-0x708 = 1800
-```
-
-and the update is:
+and:
 
 ```text
 q = ratio_filtered[i]
@@ -184,79 +171,64 @@ if q != 0 and x != 0 and abs(q-x) > 1800:
         round((scratch_A[i] * q) / x),
         0x7fff
     )
-else:
-    scratch_A[i] unchanged
 ```
+
+otherwise `scratch_A[i]` is unchanged.
 
 ## Spatial filter `0x18004c3b0` — PROVEN
 
-`0x18004c3b0` is a deterministic integer separable median-of-three filter.
-
-For interior pixels define:
+For interior pixels:
 
 ```text
 H(y,x) = median(src[y][x-1], src[y][x], src[y][x+1])
+out(y,x) = median(H(y-1,x), H(y,x), H(y+1,x))
 ```
 
-then:
+Borders are copied unchanged. It is a separable median-of-three horizontal then vertical filter, not the true median of all nine 3x3 samples.
+
+## `0x1800497c0` caller role — PROVEN
+
+On the tested path the caller executes:
 
 ```text
-out[y][x] = median(H(y-1,x), H(y,x), H(y+1,x))
+call 0x1800497c0
+test eax,eax
+je   skip_B460_branch
 ```
 
-for:
+`scratch_A` (`r15`) is not passed directly to `0x1800497c0`, so caller-level evidence supports treating it as a branch predicate/gate, not a direct Q13-surface transform.
+
+If it returns nonzero, the caller invokes `0x18004b460` twice. In both calls:
 
 ```text
-1 <= x < width-1
-1 <= y < height-1
+R8 = r15 = scratch_A
 ```
 
-The border is copied unchanged. The routine uses two temporary u16 rows and ends via tail-call to the allocation-release helper `0x180064d60`.
+The two calls use different auxiliary pointers/temporary allocations, so they may be distinct passes over the same correction surface.
 
-This is a separable median-style 3x3 filter; it is not generally equal to the true median of all nine 3x3 samples.
-
-Combined with `0x18004d6f0`:
-
-```text
-ratio_raw
- -> separable median-of-3 horizontal
- -> separable median-of-3 vertical
- -> ratio_filtered
- -> compare against work plane
- -> thresholded scratch_A rescale
-```
-
-So the base type-`0x0c` Q13 update is now closed at this level.
+Do not descend into `0x1800497c0` unless later work requires the exact predicate enabling this branch.
 
 ## Immediate next task
 
-Return to the tested selector-`0x0c` caller path in `0x180049ba0`.
-
-The next call in execution order is:
+Reverse exactly:
 
 ```text
-0x1800497c0
-```
-
-but the already-recovered call arguments do **not** visibly pass `scratch_A` directly. Therefore do not descend into `0x1800497c0` yet.
-
-First inspect the caller region:
-
-```text
-0x18004a1d0 .. 0x18004a2f0
+AlgoChicago.dll 0x18004b460
 ```
 
 Need to prove:
 
-1. complete control flow after `call 0x1800497c0`;
-2. what its return value controls;
-3. whether any path before `0x18004a2f0` modifies/copies `scratch_A` or `scratch_B`;
-4. descend into `0x1800497c0` only if its output/side effects are proven to feed the Q13 correction surfaces;
-5. otherwise skip it and continue to the next proven denominator-modifying stage;
-6. after the correction surface is fully closed, trace `state+0x13244` into matcher/enrollment-facing processing;
-7. independently prove the producer of `state+0x9924` before equating it with gfusb ImageBase.
+1. exact PE/logical function boundary;
+2. full argument mapping from the two caller sites;
+3. whether `R8 = scratch_A` is read-only or in/out;
+4. whether either call writes `scratch_A` directly;
+5. what the `width*height*4` temporary buffers represent;
+6. exact per-pixel/spatial/fixed-point formula if this branch changes the denominator surface;
+7. if `0x18004b460` does not alter `scratch_A`, skip the entire gated branch for denominator reconstruction;
+8. after closing the correction surface, trace `state+0x13244` into matcher/enrollment-facing processing;
+9. independently prove the producer of `state+0x9924` before equating it with gfusb ImageBase.
 
-Do not return to USB/TLS/CRC/regroup/gfusb callbacks, `0x180044970`, `0x180043c40`, `0x18004d6f0`, or `0x18004c3b0` unless a newly discovered dependency requires it.
+Do not return to USB/TLS/CRC/regroup/gfusb callbacks, `0x180044970`, `0x180043c40`, `0x18004d6f0`, `0x18004c3b0`, or `0x1800497c0` unless a newly discovered dependency requires it.
 
 ## Safety / privacy
 
