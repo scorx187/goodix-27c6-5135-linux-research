@@ -27,6 +27,15 @@ typedef void (*Goodix5135AsyncDrainNotify) (
  * replacement request. The drain observer must see that new pending request
  * before deciding whether deactivation can finish.
  */
+/*
+ * A request being CURRENT only establishes lifecycle/generation state.
+ * Transport success additionally requires that no USB error was reported.
+ */
+gboolean
+goodix5135_async_result_can_advance (
+  Goodix5135RequestCompletion completion,
+  const GError                *error);
+
 Goodix5135RequestCompletion
 goodix5135_async_dispatch_finish (
   Goodix5135IoLifecycle          *io,

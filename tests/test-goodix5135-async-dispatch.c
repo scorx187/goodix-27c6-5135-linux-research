@@ -295,6 +295,69 @@ test_stale_after_stop_finishes_drain (void)
   g_assert_true (probe.drain_saw_finishable);
 }
 
+static void
+test_result_policy (void)
+{
+  g_autoptr(GError) transport_error = NULL;
+
+  transport_error =
+    g_error_new_literal (
+      g_quark_from_static_string ("goodix5135-test-transport-error"),
+      1,
+      "synthetic transport failure");
+
+  /*
+   * The one and only success combination.
+   */
+  g_assert_true (
+    goodix5135_async_result_can_advance (
+      GOODIX5135_REQUEST_COMPLETION_CURRENT,
+      NULL));
+
+  /*
+   * This is the exact semantic class proven by the live hardware probe:
+   * the request may still be CURRENT while the USB transport timed out.
+   */
+  g_assert_false (
+    goodix5135_async_result_can_advance (
+      GOODIX5135_REQUEST_COMPLETION_CURRENT,
+      transport_error));
+
+  /*
+   * Cancellation, stale generation, and invalid completion must never
+   * advance the protocol, with or without a transport error.
+   */
+  g_assert_false (
+    goodix5135_async_result_can_advance (
+      GOODIX5135_REQUEST_COMPLETION_CANCELLED,
+      NULL));
+
+  g_assert_false (
+    goodix5135_async_result_can_advance (
+      GOODIX5135_REQUEST_COMPLETION_CANCELLED,
+      transport_error));
+
+  g_assert_false (
+    goodix5135_async_result_can_advance (
+      GOODIX5135_REQUEST_COMPLETION_STALE,
+      NULL));
+
+  g_assert_false (
+    goodix5135_async_result_can_advance (
+      GOODIX5135_REQUEST_COMPLETION_STALE,
+      transport_error));
+
+  g_assert_false (
+    goodix5135_async_result_can_advance (
+      GOODIX5135_REQUEST_COMPLETION_INVALID,
+      NULL));
+
+  g_assert_false (
+    goodix5135_async_result_can_advance (
+      GOODIX5135_REQUEST_COMPLETION_INVALID,
+      transport_error));
+}
+
 int
 main (int argc, char **argv)
 {
@@ -319,6 +382,10 @@ main (int argc, char **argv)
   g_test_add_func (
     "/goodix5135/async-dispatch/stale-after-stop",
     test_stale_after_stop_finishes_drain);
+
+  g_test_add_func (
+    "/goodix5135/async-dispatch/result-policy",
+    test_result_policy);
 
   return g_test_run ();
 }

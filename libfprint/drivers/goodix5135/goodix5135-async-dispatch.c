@@ -4,6 +4,22 @@
 
 #include "goodix5135-async-dispatch.h"
 
+gboolean
+goodix5135_async_result_can_advance (
+  Goodix5135RequestCompletion completion,
+  const GError                *error)
+{
+  /*
+   * CURRENT means only that this completion still belongs to the
+   * current request generation and was not cancelled.
+   *
+   * A timeout or any other transport error must never be interpreted
+   * as protocol success merely because the request is CURRENT.
+   */
+  return completion == GOODIX5135_REQUEST_COMPLETION_CURRENT &&
+         error == NULL;
+}
+
 Goodix5135RequestCompletion
 goodix5135_async_dispatch_finish (
   Goodix5135IoLifecycle          *io,
