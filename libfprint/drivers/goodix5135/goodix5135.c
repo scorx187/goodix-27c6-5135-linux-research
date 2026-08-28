@@ -14,6 +14,7 @@
 
 #include "goodix5135.h"
 #include "goodix5135-io.h"
+#include "goodix5135-driver-lifecycle.h"
 #include "goodix5135-proto.h"
 
 struct _FpiDeviceGoodix5135
@@ -103,6 +104,27 @@ goodix5135_maybe_finish_deactivate (FpiDeviceGoodix5135 *self,
   self->deactivating = FALSE;
 
   fpi_image_device_deactivate_complete (dev, NULL);
+}
+
+void
+goodix5135_driver_async_drained (FpDevice              *device,
+                                 Goodix5135IoLifecycle *io)
+{
+  FpiDeviceGoodix5135 *self;
+
+  g_return_if_fail (FP_IS_DEVICE (device));
+
+  self = FPI_DEVICE_GOODIX5135 (device);
+
+  g_return_if_fail (io == &self->io);
+
+  /*
+   * The async layer calls this only after the higher-level callback has
+   * returned. If that callback queued another request, io.pending will
+   * therefore already reflect it.
+   */
+  goodix5135_maybe_finish_deactivate (self,
+                                      FP_IMAGE_DEVICE (device));
 }
 
 static void

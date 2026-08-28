@@ -8,6 +8,8 @@
 #include "drivers_api.h"
 
 #include "goodix5135-async.h"
+#include "goodix5135-async-dispatch.h"
+#include "goodix5135-driver-lifecycle.h"
 #include "goodix5135-transport.h"
 
 #include "goodix5135.h"
@@ -43,6 +45,52 @@ goodix5135_async_kind_endpoint (Goodix5135RequestKind  kind,
     }
 }
 
+typedef struct
+{
+  Goodix5135AsyncOperation *operation;
+  FpDevice                 *device;
+  FpiUsbTransfer           *transfer;
+  GError                   *error;
+} Goodix5135AsyncDispatchContext;
+
+static void
+goodix5135_async_completion_notify (
+  Goodix5135RequestCompletion completion,
+  gpointer                    user_data)
+{
+  Goodix5135AsyncDispatchContext *dispatch = user_data;
+  Goodix5135AsyncOperation *operation;
+
+  g_assert (dispatch != NULL);
+
+  operation = dispatch->operation;
+
+  g_assert (operation != NULL);
+  g_assert (operation->callback != NULL);
+
+  /*
+   * transfer is borrowed for the duration of this callback.
+   * Ownership of error is transferred to the higher layer.
+   */
+  operation->callback (dispatch->device,
+                       dispatch->transfer,
+                       completion,
+                       dispatch->error,
+                       operation->user_data);
+}
+
+static void
+goodix5135_async_drain_notify (Goodix5135IoLifecycle *io,
+                               gpointer                user_data)
+{
+  Goodix5135AsyncDispatchContext *dispatch = user_data;
+
+  g_assert (dispatch != NULL);
+
+  goodix5135_driver_async_drained (dispatch->device,
+                                   io);
+}
+
 static void
 goodix5135_async_transfer_cb (FpiUsbTransfer *transfer,
                               FpDevice       *device,
@@ -50,7 +98,7 @@ goodix5135_async_transfer_cb (FpiUsbTransfer *transfer,
                               GError         *error)
 {
   Goodix5135AsyncOperation *operation = user_data;
-  Goodix5135RequestCompletion completion;
+  Goodix5135AsyncDispatchContext dispatch;
   gboolean action_cancelled;
 
   g_assert (operation != NULL);
@@ -71,23 +119,27 @@ goodix5135_async_transfer_cb (FpiUsbTransfer *transfer,
                       G_IO_ERROR,
                       G_IO_ERROR_CANCELLED));
 
-  completion =
-    goodix5135_request_finish (operation->io,
-                               &operation->request,
-                               action_cancelled);
+  dispatch.operation = operation;
+  dispatch.device = device;
+  dispatch.transfer = transfer;
+  dispatch.error = error;
 
   /*
-   * FpiUsbTransfer is still alive here. libfprint releases its stolen
-   * transfer reference only after this callback returns.
+   * request_finish() drains lifecycle accounting first.
    *
-   * The higher layer receives the transfer as borrowed and receives
-   * ownership of @error.
+   * The higher callback runs second and may enqueue another request.
+   *
+   * The driver drain notification runs last, so deactivation cannot finish
+   * between those two events.
    */
-  operation->callback (device,
-                       transfer,
-                       completion,
-                       error,
-                       operation->user_data);
+  goodix5135_async_dispatch_finish (
+    operation->io,
+    &operation->request,
+    action_cancelled,
+    goodix5135_async_completion_notify,
+    &dispatch,
+    goodix5135_async_drain_notify,
+    &dispatch);
 
   g_free (operation);
 }
