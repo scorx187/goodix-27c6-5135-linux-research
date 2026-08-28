@@ -37,9 +37,7 @@ Older current-status/handoff documents are historical evidence and may describe 
 
 ## Current state — do not repeat solved work
 
-The project is **past config, TLS, FDT, image transport, image CRC, RAW12 decode, ChicagoHU regroup, ImageBase/live layout proof, and gfusb.dll result packaging/handoff**.
-
-The Windows biometric layer above `gfusb.dll` has now also been identified.
+The project is **past config, TLS, FDT, image transport, image CRC, RAW12 decode, ChicagoHU regroup, ImageBase/live layout proof, gfusb.dll result packaging/handoff, Windows algorithm selection, and the outer Chicago preprocessor routine boundary**.
 
 ```text
 CFG70 reconstruction                         DONE
@@ -60,8 +58,9 @@ Windows engine component                     IDENTIFIED: EngineAdapter.dll
 0x2504 / family 0x0c algorithm selection     PROVEN: AlgoChicago.dll
 AlgoChicago preprocessor export              PROVEN: RVA 0x0000b560
 real preprocessor entry                      PROVEN: 0x18000e780
-full semantic preprocessor CFG               CURRENT TASK
-exact preprocessing arithmetic               NOT YET PROVEN
+outer semantic preprocessor routine          PROVEN: 0x18000e780..0x18000e947
+core preprocessing helper                    IDENTIFIED: 0x1800484e0
+exact preprocessing arithmetic               CURRENT TASK
 matcher/enrollment                           LATER
 libfprint/fprintd integration                 LATER
 release/safety matrix                        FINAL STAGE
@@ -69,34 +68,72 @@ release/safety matrix                        FINAL STAGE
 
 ## Immediate next task
 
-**Do not return to transport, ImageBase orientation, the detector, callback `0x180013280`, or request helper `0x18001393c` unless a new dependency requires it.**
+**Do not return to transport, ImageBase orientation, the detector, callback `0x180013280`, request helper `0x18001393c`, or the outer boundary of `0x18000e780` unless a new dependency requires it.**
 
-The current reverse-engineering target is the complete reachable control flow beginning at:
+The current reverse-engineering target is:
 
 ```text
-AlgoChicago.dll 0x18000e780
+AlgoChicago.dll 0x1800484e0
 ```
 
-`preprocessor_wrapper` at RVA `0x0000b560` is only a seven-argument forwarding shim to this implementation.
+The complete logical outer `preprocessor_wrapper` implementation is now proven to span four adjacent compiler-split x64 runtime-function regions:
 
-Important correction: the first x64 `RUNTIME_FUNCTION` record covering the entry ends at `0x18000e880`, but code in that region directly branches to at least `0x18000e91a` and `0x18000e92e`. Therefore one unwind record is **not** the complete semantic routine boundary. Follow the control-flow graph across all reachable fragments/funclets until actual returns are reached.
+```text
+0x18000e780 .. 0x18000e880
+0x18000e880 .. 0x18000e8e0
+0x18000e8e0 .. 0x18000e91a
+0x18000e91a .. 0x18000e947
+```
+
+with the real return at `0x18000e946`.
+
+The outer routine validates state, calls `0x1800484e0`, copies processed bytes from the returned temporary object into its output descriptor, writes quality/coverage bytes, cleans the temporary object, and propagates the core-helper return code.
+
+### Proven outer data-shape facts
+
+- outer argument 1 behaves as a source descriptor: `+0x00` data pointer, `+0x14` size/count;
+- outer argument 4 behaves as result descriptor: `+0x00` destination pointer, `+0x14` output byte count, `+0x28` quality byte, `+0x29` coverage byte;
+- outer argument 5 points to two DWORD outputs: `+0x00` coverage, `+0x04` quality;
+- outer argument 7 is a byte mode selector; value `1` maps to internal mode `0`, otherwise mode `2`;
+- outer argument 6 remains unnamed/unproven;
+- original outer arguments 2 and 3 are forwarded into `0x1800484e0` and must not yet be labeled ImageBase/live/calibration without data-flow proof.
+
+### Proven core-helper call shape
+
+Immediately before `0x1800484e0`:
+
+```text
+RCX = &local temporary processed-image object
+RDX = outer_arg1->data
+R8D = outer_arg1->size/count
+R9  = global preprocessor/calibration state 0x18009aa00
+
+stack arg5  = packed global preprocessing configuration bits
+stack arg6  = &global calibrated flag 0x18009a9f4
+stack arg7  = global value 0x18009a9dc
+stack arg8  = outer_arg5 + 4  (quality output)
+stack arg9  = outer_arg5      (coverage output)
+stack arg10 = original outer_arg2
+stack arg11 = original outer_arg3
+stack arg12 = 0
+```
 
 Need exact proof, if present, for:
 
-1. identities of the seven preprocessor arguments;
-2. ImageBase input;
-3. live-image input;
-4. processed-image output;
-5. calibration state/data;
+1. meaning of original outer arguments 2 and 3;
+2. exact ImageBase input;
+3. exact live-image input;
+4. calibration state/data consumption;
+5. first pixel-wise transformation;
 6. subtraction direction and signedness;
 7. clamp/saturation;
 8. normalization/gain;
 9. per-pixel correction/noise handling;
 10. crop/grow/output dimensions;
-11. quality/coverage outputs;
+11. quality/coverage calculations;
 12. exact buffer passed into identification/enrollment.
 
-Do not name unexplained status values such as EngineAdapter's observed special `0x84` result until the producer/meaning is proven from the algorithm code.
+Do not name unexplained status values such as EngineAdapter's observed special `0x84` result until its producer/meaning is proven from the core algorithm.
 
 ## Windows biometric architecture checkpoint
 
