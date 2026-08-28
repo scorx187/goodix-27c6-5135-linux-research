@@ -150,7 +150,8 @@ driver_sources = {
           'drivers/goodix5135/goodix5135-proto.c',
           'drivers/goodix5135/goodix5135-image.c',
           'drivers/goodix5135/goodix5135-image-response.c',
-          'drivers/goodix5135/goodix5135-io.c' ],
+          'drivers/goodix5135/goodix5135-io.c',
+          'drivers/goodix5135/goodix5135-request.c' ],
     'goodixmoc' :
         [ 'drivers/goodixmoc/goodix.c', 'drivers/goodixmoc/goodix_proto.c' ],
     'fpcmoc' :
