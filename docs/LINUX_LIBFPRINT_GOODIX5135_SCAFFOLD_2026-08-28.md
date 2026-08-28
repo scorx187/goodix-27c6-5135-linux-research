@@ -89,7 +89,7 @@ trailer             0x88
 total plaintext     7693 bytes
 ```
 
-The parser exposes borrowed views for metadata, packed RAW12, and stored CRC without copying or logging biometric bytes. Permanent Meson test `goodix5135-proto` passes seven synthetic cases: valid frame, wrong command, wrong declared length, wrong trailer, truncated frame, oversized frame, and null arguments. Together, `goodix5135-image` and `goodix5135-proto` pass 2/2 under `meson test`.
+The parser exposes borrowed views for metadata, packed RAW12, and stored CRC without copying or logging biometric bytes. Permanent Meson test `goodix5135-proto` passes seven synthetic cases: valid frame, wrong command, wrong declared length, wrong trailer, truncated frame, oversized frame, and null arguments.
 
 ### 5. Validated end-to-end host image-response pipeline
 
@@ -149,20 +149,59 @@ pending-- until zero
 stop may complete safely
 ```
 
-A permanent `goodix5135-io` Meson test passes eight synthetic cases covering inactive rejection, normal completion, stale completion after stop, rejection of new I/O after stop, restart only after drain, double-completion rejection, multi-pending drain, and immediate stop with no pending work.
+Permanent `goodix5135-io` tests cover inactive rejection, normal completion, stale completion after stop, rejection of new I/O after stop, restart only after drain, double-completion rejection, multi-pending drain, and immediate stop with no pending work.
 
-At this checkpoint all four Goodix host suites pass 4/4 under `meson test`:
+### 7. Wire I/O lifecycle into `FpImageDevice`
+
+Local libfprint commit:
+
+`94ec6c891c8eb684571dff671ab21a5abef9c59f`
+
+Commit subject:
+
+`goodix5135: wire I/O lifecycle into image device`
+
+The driver shell now starts one logical I/O generation during activation, marks deactivation as pending, stops accepting logical I/O immediately, and only calls `fpi_image_device_deactivate_complete()` when the lifecycle model reports all pending work drained. The integration still creates no `FpiUsbTransfer`, sends no Goodix command, and creates no TLS session.
+
+Targeted build passed and all four existing Goodix host suites remained green.
+
+### 8. Host-only transport request bookkeeping
+
+Local libfprint commit:
+
+`532c8bbf845908100f5961f92acf22a8bc3dc312`
+
+Commit subject:
+
+`goodix5135: add transport request bookkeeping`
+
+Added a host-only request model layered on top of lifecycle accounting. Each future request records:
+
+- lifecycle generation token,
+- request kind (`BULK_IN` / `BULK_OUT`),
+- fixed Goodix endpoint,
+- length,
+- timeout,
+- in-flight state,
+- cancellation-request state.
+
+The request model validates endpoint direction, rejects zero lengths/timeouts, rejects double begin, keeps cancellation separate from callback drain, and marks completion stale when its lifecycle generation has already stopped.
+
+Permanent `goodix5135-request` tests pass 10/10 synthetic cases. At this checkpoint all five Goodix host suites pass 5/5:
 
 - `goodix5135-image`
 - `goodix5135-proto`
 - `goodix5135-image-response`
 - `goodix5135-io`
+- `goodix5135-request`
+
+No `FpiUsbTransfer` has yet been created or submitted by the Goodix5135 driver.
 
 ## Full default-driver regression checkpoint
 
 At local libfprint commit `1c7441fb6c69c092f26c35a055bcb97d4d9106d4`, a fresh `-Ddrivers=default` build completed `151/151` targets successfully. Generated driver registration and supported-device metadata both included `27c6:5135`. The Goodix host suites passed 3/3 from the default build. The unit-test suite reported 5 passed, 0 failed, and one expected skip for `fpi-assembling` because optional Cairo support is unavailable. No system installation or device I/O occurred.
 
-## Current proven host-side foundation
+## Current proven foundation
 
 ```text
 0x20 frame validation
@@ -177,16 +216,22 @@ ChicagoHU regroup
       ↓
 80 x 64 u16 downstream plane
 
-plus
+plus transport control plane:
 
+FpImageDevice lifecycle
+      ↓
 logical I/O generation / pending accounting
       ↓
-stop -> reject new work -> drain stale callbacks -> safe completion
+request kind / endpoint / length / timeout / cancellation bookkeeping
+      ↓
+stop -> reject new work -> drain stale callbacks -> safe deactivation completion
 ```
 
 ## Safety state
 
-The current branch still does **not** implement Goodix device-protocol USB transfers, TLS, FDT, activation commands, runtime configuration upload, image capture from hardware, persistent register writes, firmware operations, PSK provisioning, or biometric logging.
+The current branch still does **not** implement Goodix device-protocol USB submission, TLS, FDT, activation commands, runtime configuration upload, image capture from hardware, persistent register writes, firmware operations, PSK provisioning, or biometric logging.
+
+The scaffold already claims/releases USB interface 0 on open/close, as it has since the initial build-only driver registration, but no Goodix protocol transfer is submitted.
 
 No system-installed libfprint/fprintd was replaced or installed from this branch during these checkpoints.
 
@@ -194,4 +239,4 @@ No private capture, fingerprint image/raw/template, factory secret, PSK material
 
 ## Next implementation step
 
-Integrate the proven host-only I/O lifecycle accounting into `FpiDeviceGoodix5135` itself so activate/deactivate owns a logical generation and deactivation completion is gated on drained pending work. Keep this integration free of `FpiUsbTransfer` submission and free of TLS. After that integration is independently build-tested, the first real asynchronous bulk-transfer primitive can be introduced behind the already-proven lifecycle rules, with explicit timeout/cancellation handling before any Goodix command sequence is enabled.
+Introduce a narrow `FpiUsbTransfer` preparation wrapper behind the proven request model. The first step should only construct/fill a bulk transfer from a validated `Goodix5135Request`; it must not submit the transfer, must not be wired into activation, and must not send any Goodix command. Build-test that wrapper first. Only after the ownership/buffer mapping is explicit and compile-tested should asynchronous submission/callback/cancellation wiring be introduced.
