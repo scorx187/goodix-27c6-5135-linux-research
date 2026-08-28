@@ -22,23 +22,11 @@ Commit subject:
 
 `goodix5135: add build-only ChicagoHU image-device scaffold`
 
-Files added:
-
-- `libfprint/drivers/goodix5135/goodix5135.c`
-- `libfprint/drivers/goodix5135/goodix5135.h`
-- `libfprint/drivers/goodix5135/goodix5135-proto.c`
-- `libfprint/drivers/goodix5135/goodix5135-proto.h`
-
-Build integration changed:
-
-- `libfprint/meson.build`
-- top-level `meson.build`
-
-The generated driver registry contains `fpi_device_goodix5135_get_type()` and generated supported-device metadata contains:
+The generated driver registry contains `fpi_device_goodix5135_get_type()` and supported-device metadata contains:
 
 `27c6:5135 | Goodix 27c6:5135 ChicagoHU Fingerprint Sensor`
 
-The scaffold is registered as an `FpImageDevice` with press-sensor semantics and downstream geometry `80x64`.
+The scaffold is an `FpImageDevice` with press-sensor semantics and downstream geometry `80x64`.
 
 ### 2. Host-only CRC and ChicagoHU layout helpers
 
@@ -50,16 +38,7 @@ Commit subject:
 
 `goodix5135: add ChicagoHU image layout helpers`
 
-Added pure host-side helpers for:
-
-- CRC-32/MPEG-2 (`poly 0x04C11DB7`, `init 0xFFFFFFFF`, non-reflected, xorout zero);
-- ChicagoHU regroup from packed/source order into the proven `80x64` downstream plane using:
-
-```text
-dst[(n % 64) * 80 + (n / 64)] = src[n]
-```
-
-A public synthetic CRC vector (`123456789`) produced `0x0376E6E7`, and synthetic regroup boundary tests passed. No device I/O was enabled.
+Added pure host-side CRC-32/MPEG-2 and ChicagoHU regroup helpers. Synthetic tests passed; no device I/O was enabled.
 
 ### 3. RAW12 decode and permanent Meson unit tests
 
@@ -71,7 +50,7 @@ Commit subject:
 
 `goodix5135: add RAW12 image decoding tests`
 
-Added the proven Goodix 5135 packed RAW12 decode, where every six input bytes produce four 12-bit samples:
+Added the proven packed RAW12 decode:
 
 ```text
 p0 = ((b0 & 0x0f) << 8) | b1
@@ -80,27 +59,46 @@ p2 = ((b5 & 0x0f) << 8) | b2
 p3 = (b4 << 4) | (b5 >> 4)
 ```
 
-Also added Windows-compatible interpretation of the four-byte stored image CRC field:
+Also added stored CRC-field interpretation:
 
 ```text
 [a, b, c, d] -> c<<24 | d<<16 | a<<8 | b
 ```
 
-A permanent Meson unit test `goodix5135-image` now covers:
+Permanent Meson unit test `goodix5135-image` covers CRC, CRC-field ordering, RAW12 decode, and ChicagoHU regroup using synthetic vectors only.
 
-- CRC-32/MPEG-2;
-- stored CRC-field ordering;
-- RAW12 `7680 bytes -> 5120 u16 samples`;
-- ChicagoHU regroup.
+### 4. Host-only decrypted image-frame parser
 
-The test passes through `meson test` and direct GLib/TAP execution with four passing cases. Test vectors are synthetic and contain no biometric or unit-specific data.
+Local libfprint commit:
+
+`42b6bbfcb69fe6a9e2cc38a76e95e233badae8ea`
+
+Commit subject:
+
+`goodix5135: add image response frame parser`
+
+Added a strict host-only parser for the proven decrypted command-`0x20` image response:
+
+```text
+command            0x20
+declared length     7690 (little-endian)
+metadata            5 bytes
+packed RAW12        7680 bytes
+stored image CRC    4 bytes
+trailer             0x88
+total plaintext     7693 bytes
+```
+
+The parser exposes borrowed views for metadata, packed RAW12, and stored CRC without copying or logging biometric bytes. Permanent Meson test `goodix5135-proto` passes seven synthetic cases: valid frame, wrong command, wrong declared length, wrong trailer, truncated frame, oversized frame, and null arguments. Together, `goodix5135-image` and `goodix5135-proto` pass 2/2 under `meson test`.
 
 ## Current proven host-side image foundation
 
 ```text
-CRC-32/MPEG-2
+0x20 frame validation
       ↓
-stored CRC-field decode
+metadata / packed RAW12 / stored CRC views
+      ↓
+CRC-32/MPEG-2 + stored CRC interpretation
       ↓
 RAW12 7680 bytes -> 5120 u16 samples
       ↓
@@ -119,16 +117,4 @@ No private capture, fingerprint image/raw/template, factory secret, PSK material
 
 ## Next implementation step
 
-Implement a host-only parser for the proven decrypted image response framing before enabling real USB transport. The established image response has:
-
-```text
-command            0x20
-declared length     7690 (little-endian)
-metadata            5 bytes
-packed RAW12        7680 bytes
-stored image CRC    4 bytes
-trailer             0x88
-total plaintext     7693 bytes
-```
-
-The parser should validate all fixed sizes/bounds and expose views/offsets without logging biometric bytes. Synthetic unit tests should cover valid framing plus wrong command, wrong declared length, truncation/oversize, and wrong trailer. Device I/O must remain disabled until the host parser and lifecycle/cancellation boundaries are independently tested.
+Compose the proven host-only pieces into one end-to-end image-response decoder that accepts exactly one decrypted 7693-byte command-`0x20` response, validates framing, validates the stored image CRC against CRC-32/MPEG-2 over the 7680 packed RAW12 bytes, decodes RAW12, performs ChicagoHU regroup, and returns the `80x64` u16 plane. Add only synthetic unit tests, including CRC corruption rejection and structural failures. Keep USB/TLS/device I/O disabled until this host-side decode path is independently green.
