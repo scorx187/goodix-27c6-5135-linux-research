@@ -133,19 +133,76 @@ plus dimension/config fields. Its exact transform remains open.
 
 ### `0x180049ba0`
 
-Immediately before the final fixed-point output loop, the call receives:
+Immediately before the final fixed-point output loop, the call receives the scaled/copied source-side scratch, state/context-side inputs, the work descriptor, geometry/type information and the cleaned mask result.
+
+This child is now proven to be a substantial correction-surface builder, not a single local-average helper.
+
+## `0x180049ba0` type-0x0c correction-surface behavior — NEW PROOF
+
+The exact `0x180049ba0` body returns at `0x18004ab12` and contains multiple scalar and SIMD full-plane passes.
+
+For the tested selector `0x0c`:
+
+1. the selector is explicitly compared with `0x0c` after helper `0x18004b390`;
+2. selector `0x0c` is **not** the special `0x0b` path, therefore execution takes the general branch beginning near `0x180049e8d`;
+3. that branch performs non-negative WORD difference/threshold transforms on working planes;
+4. after the branch rejoins near `0x18004a040`, the routine initializes the descriptor plane at `arg5+0` — the plane mapped by the parent as `scratch_A` — to:
 
 ```text
-RCX = scratch_C
-RDX = state/context
-R8  = original source plane (arg1)
-R9  = global/static work pointer 0x1800ff914
-arg5 = caller descriptor/work structure
-arg6 = geometry/mode/type structure
-arg7 = cleaned mask/statistics structure
+0x2000
 ```
 
-Therefore `0x180049ba0` is the primary remaining producer of the temporary denominator/work planes consumed immediately afterward.
+for every WORD.
+
+`0x2000 == 8192`, which is exactly unity in Q13 fixed-point representation.
+
+Therefore `scratch_A` is now proven to start as a **Q13 per-pixel multiplicative correction/gain surface**, not as an arbitrary raw image copy.
+
+Subsequent scalar and SIMD paths repeatedly combine WORD surfaces using the same fixed-point pattern. Scalar examples are of the form:
+
+```text
+product = a * b
+result  = (product + 0x1000) >> 13
+```
+
+The SIMD implementation uses the equivalent family of operations:
+
+```text
+pmulld
+paddd
+psrad
+```
+
+with the same Q13 rounding/scaling behavior.
+
+Later branches can combine more than two per-pixel surfaces before writing back to the Q13 plane. Consequently the conservative semantic label is:
+
+```text
+scratch_A = composed Q13 per-pixel correction/gain surface
+```
+
+This is stronger and more precise than the previous placeholder description "denominator/work plane".
+
+### Secondary surface (`scratch_B`)
+
+The parent descriptor maps another full-size allocated plane at descriptor offset `+0x30` (`scratch_B`). `0x180049ba0` carries a second Q13-style surface through related branches. Some paths copy the primary surface into the secondary surface; other paths build/compose it separately before the parent optionally uses it as the denominator for a caller-visible auxiliary output.
+
+The exact type-0x0c branch conditions controlling when `scratch_B` is copied versus independently composed are not yet completely reconstructed, so do not assign it a stronger semantic name yet.
+
+### Other proven `0x180049ba0` behaviors
+
+The function also:
+
+- allocates temporary full-image WORD storage;
+- uses the cleaned mask in difference-selection logic;
+- contains non-negative clipping via conditional zeroing after signed/WORD differences;
+- contains special branches for other sensor selectors including `0x0b`, `0x04`, and others;
+- calls specialized spatial/correction helpers including `0x18004b390`, `0x18004d6f0` / `0x18004d890`, `0x1800497c0`, `0x18004b460`, and `0x180049530` depending on selector/config state;
+- uses SIMD integer arithmetic, but no floating-point arithmetic was observed in the captured body.
+
+For tested selector `0x0c`, the branch after `0x1800429b0` selects `0x18004d6f0` rather than the `0x04/0x0b`-only `0x18004d890` path.
+
+A later selector dispatch also excludes `0x0c` from bit mask `0x00412030`, then routes `0x0c` through the `selector-0x0b <= 1` branch beginning near `0x18004a727`. This is the immediate region to isolate next.
 
 ## Caller-visible reciprocal/gain-like auxiliary output — PROVEN
 
@@ -211,50 +268,61 @@ For the tested type-0x0c path, `scratch_C` has already been multiplied by three 
 
 If the first optional output pointer from `arg6` is non-null, a parallel relation is written using `scratch_B` as its denominator, with the same source numerator and fixed-point shift.
 
-This proves that `0x18004aea0` is not merely an orchestrator: it emits a persistent, state-owned **fixed-point ratio/corrected image-like plane** at `state+0x13244`.
-
-The conservative description is intentionally `fixed-point ratio/corrected plane`; calling it the final matcher-normalized fingerprint image still requires tracing its later consumers.
-
-## No float/SIMD in this exact stage
-
-The exact body contains no matching floating-point or SIMD normalization instructions. Its visible image arithmetic is scalar integer/WORD arithmetic:
+Combining this parent relation with the new `0x180049ba0` proof gives the tested path at a higher semantic level:
 
 ```text
-WORD loads/stores
-multiply-by-3
-left shifts
-integer divide with rounding
-conditional fallback/copy
+scaled source plane
+ -> build/combine Q13 per-pixel correction surface(s)
+ -> fixed-point per-pixel division with rounding
+ -> persistent corrected image-like plane at state+0x13244
 ```
+
+The conservative description remains `fixed-point ratio/corrected plane`; calling it the final matcher-normalized fingerprint image still requires tracing later consumers.
 
 ## What remains unknown
 
-Two important links are still open:
+Important open links are now narrower:
 
-1. **How `0x180049ba0` constructs `scratch_A` and `scratch_B`.** These are the denominators that directly determine the persistent plane at `state+0x13244`.
-2. **How `state+0x9924` is populated.** It is statically proven to participate in this type-0x0c path, but it is not yet proven identical to gfusb.dll's persisted ImageBase.
-
-Also still open is the exact semantic meaning of the per-pixel gate plane beginning at `state+0x4`.
+1. **Exact type-0x0c composition formula inside `0x180049ba0` after the Q13-unity initialization.** We know the representation and multiplication rule, but not yet which specific source surfaces feed every factor on the tested branch.
+2. **Exact secondary `scratch_B` branch for type 0x0c.**
+3. **How `state+0x9924` is populated.** It is statically proven to participate in this type-0x0c path, but it is not yet proven identical to gfusb.dll's persisted ImageBase.
+4. **Downstream consumer of `state+0x13244`.** This must be tied to matcher-facing processing before calling it the final normalized fingerprint image.
+5. Exact semantic meaning of the per-pixel gate plane beginning at `state+0x4`.
 
 ## Immediate next target
 
-Reverse-engineer `0x180049ba0` next, not `0x18004d3b0` at random.
+Do **not** reverse all 25 calls in `0x180049ba0`.
 
-Reason: `0x180049ba0` runs immediately before the final output loop and must establish or transform the temporary denominator planes (`scratch_A` and `scratch_B`) that are used directly in:
+Isolate the tested selector-`0x0c` control-flow only, especially:
 
 ```text
-processed[i] = round((scratch_C[i] << 14) / scratch_A[i])
+0x18004a0c0 .. 0x18004aa94
 ```
 
-for the tested type-0x0c path.
+with emphasis on the selector dispatch at:
+
+```text
+0x18004a0d1: cmp r8d,0x0c
+```
+
+and the later selector-0x0c route through:
+
+```text
+0x18004a405
+ -> 0x18004a727
+ -> ...
+ -> 0x18004aa94
+```
 
 Goals:
 
-1. establish the complete logical function boundary of `0x180049ba0`;
-2. determine exactly where it writes `scratch_A` and `scratch_B` through the caller descriptor;
-3. recover the per-pixel/local-window formula producing those denominator values;
-4. identify whether they represent local illumination, background estimate, gain denominator, smoothed reference, or another correction surface;
-5. trace the resulting `state+0x13244` plane into `0x1800435a0` and later matcher-facing stages.
+1. map exactly which Q13 factor planes modify `scratch_A` for type `0x0c`;
+2. map when `scratch_B` copies or diverges from `scratch_A`;
+3. identify the direct role of `0x18004d6f0`, `0x1800497c0`, and `0x18004b460` on the tested branch;
+4. only descend into a child helper once its output is proven to feed the Q13 denominator surface used by the parent;
+5. then trace `state+0x13244` into its next consumer.
+
+Separately, retain the independent task of proving the producer of `state+0x9924` before equating it with the gfusb persisted ImageBase.
 
 ## Safety boundary
 
