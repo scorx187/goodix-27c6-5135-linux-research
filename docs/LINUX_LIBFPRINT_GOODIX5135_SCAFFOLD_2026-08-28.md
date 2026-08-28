@@ -91,6 +91,40 @@ total plaintext     7693 bytes
 
 The parser exposes borrowed views for metadata, packed RAW12, and stored CRC without copying or logging biometric bytes. Permanent Meson test `goodix5135-proto` passes seven synthetic cases: valid frame, wrong command, wrong declared length, wrong trailer, truncated frame, oversized frame, and null arguments. Together, `goodix5135-image` and `goodix5135-proto` pass 2/2 under `meson test`.
 
+### 5. Validated end-to-end host image-response pipeline
+
+Local libfprint commit:
+
+`1c7441fb6c69c092f26c35a055bcb97d4d9106d4`
+
+Commit subject:
+
+`goodix5135: add validated image response pipeline`
+
+Added `goodix5135_decode_image_response()` as a pure host-side composition of the already-proven pieces:
+
+```text
+7693-byte decrypted command-0x20 response
+      ↓
+strict frame validation
+      ↓
+stored CRC decode + CRC-32/MPEG-2 over packed RAW12
+      ↓
+Goodix RAW12 decode (7680 bytes -> 5120 u16)
+      ↓
+ChicagoHU regroup
+      ↓
+80 x 64 u16 downstream plane
+```
+
+Permanent Meson test `goodix5135-image-response` passes seven synthetic cases including full valid decode, packed-data CRC corruption rejection, stored-CRC corruption rejection, bad frame, wrong total length, undersized output, and null arguments. The valid case verifies the transport-to-ChicagoHU mapping across all 5120 output samples, not only corners.
+
+At this checkpoint the three permanent Goodix host suites pass 3/3 under `meson test`:
+
+- `goodix5135-image`
+- `goodix5135-proto`
+- `goodix5135-image-response`
+
 ## Current proven host-side image foundation
 
 ```text
@@ -117,4 +151,4 @@ No private capture, fingerprint image/raw/template, factory secret, PSK material
 
 ## Next implementation step
 
-Compose the proven host-only pieces into one end-to-end image-response decoder that accepts exactly one decrypted 7693-byte command-`0x20` response, validates framing, validates the stored image CRC against CRC-32/MPEG-2 over the 7680 packed RAW12 bytes, decodes RAW12, performs ChicagoHU regroup, and returns the `80x64` u16 plane. Add only synthetic unit tests, including CRC corruption rejection and structural failures. Keep USB/TLS/device I/O disabled until this host-side decode path is independently green.
+Run a fresh full `-Ddrivers=default` regression build at local libfprint commit `1c7441fb6c69c092f26c35a055bcb97d4d9106d4` and re-run the permanent Goodix host suites from that build. Confirm that the Goodix additions do not break any default driver build targets or generated driver metadata. Only after this regression gate is green should work move to an isolated, asynchronous USB transport abstraction with explicit timeout/cancellation semantics. Do not send Goodix protocol commands or create a TLS session as part of the regression gate.
