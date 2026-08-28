@@ -2,220 +2,267 @@
 
 Target: Goodix USB fingerprint sensor `27c6:5135`, firmware `GF_HC460SEC_APP_12508`, logical chip `0x2504`, ChicagoHS / ChicagoHU, sensor family/type `0x0c`.
 
-This is the canonical high-level checkpoint for the Linux enablement effort. Static Windows reverse engineering is being used only to reproduce compatible behavior; no proprietary Goodix binaries, biometric samples, or device secrets are committed.
+This is the canonical high-level checkpoint for the Linux enablement effort. Static Windows reverse engineering is used only to reproduce compatible behavior. No proprietary Goodix binaries, device secrets, biometric samples/templates, unit-specific runtime configuration, or Windows biometric database material are committed.
 
 ## Plain-language position
 
-The difficult transport half is solved: Linux can safely reach the sensor, establish the factory-compatible TLS session, detect finger state, request/decrypt/validate an image, decode RAW12 and reproduce the Windows-compatible 80x64 downstream layout.
+The device/transport side is solved on the tested unit: USB transport, volatile runtime configuration, factory-compatible TLS, activation, finger detection, image request/decrypt/framing/CRC, RAW12 decode, ChicagoHU regroup, and Windows-compatible 80x64 downstream layout are all established.
 
-The current work is inside `AlgoChicago.dll` preprocessing. The main correction pipeline is substantially reconstructed: initial signed state/source difference, mask cleanup, Q13 correction surfaces, adaptive ratio correction, a separable median stage, persistent corrected plane at `state+0x13244`, and a gated late-factor learner. The immediate open transform is the generic mode-9 operation configured by `0x18004e820` and executed through `0x18004fff0`.
+The preprocessing pipeline is also substantially closed. We have traced the correction/normalization path through the persistent corrected U16 plane, local contrast normalization to U8, directional/texture mask generation, quality/segmentation policy gates, and final U8 output-mask postprocessing. The outer preprocessor copy-out boundary is known.
+
+The active work is now Phase 8: fingerprint feature extraction, post-extraction filtering, and the representation consumed by enrollment/identify/matching.
+
+The current exact checkpoint is immediately after the post-extraction spatial-pruning stage `0x1800371c0` / `0x18003b820`. The next task is to continue through `0x1800139e0` and identify the first matcher-ready probe/template-side representation.
 
 ## Milestones
 
 ```text
-Device identity / 27c6:5135 profile                PASS
-Factory compatibility constraints                  PASS
-USB transport                                      PASS
-CFG70 reconstruction                               PASS
-Volatile command 0x90 runtime config               PASS
-Factory TLS 1.2 PSK session                        PASS
-Activation sequence                                PASS
-FDT manual/down/up                                  PASS on tested unit
-Image command 0x20                                 PASS
-TLS image transport/decrypt                        PASS
-Goodix framing / CRC                               PASS on one private capture
-RAW12 -> 5120 samples                              PASS
-ChicagoHU regroup                                  PROVEN
-ImageBase/live same-index layout                   PROVEN
-Candidate A                                        PROVEN
-Candidate B double-regroup                         REJECTED
-gfusb post-detection packaging                     PROVEN
-WBDI / EngineAdapter layer                         PROVEN
-family 0x0c -> AlgoChicago.dll                     PROVEN
-outer preprocessor 0x18000e780..0x18000e947        PROVEN
-core orchestrator 0x1800484e0                      PROVEN
-state-source signed subtraction 0x180044970        PROVEN
-mask cleanup/source filter 0x180043c40              PROVEN
-post-mask correction parent 0x18004aea0             PROVEN
-Q13 correction surfaces                            PROVEN
-base adaptive update 0x18004d6f0                  PROVEN
-separable median filter 0x18004c3b0                PROVEN
-gated factor updater 0x18004b460                  PROVEN at parent level
-0x18004e110 wrapper role                           PROVEN
-mode-9 context builder 0x18004e820                 CURRENT
-mode-9 executor path in 0x18004fff0                NEXT
-exact matcher input                                NOT YET PROVEN
-matcher/enrollment                                 NOT YET IMPLEMENTED
-libfprint/fprintd                                  NOT YET IMPLEMENTED
-lifecycle/stress safety matrix                     NOT YET COMPLETE
+Device identity / 27c6:5135 profile                     PASS
+Factory compatibility constraints                       PASS
+USB transport                                           PASS
+CFG70 reconstruction                                    PASS
+Volatile command 0x90 runtime config                    PASS
+Factory TLS 1.2 PSK session                             PASS
+Activation sequence                                     PASS
+FDT manual/down/up                                       PASS on tested unit
+Image command 0x20                                      PASS
+TLS image transport/decrypt                             PASS
+Goodix framing / CRC                                    PASS on one private capture
+RAW12 -> 5120 samples                                   PASS
+ChicagoHU regroup                                       PROVEN
+ImageBase/live same-index layout                        PROVEN
+Candidate A                                             PROVEN
+Candidate B double-regroup                              REJECTED
+gfusb post-detection packaging                          PROVEN
+WBDI / EngineAdapter layer                              PROVEN
+family 0x0c -> AlgoChicago.dll                          PROVEN
+outer preprocessor 0x18000e780                          PROVEN
+core preprocessing orchestrator 0x1800484e0             PROVEN
+state-source signed subtraction 0x180044970             PROVEN
+mask cleanup/source validity 0x180043c40                PROVEN
+Q13 correction parent 0x18004aea0                      PROVEN
+persistent corrected U16 plane state+0x13244            PROVEN
+mode-9 Gaussian path                                    PROVEN
+mode-9 border policy / numerics                         PROVEN
+U16 -> normalized U8 0x1800435a0                       PROVEN
+persistent normalized byte plane state+0x1cb64          PROVEN
+post-normalization texture/mask stage 0x180050550       PROVEN
+quality/segmentation gate 0x180046ff0                   PROVEN
+quality/preprocess policy orchestrator 0x180046930      PROVEN
+mask consistency evaluator 0x180045bf0                  PROVEN
+final U8 output-mask postprocessor 0x1800547c0          PROVEN
+outer preprocessor copy-out boundary                    PROVEN
+identify wrapper -> 0x18000d6c0                         PROVEN
+ enrollment wrapper -> 0x18000cd70                       PROVEN target
+shared identify/enrollment builder 0x1800139e0          PROVEN role
+feature extraction orchestrator 0x180011080             PROVEN
+feature candidate scanner 0x1800153b0                   PROVEN role
+accepted-feature emitter 0x180014560                    PROVEN
+36-bin local orientation histogram 0x180011a60          PROVEN role
+retained feature stride 0x3c                            PROVEN
+local descriptor median threshold 0x180056b10           PROVEN
+binary descriptor packer 0x180056520                    PROVEN
+Pass-A / Pass-B descriptor dimensions                   PROVEN
+post-extraction spatial pruning 0x1800371c0             PROVEN
+local zero-count map builder 0x18003b820                PROVEN
+first matcher-ready representation after pruning        CURRENT
+per-candidate matcher 0x180028c90                       PROVEN role only
+exact matcher scoring/decision                          NOT YET CLOSED
+enrollment template update/storage representation       NOT YET CLOSED
+Linux feature extraction/matcher implementation         NOT YET IMPLEMENTED
+libfprint/fprintd integration                           NOT YET IMPLEMENTED
+lifecycle/stress safety matrix                          NOT YET COMPLETE
 ```
 
-## Critical arithmetic correction — `0x180044970`
+## Critical preprocessing arithmetic
 
-For selector/type `0x0c`, the exact first difference is:
+For selector/type `0x0c`, `0x180044970` computes:
 
 ```text
 diff16[i] = state_plus_0x9924_u16[i] - source_u16[i]
 ```
 
-The direction is proven twice.
+with wrapping 16-bit subtraction later interpreted as signed `s16`.
 
-SIMD:
-
-```asm
-movdqu xmm1,[state_plane + index*2]
-movdqu xmm0,[source      + index*2]
-psubw  xmm1,xmm0
-```
-
-Scalar tail likewise loads the state WORD then subtracts the source WORD.
-
-The result wraps as 16-bit arithmetic and is later sign-extended, so it is intentionally interpreted as signed `s16`.
-
-Selector `4` uses the separate relation:
+Selector `4` has the separate relation:
 
 ```text
 state_plane - source + 0x0fff
 ```
 
-The tested 5135/type-`0x0c` path does not use that offset branch.
+Do not regress to `source-state`.
 
-Important: `state+0x9924` is proven only as an AlgoChicago internal preprocessing/calibration-state plane. It is **not yet proven identical to gfusb persisted ImageBase**.
+Also, `state+0x9924` remains an AlgoChicago internal preprocessing/calibration-state plane. It is not yet independently proven identical to gfusb persisted ImageBase.
 
-## Mask stage `0x180043c40`
+## Preprocessor output path now closed far past the old checkpoint
 
-This stage performs mask geometry cleanup/hole filling, source-range validity filtering and coverage recomputation. For selector `0x0c`, an active mask pixel can survive only when:
-
-```text
-100 < source_u16[i] < 3800
-```
-
-It does not perform another image subtraction or normalization.
-
-## Post-mask Q13 correction
-
-`0x18004aea0` allocates three temporary u16 planes and invokes `0x180049ba0` to construct correction surfaces.
-
-For selector `0x0c`:
+The mode-9 transform is a separable 5x5 Gaussian using the five Q16 coefficients:
 
 ```text
-scratch_C[i] = 3 * source_side_word[i]
-global_work[i] = 3 * state_plus_0x9924[i]
+[7869, 15328, 19142, 15328, 7869]
 ```
 
-`scratch_A` is the primary Q13 denominator/correction surface and starts at:
+with the border behavior and fixed-point application already closed.
+
+The later preprocessing chain is also mapped:
 
 ```text
-0x2000 == 8192 == Q13 unity
+state+0x13244 corrected U16
+  -> 0x1800435a0 local contrast normalization
+  -> state+0x1cb64 normalized U8
+  -> 0x180050550 directional edge/texture mask
+  -> 0x180046ff0 quality/segmentation acceptance
+  -> 0x180046930 multi-policy quality/preprocessing
+  -> 0x180045bf0 mask consistency/coverage evaluation
+  -> 0x1800547c0 final U8 validity/output-mask postprocessing
+  -> outer wrapper copy-out
 ```
 
-The exact composition primitive is:
+Preprocessing is therefore no longer the immediate blocker.
+
+## Feature extraction checkpoint
+
+`0x180016920` thunks to shared builder `0x1800139e0`, which is called by both enrollment and identify paths.
+
+Its output object contains:
 
 ```text
-Q13_mul(a,b) = (a*b + 0x1000) >> 13
+output+0xf0 = retained feature count
+output+0xf8 = retained feature array
 ```
 
-The parent finally writes the persistent corrected plane at:
+with each feature exactly `0x3c` bytes.
+
+### Accepted feature fields
+
+`0x180014560` is proven to append accepted features and increment the count.
+
+Known fields:
 
 ```text
-state + 0x13244
++0x02 = X Q8
++0x04 = Y Q8
++0x06 = signed Q12-radian direction
 ```
 
-using type-`0x0c` shift 14:
+The final direction comes from a 36-bin circular local orientation histogram built by `0x180011a60`, followed by sub-bin interpolation in `0x180014560`.
+
+### Compact local descriptors
+
+`0x180017730` enriches each retained feature using two passes.
+
+`0x180056b10` returns the lower median of the descriptor components:
 
 ```text
-if gate_word[i] != 0:
-    if scratch_A[i] == 0:
-        processed[i] = scratch_C[i] << 14
-    else:
-        processed[i] = round((scratch_C[i] << 14) / scratch_A[i])
-else:
-    processed[i] = scratch_C[i]
+N=128 -> rank 63
+N=32  -> rank 15
 ```
 
-This is proven as a corrected image-like plane, but not yet proven to be the final matcher input.
-
-## Base adaptive Q13 update
-
-`0x18004d6f0` forms:
+`0x180056520` produces bitsets using the rule:
 
 ```text
-ratio_raw[i] =
-    reference[i] << 13                              if scratch_A[i] == 0
-    round((reference[i] << 13) / scratch_A[i])     otherwise
+bit = 1 iff selected_component > lower_median
 ```
 
-`0x18004c3b0` applies a separable median-of-three filter:
+For type `0x0c`:
 
 ```text
-H(y,x)   = median(src[y][x-1], src[y][x], src[y][x+1])
-out(y,x) = median(H[y-1][x], H[y][x], H[y+1][x])
+Pass A: 64 bits, source stride 2, 8 bytes at feature+0x20..+0x27
+Pass B: 32 bits, source stride 1, 4 bytes at feature+0x2c..+0x2f
 ```
 
-with borders copied unchanged.
+The associated sign/projection masks are produced by `0x180056780` and `0x180056670`.
 
-For selector `0x0c`, if filtered ratio `q` and work value `x` are nonzero and:
+See `docs/CHICAGO_FEATURE_EXTRACTION_AND_PRUNING_2026-08-28.md` for the current detailed record map.
+
+## `0x1800371c0` — proven post-extraction pruning
+
+This function receives both the complete retained feature array and `&feature_count`.
+
+It does not build the matcher template. Instead it filters the list in-place.
+
+For each feature:
 
 ```text
-abs(q-x) > 1800
+x = (x_q8 + 0x80) >> 8
+y = (y_q8 + 0x80) >> 8
 ```
 
-then:
+It then checks a temporary WORD map at `map[y*width+x]`.
+
+When the map value is greater than `1`, the feature is removed by swapping the final retained `0x3c` record into the current slot, zeroing the old last record, decrementing the count, and rechecking the moved record. The final feature count is written back.
+
+Therefore `0x1800371c0` is a real post-extraction feature-list pruning/compaction stage.
+
+## `0x18003b820` — exact local zero-count map
+
+This helper is now algorithmically closed.
+
+It receives an input byte mask/buffer, output WORD map, width, height, local radius, and total-zero-count output pointer.
+
+It builds a `(width+1)x(height+1)` summed-area/integral image of:
 
 ```text
-scratch_A[i] = min(round((scratch_A[i] * q) / x), 0x7fff)
+z(y,x) = 1 when input_byte(y,x) == 0
+         0 otherwise
 ```
 
-## Gated late-factor learning
-
-`0x1800497c0` is proven at the caller level to gate an optional branch. If enabled, `0x18004b460` runs twice with `R8 = scratch_A`.
-
-`0x18004b460` does not write `scratch_A` directly. It builds Q13 ratios and adaptively updates late per-pixel factor surfaces which are later multiplied into `scratch_A` / `scratch_B`.
-
-After its child transform, for each pixel:
+and simultaneously returns:
 
 ```text
-local_ratio = round((temp_filtered[i] << 13) / work[i])
+total_zero_count = number of zero-valued input pixels
 ```
 
-with `0x2000` used when the denominator is zero. A factor sample is accepted only when:
+It then uses the four-corner summed-area formula to write, for each image location:
 
 ```text
-abs(local_ratio - 0x2000) < 0x148
+local_zero_count[y,x]
 ```
 
-and the factor uses a rounded running average with observation count capped at 30.
-
-## `0x18004e110` — generic wrapper, not the filter
-
-`0x18004e110` contains no pixel loop. It validates/reconciles two image objects, temporarily adjusts format/stride metadata, constructs an operation context and dispatches the actual transform.
-
-On the current path:
+inside a clipped square neighborhood whose nominal size is:
 
 ```text
-0x18004e820(..., mode=9, arg5=-1, arg6=-1) -> ctx
-0x18004fff0(ctx, ratio_object, output/work_object)
+(2*radius+1) x (2*radius+1)
 ```
 
-For mode 9, `ctx+0x88 = 0`; that flag is set to 1 only for modes 6 or 8. Therefore constant `9` is currently only a proven operation/mode selector, **not** a proven 9x9 window.
+`0x1800371c0` only applies the pruning path when the global zero count is at least 50, and removes a feature when its local zero count is greater than 1.
 
-See `docs/CHICAGO_E110_WRAPPER_TO_FFF0_2026-08-28.md`.
+Do not yet assign semantic polarity such as "background" or "invalid" to zero values until the exact producer of this particular byte mask is independently closed.
 
 ## Immediate task
 
-Reverse `0x18004e820` first because it is small and determines the context consumed by the executor. For the exact caller values, prove:
+Return to `0x1800139e0` immediately after its `0x1800371c0` call.
 
-1. interpretation of the packed two-DWORD value returned by `0x1800501a0`;
-2. fields/callbacks/coefficients installed into the context;
-3. exact branch selected by mode 9;
-4. which execution path that selects inside `0x18004fff0`.
+Do not spend more time on `0x18003b820`; it is sufficiently closed.
 
-Then trace only that selected `0x18004fff0` path to recover the transform reaching the near-unity gate in `0x18004b460`.
+Trace the next representation-building operations until the first object that is demonstrably consumed by:
 
-After closing the correction pipeline, trace `state+0x13244` to matcher/enrollment-facing processing and independently prove the producer of `state+0x9924`.
+```text
+enrollment core 0x18000cd70
+identify core   0x18000d6c0
+matcher         0x180028c90
+```
+
+Prioritize the minimum decisive path needed to reproduce:
+
+1. probe/template representation;
+2. enrollment accumulation/update;
+3. per-candidate comparison/scoring;
+4. final identify/verify decision.
+
+Do not reverse every helper merely because it is reachable.
 
 ## Completion / safety gates
 
-Release is not complete until native libfprint enrollment and verification work reliably; cancellation/timeouts recover; cold boot and suspend/resume pass; repeated use does not leak secrets or biometric payloads; and Windows Hello plus existing Windows fingerprints continue to work unchanged. No firmware erase/flash or factory PSK rewrite is permitted.
+Release is not complete until native Linux integration satisfies all defined safety gates with no known unsafe behavior:
 
-Never publish or request plaintext PSK/hashes, full OTP, unit-specific full runtime config/hash, fingerprint images/raw/templates, `goodix.dat`, `goodix_calib.dat`, `Goodix_Cache.bin`, proprietary Goodix binaries, Windows biometric DB material, or process dumps.
+- `fprintd-enroll` works;
+- `fprintd-verify` works;
+- reboot/cold boot works;
+- suspend/resume works;
+- cancellation/timeouts recover cleanly;
+- no secret or biometric payload logging;
+- Windows Hello and the existing Windows fingerprints still work afterward;
+- no firmware erase/flash or factory PSK rewrite/reprovision.
+
+Never publish or request plaintext PSK/hashes, full OTP, unit-specific full runtime config/hash, fingerprint images/raw/templates, `goodix.dat`, `goodix_calib.dat`, `Goodix_Cache.bin`, proprietary Goodix binaries, Windows biometric DB material, or process/memory dumps.
