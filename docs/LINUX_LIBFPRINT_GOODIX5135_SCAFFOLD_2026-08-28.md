@@ -119,13 +119,50 @@ ChicagoHU regroup
 
 Permanent Meson test `goodix5135-image-response` passes seven synthetic cases including full valid decode, packed-data CRC corruption rejection, stored-CRC corruption rejection, bad frame, wrong total length, undersized output, and null arguments. The valid case verifies the transport-to-ChicagoHU mapping across all 5120 output samples, not only corners.
 
-At this checkpoint the three permanent Goodix host suites pass 3/3 under `meson test`:
+### 6. Host-only I/O lifecycle accounting
+
+Local libfprint commit:
+
+`68b36f6b70d9a1cd8223740877a1f9102738a7ff`
+
+Commit subject:
+
+`goodix5135: add I/O lifecycle accounting`
+
+Added a pure host-side generation/pending accounting model for future asynchronous USB operations. The model deliberately contains no `FpiUsbTransfer` submission and no TLS code.
+
+The lifecycle contract is:
+
+```text
+start generation
+      ↓
+begin I/O -> pending++
+      ↓
+stop/deactivate request
+      ↓
+reject new I/O
+      ↓
+outstanding callbacks drain as stale
+      ↓
+pending-- until zero
+      ↓
+stop may complete safely
+```
+
+A permanent `goodix5135-io` Meson test passes eight synthetic cases covering inactive rejection, normal completion, stale completion after stop, rejection of new I/O after stop, restart only after drain, double-completion rejection, multi-pending drain, and immediate stop with no pending work.
+
+At this checkpoint all four Goodix host suites pass 4/4 under `meson test`:
 
 - `goodix5135-image`
 - `goodix5135-proto`
 - `goodix5135-image-response`
+- `goodix5135-io`
 
-## Current proven host-side image foundation
+## Full default-driver regression checkpoint
+
+At local libfprint commit `1c7441fb6c69c092f26c35a055bcb97d4d9106d4`, a fresh `-Ddrivers=default` build completed `151/151` targets successfully. Generated driver registration and supported-device metadata both included `27c6:5135`. The Goodix host suites passed 3/3 from the default build. The unit-test suite reported 5 passed, 0 failed, and one expected skip for `fpi-assembling` because optional Cairo support is unavailable. No system installation or device I/O occurred.
+
+## Current proven host-side foundation
 
 ```text
 0x20 frame validation
@@ -139,11 +176,17 @@ RAW12 7680 bytes -> 5120 u16 samples
 ChicagoHU regroup
       ↓
 80 x 64 u16 downstream plane
+
+plus
+
+logical I/O generation / pending accounting
+      ↓
+stop -> reject new work -> drain stale callbacks -> safe completion
 ```
 
 ## Safety state
 
-The current branch still does **not** implement Goodix device-protocol USB transfers, TLS, FDT, activation, runtime configuration upload, image capture, persistent register writes, firmware operations, PSK provisioning, or biometric logging.
+The current branch still does **not** implement Goodix device-protocol USB transfers, TLS, FDT, activation commands, runtime configuration upload, image capture from hardware, persistent register writes, firmware operations, PSK provisioning, or biometric logging.
 
 No system-installed libfprint/fprintd was replaced or installed from this branch during these checkpoints.
 
@@ -151,4 +194,4 @@ No private capture, fingerprint image/raw/template, factory secret, PSK material
 
 ## Next implementation step
 
-Run a fresh full `-Ddrivers=default` regression build at local libfprint commit `1c7441fb6c69c092f26c35a055bcb97d4d9106d4` and re-run the permanent Goodix host suites from that build. Confirm that the Goodix additions do not break any default driver build targets or generated driver metadata. Only after this regression gate is green should work move to an isolated, asynchronous USB transport abstraction with explicit timeout/cancellation semantics. Do not send Goodix protocol commands or create a TLS session as part of the regression gate.
+Integrate the proven host-only I/O lifecycle accounting into `FpiDeviceGoodix5135` itself so activate/deactivate owns a logical generation and deactivation completion is gated on drained pending work. Keep this integration free of `FpiUsbTransfer` submission and free of TLS. After that integration is independently build-tested, the first real asynchronous bulk-transfer primitive can be introduced behind the already-proven lifecycle rules, with explicit timeout/cancellation handling before any Goodix command sequence is enabled.
