@@ -31,14 +31,15 @@ Read first:
 6. `docs/CHICAGO_497C0_GATE_TO_B460_2026-08-28.md`
 7. `docs/CHICAGO_GATED_FACTOR_UPDATE_B460_2026-08-28.md`
 8. `docs/CHICAGO_E110_WRAPPER_TO_FFF0_2026-08-28.md`
-9. `docs/RELEASE_READINESS_AND_SAFETY_GATES.md`
-10. `docs/DEVELOPER_ROADMAP.md`
-11. `docs/WINDOWS_IMAGE_LAYOUT_5135_PROOF_2026-08-27.md`
-12. `docs/IMAGE_TRANSPORT_5135_PROOF_2026-08-27.md`
-13. `docs/FDT_5135_PROOF_2026-08-27.md`
-14. `docs/LINUX_CFG70_UPLOAD_PROOF_2026-08-27.md`
-15. `docs/FAILURES_AND_RECOVERIES_2026-08-27.md`
-16. `docs/SAFETY.md`
+9. `docs/CHICAGO_MODE9_GAUSSIAN_EXECUTOR_4FFF0_2026-08-28.md`
+10. `docs/RELEASE_READINESS_AND_SAFETY_GATES.md`
+11. `docs/DEVELOPER_ROADMAP.md`
+12. `docs/WINDOWS_IMAGE_LAYOUT_5135_PROOF_2026-08-27.md`
+13. `docs/IMAGE_TRANSPORT_5135_PROOF_2026-08-27.md`
+14. `docs/FDT_5135_PROOF_2026-08-27.md`
+15. `docs/LINUX_CFG70_UPLOAD_PROOF_2026-08-27.md`
+16. `docs/FAILURES_AND_RECOVERIES_2026-08-27.md`
+17. `docs/SAFETY.md`
 
 Older handoff/current-status documents are historical evidence and may describe blockers already solved.
 
@@ -74,8 +75,10 @@ spatial ratio median filter                  PROVEN 0x18004c3b0
 0x1800497c0 caller role                      PROVEN boolean gate
 gated late-factor updater                    PROVEN 0x18004b460
 0x18004e110 role                             PROVEN generic wrapper/orchestrator
-current decisive helper                      0x18004e820 context builder
-next execution helper                        0x18004fff0
+mode-9 static selector 0x18004fbf0           PROVEN
+mode-9 kernel                                PROVEN 5-tap Gaussian sigma=1.5 Q16
+0x18004fff0 role                             PROVEN geometry/dispatch wrapper
+current decisive helper                      0x18004e380 raw pixel executor
 matcher/enrollment                           LATER
 libfprint/fprintd integration                 LATER
 release/safety matrix                        FINAL
@@ -305,31 +308,61 @@ For mode `9`, `ctx+0x88` is set to `0`. The same flag is set to `1` only for mod
 
 Therefore **do not call the constant 9 a 9x9 window**. At this level it is a mode/operation selector.
 
-See `docs/CHICAGO_E110_WRAPPER_TO_FFF0_2026-08-28.md`.
+## Mode-9 static kernel — PROVEN
+
+`0x18004fbf0` selects mode records in `0x40`-byte strides. For mode `9` with class `4`:
+
+```text
+record = 0x1800932b0 + 9*0x40
+       = 0x1800934f0
+```
+
+The record contains:
+
+```text
+count = 5
+coefficients = [7869, 15328, 19142, 15328, 7869]
+sum = 65536
+```
+
+These values exactly equal the normalized five-sample Gaussian for positions `[-2,-1,0,1,2]` with `sigma=1.5`, rounded to Q16. Therefore mode `9` selects a normalized **1D 5-tap Gaussian kernel, sigma=1.5, Q16**. Do not yet claim horizontal+vertical or 5x5 application until the executor proves it.
+
+## `0x18004fff0` — PROVEN geometry/dispatch wrapper
+
+It has no coefficient loop. It computes a start index through `0x18004ddf0`, then calls:
+
+```text
+0x18004e380(
+    ctx,
+    input.data + input[0x08] * start_index,
+    input[0x08],
+    ctx[0x74] - ctx[0x6c],
+    output.data,
+    output[0x08]
+)
+```
+
+Therefore `0x18004e380` is the first confirmed routine receiving raw input/output pointers, stride/row-byte-like values, and the active span for the mode-9 operation.
+
+See `docs/CHICAGO_MODE9_GAUSSIAN_EXECUTOR_4FFF0_2026-08-28.md`.
 
 ## Immediate next task
 
-Reverse the small context builder first:
+Reverse exact function:
 
 ```text
-AlgoChicago.dll 0x18004e820
+AlgoChicago.dll 0x18004e380
 ```
 
-Need to prove for `mode=9`:
+Need to prove:
 
-1. what context fields it initializes;
-2. whether it selects kernel/filter coefficients, callbacks or geometry;
-3. how the packed two-DWORD value from `0x1800501a0` is interpreted;
-4. what mode 9 selects without guessing a semantic label;
-5. identify the exact mode-9-selected path consumed by `0x18004fff0`.
+1. whether the five-tap Gaussian is applied horizontally, vertically, or in multiple passes;
+2. exact accumulation and Q16 rounding;
+3. border handling;
+4. whether context supplies one or two coefficient descriptors;
+5. whether another child helper performs a second separable pass.
 
-Then reverse only that selected path in:
-
-```text
-0x18004fff0(ctx, ratio_object, output/work_object)
-```
-
-to recover the exact transform that reaches the near-unity gate in `0x18004b460`.
+Do not descend into `0x18004ddf0` unless exact border/start-index semantics become necessary.
 
 After closing this gated factor update, return to final Q13 composition and trace `state+0x13244` toward matcher/enrollment. Independently prove the producer of `state+0x9924` before equating it with gfusb ImageBase.
 
