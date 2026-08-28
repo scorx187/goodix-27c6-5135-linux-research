@@ -29,14 +29,15 @@ Read first:
 4. `docs/CHICAGO_Q13_BASE_UPDATE_D6F0_2026-08-28.md`
 5. `docs/CHICAGO_SPATIAL_MEDIAN_FILTER_C3B0_2026-08-28.md`
 6. `docs/CHICAGO_497C0_GATE_TO_B460_2026-08-28.md`
-7. `docs/RELEASE_READINESS_AND_SAFETY_GATES.md`
-8. `docs/DEVELOPER_ROADMAP.md`
-9. `docs/WINDOWS_IMAGE_LAYOUT_5135_PROOF_2026-08-27.md`
-10. `docs/IMAGE_TRANSPORT_5135_PROOF_2026-08-27.md`
-11. `docs/FDT_5135_PROOF_2026-08-27.md`
-12. `docs/LINUX_CFG70_UPLOAD_PROOF_2026-08-27.md`
-13. `docs/FAILURES_AND_RECOVERIES_2026-08-27.md`
-14. `docs/SAFETY.md`
+7. `docs/CHICAGO_GATED_FACTOR_UPDATE_B460_2026-08-28.md`
+8. `docs/RELEASE_READINESS_AND_SAFETY_GATES.md`
+9. `docs/DEVELOPER_ROADMAP.md`
+10. `docs/WINDOWS_IMAGE_LAYOUT_5135_PROOF_2026-08-27.md`
+11. `docs/IMAGE_TRANSPORT_5135_PROOF_2026-08-27.md`
+12. `docs/FDT_5135_PROOF_2026-08-27.md`
+13. `docs/LINUX_CFG70_UPLOAD_PROOF_2026-08-27.md`
+14. `docs/FAILURES_AND_RECOVERIES_2026-08-27.md`
+15. `docs/SAFETY.md`
 
 Older handoff/current-status documents are historical evidence and may describe blockers already solved.
 
@@ -70,7 +71,8 @@ late type-0x0c Q13 composition               PROVEN
 base scratch_A adaptive update               PROVEN 0x18004d6f0
 spatial ratio median filter                  PROVEN 0x18004c3b0
 0x1800497c0 caller role                      PROVEN boolean gate
-current decisive helper                      0x18004b460
+gated late-factor updater                    PROVEN 0x18004b460
+current decisive helper                      0x18004e110
 matcher/enrollment                           LATER
 libfprint/fprintd integration                 LATER
 release/safety matrix                        FINAL
@@ -188,7 +190,7 @@ Borders are copied unchanged. It is a separable median-of-three horizontal then 
 
 ## `0x1800497c0` caller role — PROVEN
 
-On the tested path the caller executes:
+On the tested path:
 
 ```text
 call 0x1800497c0
@@ -196,39 +198,93 @@ test eax,eax
 je   skip_B460_branch
 ```
 
-`scratch_A` (`r15`) is not passed directly to `0x1800497c0`, so caller-level evidence supports treating it as a branch predicate/gate, not a direct Q13-surface transform.
+`scratch_A` is not passed directly to this gate. If it returns nonzero, `0x18004b460` is called twice with `R8 = scratch_A`.
 
-If it returns nonzero, the caller invokes `0x18004b460` twice. In both calls:
+Do not descend into `0x1800497c0` unless later work requires the exact predicate.
+
+## Gated late-factor updater `0x18004b460` — PROVEN at parent level
+
+`0x18004b460` reads `scratch_A` but does not write it directly. Instead it adaptively updates late per-pixel Q13 factor surfaces that are composed into `scratch_A` / `scratch_B` later in the same `0x180049ba0` invocation.
+
+It forms a Q13 ratio array:
 
 ```text
-R8 = r15 = scratch_A
+if scratch_A[i] == 0:
+    ratio32[i] = reference[i] << 13
+else:
+    ratio32[i] = round((reference[i] << 13) / scratch_A[i])
 ```
 
-The two calls use different auxiliary pointers/temporary allocations, so they may be distinct passes over the same correction surface.
+computes a rounded full-plane mean and a global Q13 scale, and builds a temporary u16 ratio plane. If an optional factor plane is present, it first composes:
 
-Do not descend into `0x1800497c0` unless later work requires the exact predicate enabling this branch.
+```text
+combined = Q13_mul(scratch_A[i], optional_factor[i])
+```
+
+and uses `reference / combined` for that temporary plane.
+
+Then it calls:
+
+```text
+0x1800501a0(...)
+0x18004e110(temp_object, work_object, ..., 9, -1, -1)
+```
+
+After this child stage:
+
+```text
+if work[i] != 0:
+    local_ratio = round((temp_filtered[i] << 13) / work[i])
+else:
+    local_ratio = 0x2000
+```
+
+The late factor is updated only when:
+
+```text
+abs(local_ratio - 0x2000) < 0x148
+```
+
+where `0x148 = 328`.
+
+With `n = observation_count`:
+
+```text
+factor[i] = round((factor[i]*n + local_ratio) / (n+1))
+observation_count = min(observation_count + 1, 30)
+```
+
+The two calls update the two late factor surfaces used by the already-proven Q13 composition path. See `docs/CHICAGO_GATED_FACTOR_UPDATE_B460_2026-08-28.md`.
 
 ## Immediate next task
 
 Reverse exactly:
 
 ```text
-AlgoChicago.dll 0x18004b460
+AlgoChicago.dll 0x18004e110
+```
+
+Authoritative callsite from `0x18004b460`:
+
+```text
+RCX = temporary u16 ratio object
+RDX = original work/image object
+R8  = return value from 0x1800501a0
+R9D = 9
+stack arg5 = -1
+stack arg6 = -1
 ```
 
 Need to prove:
 
-1. exact PE/logical function boundary;
-2. full argument mapping from the two caller sites;
-3. whether `R8 = scratch_A` is read-only or in/out;
-4. whether either call writes `scratch_A` directly;
-5. what the `width*height*4` temporary buffers represent;
-6. exact per-pixel/spatial/fixed-point formula if this branch changes the denominator surface;
-7. if `0x18004b460` does not alter `scratch_A`, skip the entire gated branch for denominator reconstruction;
-8. after closing the correction surface, trace `state+0x13244` into matcher/enrollment-facing processing;
-9. independently prove the producer of `state+0x9924` before equating it with gfusb ImageBase.
+1. whether `0x18004e110` filters/smooths/normalizes the temporary ratio plane;
+2. exact role of constant `9` and the two `-1` arguments;
+3. which object is modified and what exact per-pixel formula reaches the later near-unity gate;
+4. whether `0x1800501a0` only constructs an auxiliary kernel/config object or materially changes the algorithm;
+5. after closing `0x18004b460`, return to final Q13 composition and trace `state+0x13244` toward matcher/enrollment;
+6. independently prove the producer of `state+0x9924` before equating it with gfusb ImageBase.
 
-Do not return to USB/TLS/CRC/regroup/gfusb callbacks, `0x180044970`, `0x180043c40`, `0x18004d6f0`, `0x18004c3b0`, or `0x1800497c0` unless a newly discovered dependency requires it.
+Do not return to USB/TLS/CRC/regroup/gfusb callbacks, `0x180044970`, `0x180043c40`, `0x18004d6f0`, `0x18004c3b0`, `0x1800497c0`, or `0x18004b460` unless a newly discovered dependency requires it.
 
 ## Safety / privacy
 
