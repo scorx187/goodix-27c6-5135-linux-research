@@ -1,11 +1,11 @@
 /*
  * Goodix 27c6:5135 ChicagoHU fingerprint reader
  *
- * Initial build-only libfprint scaffold.
+ * Host-side libfprint lifecycle scaffold.
  *
  * IMPORTANT:
  * This revision does not send any Goodix protocol command.
- * It only registers the device/class lifecycle with libfprint.
+ * No FpiUsbTransfer is submitted by this driver yet.
  */
 
 #define FP_COMPONENT "goodix5135"
@@ -13,14 +13,17 @@
 #include "drivers_api.h"
 
 #include "goodix5135.h"
+#include "goodix5135-io.h"
 #include "goodix5135-proto.h"
 
 struct _FpiDeviceGoodix5135
 {
-  FpImageDevice       parent;
+  FpImageDevice          parent;
 
-  gboolean            active;
-  FpiImageDeviceState state;
+  gboolean               active;
+  gboolean               deactivating;
+  FpiImageDeviceState    state;
+  Goodix5135IoLifecycle  io;
 };
 
 G_DECLARE_FINAL_TYPE (FpiDeviceGoodix5135,
@@ -85,15 +88,50 @@ goodix5135_close (FpImageDevice *dev)
 }
 
 static void
+goodix5135_maybe_finish_deactivate (FpiDeviceGoodix5135 *self,
+                                    FpImageDevice       *dev)
+{
+  if (!self->deactivating)
+    return;
+
+  if (!goodix5135_io_can_finish_stop (&self->io))
+    return;
+
+  fp_dbg ("I/O lifecycle drained at generation %" G_GUINT64_FORMAT,
+          self->io.generation);
+
+  self->deactivating = FALSE;
+
+  fpi_image_device_deactivate_complete (dev, NULL);
+}
+
+static void
 goodix5135_activate (FpImageDevice *dev)
 {
   FpiDeviceGoodix5135 *self = FPI_DEVICE_GOODIX5135 (dev);
+  GError *error;
+
+  if (!goodix5135_io_start (&self->io))
+    {
+      error =
+        fpi_device_error_new_msg (
+          FP_DEVICE_ERROR_GENERAL,
+          "Goodix5135 I/O lifecycle could not start");
+
+      self->active = FALSE;
+
+      fpi_image_device_activate_complete (dev, error);
+      return;
+    }
 
   self->active = TRUE;
+  self->deactivating = FALSE;
+
+  fp_dbg ("Started host I/O lifecycle generation %" G_GUINT64_FORMAT,
+          self->io.generation);
 
   /*
-   * Build-only scaffold:
-   * do not send activation/configuration/TLS/FDT commands yet.
+   * No activation/configuration/TLS/FDT command is sent yet.
    */
   fpi_image_device_activate_complete (dev, NULL);
 }
@@ -104,11 +142,22 @@ goodix5135_deactivate (FpImageDevice *dev)
   FpiDeviceGoodix5135 *self = FPI_DEVICE_GOODIX5135 (dev);
 
   self->active = FALSE;
+  self->deactivating = TRUE;
 
   /*
-   * There is currently no in-flight Goodix protocol operation to cancel.
+   * Stop accepting new logical I/O immediately.
+   *
+   * Once real asynchronous transfers exist, their callbacks will drain
+   * io.pending and call goodix5135_maybe_finish_deactivate().
    */
-  fpi_image_device_deactivate_complete (dev, NULL);
+  goodix5135_io_stop (&self->io);
+
+  fp_dbg ("Stopping host I/O lifecycle generation %" G_GUINT64_FORMAT
+          " with %u pending operation(s)",
+          self->io.generation,
+          self->io.pending);
+
+  goodix5135_maybe_finish_deactivate (self, dev);
 }
 
 static void
@@ -130,7 +179,10 @@ static void
 fpi_device_goodix5135_init (FpiDeviceGoodix5135 *self)
 {
   self->active = FALSE;
+  self->deactivating = FALSE;
   self->state = 0;
+
+  goodix5135_io_init (&self->io);
 }
 
 static void
