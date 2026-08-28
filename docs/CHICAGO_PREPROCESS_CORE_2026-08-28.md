@@ -12,7 +12,7 @@ EngineAdapter.dll
   -> logical outer routine 0x18000e780..0x18000e947
   -> core helper/orchestrator 0x1800484e0
   -> first image/state-plane combiner 0x180044970
-  -> mask/statistics consumer beginning 0x180043c40
+  -> full mask cleanup/filter routine 0x180043c40..0x180043ff6
 ```
 
 `0x1800484e0` is a preprocessing orchestrator with many allocations, scratch buffers and specialized helper calls. It is not one simple flat pixel loop.
@@ -114,9 +114,9 @@ using `psubw` followed by `paddw` with a constant vector and the equivalent scal
 
 That offset path must **not** be applied to the tested 5135/type-0x0c implementation.
 
-## What follows the subtraction
+## What follows the subtraction in `0x180044970`
 
-`0x180044970` does considerably more than the initial subtraction. Static control flow proves that it then:
+Static control flow proves that it then:
 
 - computes local block/window statistics over the signed difference plane;
 - uses repeated 16-sample neighborhoods and integer averages;
@@ -127,7 +127,7 @@ That offset path must **not** be applied to the tested 5135/type-0x0c implementa
 - computes a percentage-like field as `count * 100 / pixel_count` into result offset `+0x0e`;
 - returns success (`0`) after freeing its temporary difference buffer.
 
-For selector/type `0x0c`, later threshold-selection logic contains explicit type-12 branches, confirming that this function is not a generic unused helper for the tested device.
+For selector/type `0x0c`, later threshold-selection logic contains explicit type-12 branches, confirming that this function is active for the tested device.
 
 Exact semantic names for every threshold, mask, and status field remain open until their consumers are traced.
 
@@ -141,74 +141,138 @@ source image - AlgoChicago internal state plane at state+0x9924
 
 It is not yet statically proven that `state+0x9924` is the exact same persisted ImageBase plane previously proven in `gfusb.dll`.
 
-The next data-flow task is to determine how this internal state plane is populated from calibration/base inputs and whether it is derived from, copied from, or independent of gfusb's ImageBase.
+The data-flow task remains to determine how this internal state plane is populated from calibration/base inputs and whether it is derived from, copied from, or independent of gfusb's ImageBase.
 
-## `0x180043c40` first unwind segment — mask row/column aggregation
+## `0x180043c40..0x180043ff6` — complete mask cleanup / geometry / source-range filter
 
-`0x180043c40` is called after `0x180044970`. The first x64 `RUNTIME_FUNCTION` entry is only:
+The compiler splits the logical routine into adjacent x64 unwind records:
 
 ```text
 0x180043c40 .. 0x180043d84
+0x180043d84 .. 0x180043d94
+0x180043d94 .. 0x180043f49
+0x180043f49 .. 0x180043ff6
 ```
 
-but this is **not the complete logical routine**. There is no `ret` before `0x180043d84`, so execution falls into later adjacent compiler-split unwind regions. Bounds-check branches also leave this first region. The full logical end must therefore be established before assigning the entire routine a semantic name.
+Normal execution returns at `0x180043ff5`. The adjacent `0x180043ff6` and `0x180043ffc` targets call a failure helper and end in `int3`; they are bounds-check failure stubs rather than normal processing stages.
 
-The sixth Windows-x64 argument is loaded from the entry stack slot into `r14`. At the proven call site this argument is the copied result structure produced by `0x180044970`.
+### Argument use proven
 
-The first segment reads:
+At the entry stack layout, argument 6 is loaded into `r14`. At the known call site this is the copied result structure from `0x180044970`.
+
+The function reads:
 
 ```text
-[result + 0x04] -> first dimension
-[result + 0x08] -> second dimension
-[result + 0x10 + index] -> byte mask
+[result + 0x04] = first dimension
+[result + 0x08] = second dimension
+[result + 0x10] = byte mask start
+[result + 0x00] = active-mask count, recomputed here
+[result + 0x0e] = active-mask percentage, recomputed here
 ```
 
-It zeroes two local arrays of 256 WORD entries and then performs two nested aggregation passes.
+The original first argument (`RCX`) is saved and later used as a 16-bit source-image plane. The second image/state-plane argument is not consumed anywhere in this routine. Thus this function is **not** another source-minus-calibration transform.
 
-### First pass
+### Per-axis mask aggregation
 
-For each index of the first dimension, it sums every mask byte across the second dimension and stores the total in a local WORD array.
+The first two passes zero two local 256-WORD arrays and accumulate the `result+0x10` byte mask along the two orthogonal axes.
 
-Equivalent shape:
+Conceptually:
 
 ```text
-row_sum[y] = sum(mask[y * width + x])
+axisA_sum[a] = sum(mask[a,b])
+axisB_sum[b] = sum(mask[a,b])
 ```
 
-where `row_sum` is a descriptive name only; exact row/column orientation is intentionally deferred until the dimension fields are tied to the 80x64 geometry at this layer.
+The exact physical row/column naming is intentionally deferred until the local dimension fields are tied to physical orientation at this layer.
 
-### Second pass
+The explicit check that `2 * axis_index < 0x200` matches 256-entry WORD arrays.
 
-It then accumulates the same byte mask by the other axis into the second local WORD array:
+### Edge-aware mask fill / cleanup
+
+The next nested loop scans every mask position. For a zero-valued mask cell it searches along the four cardinal directions for the nearest non-zero mask support. It then conditionally changes selected zero cells to `1` using edge-distance tests involving constants `2` and `dimension-3`.
+
+This is best described as an **edge-aware mask hole-fill / cleanup pass**. It is not a crop operation and does not rewrite source-image pixels.
+
+Every active mask byte contributes to `result+0x00`, which is rebuilt from zero during this pass.
+
+### Type-0x0c source-value validity filter — PROVEN
+
+After mask cleanup, the routine loads its fifth argument (the selector/type) and selects a pair of raw-source thresholds.
+
+Default thresholds are:
 
 ```text
-column_sum[x] += mask[y * width + x]
+low  = 50
+high = 4050
 ```
 
-Again, `row_sum`/`column_sum` describe the two orthogonal aggregation axes, not yet a proven physical orientation.
+For selector values whose bit is set in constant mask `0x02473800`, thresholds become:
 
-The explicit bound check compares `2 * axis_index` against `0x200`, consistent with the local arrays containing at most 256 16-bit counters.
+```text
+low  = 100
+high = 3800
+```
 
-### Consequence
+The set includes selector `0x0c` (12), so **the tested 5135 path uses 100 and 3800**.
 
-This first `0x180043c40` segment does **not** perform the next source/calibration pixel transform. In the observed segment it consumes the byte mask/statistics object from `0x180044970` and builds per-axis mask counts. The primary source image (`RCX` at function entry) is saved but not consumed in this first segment; the other image/calibration arguments likewise have not yet been reached in the visible region.
+The final source-image scan performs:
 
-This strongly places the beginning of `0x180043c40` in a mask-geometry / coverage-analysis role rather than as the first normalization loop.
+```text
+if source_u16[i] >= 3800 or source_u16[i] <= 100:
+    mask[i] = 0
+else:
+    leave mask[i] unchanged
+```
+
+If a cleared position was previously active, `result+0x00` is decremented.
+
+Therefore a type-0x0c pixel can remain in the cleaned mask only when:
+
+```text
+100 < source_u16[i] < 3800
+```
+
+This comparison is on the original copied source `u16` plane, not on the signed `diff16` plane and not on the internal calibration plane.
+
+### Coverage percentage recomputation
+
+At the end:
+
+```text
+result+0x0e = result+0x00 * 100 / (dimensionA * dimensionB)
+```
+
+stored as a WORD.
+
+Thus `+0x0e` is proven to be a percentage-like active-mask coverage field after morphology and source-range filtering.
+
+### Semantic consequence
+
+`0x180043c40` is now best classified as:
+
+```text
+mask geometry cleanup
++ source-range validity filtering
++ coverage recomputation
+```
+
+It does **not** perform image normalization, gain, baseline subtraction, or cropping of the image buffer itself.
 
 ## Immediate next target
 
-Do not stop at the first unwind record of `0x180043c40`.
+Return to `0x1800484e0` and identify the **next active helper call after `0x180043c40` for selector/type `0x0c`**.
 
-Expand the adjacent x64 runtime-function regions starting at `0x180043c40` until the real logical `ret`, and trace:
+Do not guess from the remaining helper list. Extract the call-site order and branch conditions around the `0x180043c40` call, then select the next helper that is definitely on the tested type-0x0c path.
 
-1. how the two per-axis mask-sum arrays are consumed;
-2. whether the routine derives crop bounds / finger bounding box / coverage geometry;
-3. where saved source-image and state-plane arguments are first consumed;
-4. whether any later segment performs normalization, gain, clamp, crop, or pixel rewriting;
-5. exact output/result fields written by the full routine;
-6. whether bounds-check branches around `0x180043ff6` / `0x180043ffc` are compiler failure stubs or part of normal flow.
+For that next helper, determine whether it:
 
-Only after the full logical boundary is proven should the routine receive a stronger semantic name.
+1. consumes the signed difference plane or source image;
+2. consumes the cleaned mask;
+3. performs normalization/gain/clamp;
+4. creates a cropped/grown image;
+5. writes the actual processed-image buffer returned to the outer preprocessor.
+
+Separately, continue tracing how `state+0x9924` is initialized before calling it equivalent to gfusb ImageBase.
 
 ## Additional orchestration facts already proven
 
