@@ -33,14 +33,16 @@ Read first:
 8. `docs/CHICAGO_E110_WRAPPER_TO_FFF0_2026-08-28.md`
 9. `docs/CHICAGO_MODE9_GAUSSIAN_EXECUTOR_4FFF0_2026-08-28.md`
 10. `docs/CHICAGO_MODE9_STREAMING_EXECUTOR_E380_2026-08-28.md`
-11. `docs/RELEASE_READINESS_AND_SAFETY_GATES.md`
-12. `docs/DEVELOPER_ROADMAP.md`
-13. `docs/WINDOWS_IMAGE_LAYOUT_5135_PROOF_2026-08-27.md`
-14. `docs/IMAGE_TRANSPORT_5135_PROOF_2026-08-27.md`
-15. `docs/FDT_5135_PROOF_2026-08-27.md`
-16. `docs/LINUX_CFG70_UPLOAD_PROOF_2026-08-27.md`
-17. `docs/FAILURES_AND_RECOVERIES_2026-08-27.md`
-18. `docs/SAFETY.md`
+11. `docs/CHICAGO_MODE9_HORIZONTAL_GAUSSIAN_F5F0_2026-08-28.md`
+12. `docs/CHICAGO_MODE9_VERTICAL_GAUSSIAN_FD20_2026-08-28.md`
+13. `docs/RELEASE_READINESS_AND_SAFETY_GATES.md`
+14. `docs/DEVELOPER_ROADMAP.md`
+15. `docs/WINDOWS_IMAGE_LAYOUT_5135_PROOF_2026-08-27.md`
+16. `docs/IMAGE_TRANSPORT_5135_PROOF_2026-08-27.md`
+17. `docs/FDT_5135_PROOF_2026-08-27.md`
+18. `docs/LINUX_CFG70_UPLOAD_PROOF_2026-08-27.md`
+19. `docs/FAILURES_AND_RECOVERIES_2026-08-27.md`
+20. `docs/SAFETY.md`
 
 Older handoff/current-status documents are historical evidence and may describe blockers already solved.
 
@@ -80,8 +82,10 @@ mode-9 static selector 0x18004fbf0           PROVEN
 mode-9 kernel                                PROVEN 5-tap Gaussian sigma=1.5 Q16
 0x18004fff0 role                             PROVEN geometry/dispatch wrapper
 0x18004e380 role                             PROVEN streaming/ring-buffer orchestrator
-mode-9 per-row helper                        CURRENT 0x18004f5f0
-mode-9 flush helper                          NEXT 0x18004fd20
+mode-9 horizontal pass                       PROVEN 0x18004f5f0
+mode-9 vertical pass                         PROVEN 0x18004fd20
+mode-9 2D structure                          PROVEN separable 5x5 Gaussian
+vertical bias/shift derivation                CURRENT via 0x18004f480/context builder
 matcher/enrollment                           LATER
 libfprint/fprintd integration                LATER
 release/safety matrix                        FINAL
@@ -304,7 +308,47 @@ Therefore:
 mode 9 = 1D 5-tap Gaussian, sigma=1.5, Q16 coefficients
 ```
 
-Do not yet claim horizontal+vertical or a 5x5 2D application until the pixel helper proves it.
+## Mode-9 separable Gaussian application — PROVEN
+
+`0x18004f5f0` is the horizontal pixel helper. It reads the five Q16 coefficients through `ctx+0x90` and computes:
+
+```text
+H[y,x] = (
+    7869  * src[y,x-2]
+  + 15328 * src[y,x-1]
+  + 19142 * src[y,x]
+  + 15328 * src[y,x+1]
+  + 7869  * src[y,x+2]
+) >> 16
+```
+
+There is no `+0x8000` before the shift in this pass; Q16 conversion is truncation. The intermediate output is stored as DWORD values.
+
+`0x18004fd20` is the second-axis helper. It reads an array of pointers to those horizontally filtered DWORD rows and uses the descriptor at `ctx+0x98`. For five taps, it centers on the middle row and computes symmetrically:
+
+```text
+V[y,x] = (
+    7869  * H[y-2,x]
+  + 15328 * H[y-1,x]
+  + 19142 * H[y,x]
+  + 15328 * H[y+1,x]
+  + 7869  * H[y+2,x]
+  + vertical_bias
+) >> vertical_shift
+```
+
+then stores a U16 output word.
+
+Thus mode 9 is **PROVEN separable 5x5 Gaussian**: horizontal five-tap pass followed by vertical five-tap pass, rather than a monolithic 25-coefficient convolution.
+
+The only unresolved numeric detail in this Gaussian stage is how the context builder derives:
+
+```text
+ctx+0x98 descriptor +0x28 = vertical_bias
+ctx+0x98 descriptor +0x2c = vertical_shift
+```
+
+Do not assume `vertical_bias=0x8000` or `vertical_shift=16` until statically proven.
 
 ## `0x18004fff0` — geometry/dispatch wrapper
 
@@ -325,13 +369,13 @@ No coefficient loop. It computes a start index via `0x18004ddf0`, then calls:
 
 The logical routine crosses unwind regions and returns at `0x18004e817`.
 
-It manages context geometry and rolling row/span state, copies incoming data into context-owned working/ring buffers, constructs stored-row pointers and dispatches actual per-row processing. It does not contain a direct Gaussian coefficient multiply-accumulate loop.
+It manages context geometry and rolling row/span state, copies incoming data into context-owned working/ring buffers, constructs stored-row pointers and dispatches actual per-row processing.
 
 For mode `9`, `ctx+0x88 == 0`, proving the selected helpers are:
 
 ```text
-0x18004f5f0  selected per-row processing helper
-0x18004fd20  selected flush/output helper
+0x18004f5f0  horizontal Gaussian helper
+0x18004fd20  vertical Gaussian/output helper
 ```
 
 and these alternate helpers are **not** selected:
@@ -341,31 +385,26 @@ and these alternate helpers are **not** selected:
 0x18004f940
 ```
 
-See `docs/CHICAGO_MODE9_STREAMING_EXECUTOR_E380_2026-08-28.md`.
-
 ## Immediate next task
 
 Reverse exact routine:
 
 ```text
-AlgoChicago.dll 0x18004f5f0
+AlgoChicago.dll 0x18004f480
 ```
 
-Need to prove:
+Focus only on the construction of the descriptors later stored at `ctx+0x90` and `ctx+0x98`, especially the second descriptor fields consumed by `0x18004fd20`:
 
-1. whether it directly consumes the known five Gaussian coefficients;
-2. exact source neighborhood and axis;
-3. accumulation width;
-4. exact Q16 rounding/shift;
-5. output/storage destination;
-6. whether this is one axis of a separable Gaussian;
-7. whether `0x18004fd20` later performs a second axis or only flush/output handling.
+```text
++0x28 additive bias
++0x2c right-shift count
+```
 
-Only inspect `0x18004fd20` after closing `0x18004f5f0`, unless `0x4f5f0` proves it delegates arithmetic there.
+Need to prove the exact mode-9 values and close the Gaussian output equation. If `0x18004f480` delegates those calculations, descend only into the decisive child helper.
 
 After closing this gated factor update, return to final Q13 composition and trace `state+0x13244` toward matcher/enrollment. Independently prove the producer of `state+0x9924` before equating it with gfusb ImageBase.
 
-Do not return to USB/TLS/CRC/regroup/gfusb callbacks, `0x180044970`, `0x180043c40`, `0x18004d6f0`, `0x18004c3b0`, `0x1800497c0`, or `0x18004b460` unless a newly discovered dependency requires it.
+Do not return to USB/TLS/CRC/regroup/gfusb callbacks, `0x180044970`, `0x180043c40`, `0x18004d6f0`, `0x18004c3b0`, `0x1800497c0`, `0x18004b460`, `0x18004e110`, `0x18004fff0`, `0x18004e380`, `0x18004f5f0`, or `0x18004fd20` unless a newly discovered dependency requires it.
 
 ## Safety / privacy
 
