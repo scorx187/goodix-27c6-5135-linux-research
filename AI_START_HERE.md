@@ -32,14 +32,15 @@ Read first:
 7. `docs/CHICAGO_GATED_FACTOR_UPDATE_B460_2026-08-28.md`
 8. `docs/CHICAGO_E110_WRAPPER_TO_FFF0_2026-08-28.md`
 9. `docs/CHICAGO_MODE9_GAUSSIAN_EXECUTOR_4FFF0_2026-08-28.md`
-10. `docs/RELEASE_READINESS_AND_SAFETY_GATES.md`
-11. `docs/DEVELOPER_ROADMAP.md`
-12. `docs/WINDOWS_IMAGE_LAYOUT_5135_PROOF_2026-08-27.md`
-13. `docs/IMAGE_TRANSPORT_5135_PROOF_2026-08-27.md`
-14. `docs/FDT_5135_PROOF_2026-08-27.md`
-15. `docs/LINUX_CFG70_UPLOAD_PROOF_2026-08-27.md`
-16. `docs/FAILURES_AND_RECOVERIES_2026-08-27.md`
-17. `docs/SAFETY.md`
+10. `docs/CHICAGO_MODE9_STREAMING_EXECUTOR_E380_2026-08-28.md`
+11. `docs/RELEASE_READINESS_AND_SAFETY_GATES.md`
+12. `docs/DEVELOPER_ROADMAP.md`
+13. `docs/WINDOWS_IMAGE_LAYOUT_5135_PROOF_2026-08-27.md`
+14. `docs/IMAGE_TRANSPORT_5135_PROOF_2026-08-27.md`
+15. `docs/FDT_5135_PROOF_2026-08-27.md`
+16. `docs/LINUX_CFG70_UPLOAD_PROOF_2026-08-27.md`
+17. `docs/FAILURES_AND_RECOVERIES_2026-08-27.md`
+18. `docs/SAFETY.md`
 
 Older handoff/current-status documents are historical evidence and may describe blockers already solved.
 
@@ -65,7 +66,7 @@ preprocessor wrapper / real entry            PROVEN
 outer semantic preprocessor                  PROVEN 0x18000e780..0x18000e947
 core orchestrator                            PROVEN 0x1800484e0
 state-source signed subtraction              PROVEN 0x180044970
-mask geometry/source-range cleanup            PROVEN 0x180043c40
+mask geometry/source-range cleanup           PROVEN 0x180043c40
 post-mask parent correction                  PROVEN 0x18004aea0
 persistent corrected plane                   PROVEN state+0x13244
 Q13 primary/secondary surfaces               PROVEN
@@ -78,9 +79,11 @@ gated late-factor updater                    PROVEN 0x18004b460
 mode-9 static selector 0x18004fbf0           PROVEN
 mode-9 kernel                                PROVEN 5-tap Gaussian sigma=1.5 Q16
 0x18004fff0 role                             PROVEN geometry/dispatch wrapper
-current decisive helper                      0x18004e380 raw pixel executor
+0x18004e380 role                             PROVEN streaming/ring-buffer orchestrator
+mode-9 per-row helper                        CURRENT 0x18004f5f0
+mode-9 flush helper                          NEXT 0x18004fd20
 matcher/enrollment                           LATER
-libfprint/fprintd integration                 LATER
+libfprint/fprintd integration                LATER
 release/safety matrix                        FINAL
 ```
 
@@ -102,15 +105,17 @@ xmm0 = source
 psubw xmm1,xmm0
 ```
 
-and the scalar tail loads state then subtracts source. Negative values are intentionally retained as signed 16-bit. Do **not** equate AlgoChicago `state+0x9924` with gfusb persisted ImageBase until its producer is proven.
+and the scalar tail loads state then subtracts source. Negative values are intentionally retained as signed 16-bit.
 
-For selector `4` only, the special relation is:
+For selector `4` only:
 
 ```text
 state_plane - source + 0x0fff
 ```
 
 Older text claiming `source - state_plane` is stale and must not be reused.
+
+Do **not** equate AlgoChicago `state+0x9924` with gfusb persisted ImageBase until its producer is independently proven.
 
 ### Mask cleanup
 
@@ -131,13 +136,7 @@ scratch_C[i] = 3 * source_side_word[i]
 global_work[i] = 3 * state_plus_0x9924[i]
 ```
 
-It later writes the persistent corrected image-like plane:
-
-```text
-state + 0x13244
-```
-
-using shift 14 and the primary relation:
+It later writes the persistent corrected image-like plane at `state+0x13244`, using shift 14:
 
 ```text
 if gate_word[i] != 0:
@@ -149,7 +148,7 @@ else:
     processed[i] = scratch_C[i]
 ```
 
-### Q13 surface composition
+### Q13 composition
 
 Inside `0x180049ba0`, `scratch_A` starts at Q13 unity:
 
@@ -157,17 +156,17 @@ Inside `0x180049ba0`, `scratch_A` starts at Q13 unity:
 0x2000 == 8192
 ```
 
-and surfaces compose with exact rounded Q13 multiplication:
+with exact rounded multiplication:
 
 ```text
 Q13_mul(a,b) = (a*b + 0x1000) >> 13
 ```
 
-Late type-`0x0c` composition is proven for `scratch_A` and `scratch_B`; see `docs/CHICAGO_POST_MASK_STAGE_4AEA0_2026-08-28.md`.
+Late type-`0x0c` composition of `scratch_A` and `scratch_B` is proven; see `docs/CHICAGO_POST_MASK_STAGE_4AEA0_2026-08-28.md`.
 
 ## Base adaptive update `0x18004d6f0` — PROVEN
 
-It builds a temporary ratio plane:
+It forms:
 
 ```text
 if scratch_A[i] == 0:
@@ -176,7 +175,7 @@ else:
     ratio_raw[i] = round((reference[i] << 13) / scratch_A[i])
 ```
 
-then calls `0x18004c3b0`.
+then applies `0x18004c3b0`.
 
 For type `0x0c`:
 
@@ -199,7 +198,7 @@ if q != 0 and x != 0 and abs(q-x) > 1800:
 
 otherwise `scratch_A[i]` is unchanged.
 
-## Spatial filter `0x18004c3b0` — PROVEN
+## Spatial median `0x18004c3b0` — PROVEN
 
 For interior pixels:
 
@@ -208,7 +207,7 @@ H(y,x) = median(src[y][x-1], src[y][x], src[y][x+1])
 out(y,x) = median(H(y-1,x), H(y,x), H(y+1,x))
 ```
 
-Borders are copied unchanged. It is a separable median-of-three horizontal then vertical filter, not the true median of all nine 3x3 samples.
+Borders are copied unchanged. This is separable median-of-three horizontal then vertical, not the true median of all nine 3x3 samples.
 
 ## `0x1800497c0` caller role — PROVEN
 
@@ -220,15 +219,15 @@ test eax,eax
 je   skip_B460_branch
 ```
 
-`scratch_A` is not passed directly to this gate. If it returns nonzero, `0x18004b460` is called twice with `R8 = scratch_A`.
+`scratch_A` is not passed directly to this gate. If nonzero, `0x18004b460` is called twice with `R8 = scratch_A`.
 
-Do not descend into `0x1800497c0` unless later work requires the exact predicate.
+Do not descend into `0x1800497c0` unless the exact predicate becomes necessary later.
 
 ## Gated late-factor updater `0x18004b460` — PROVEN at parent level
 
-`0x18004b460` reads `scratch_A` but does not write it directly. Instead it adaptively updates late per-pixel Q13 factor surfaces that are composed into `scratch_A` / `scratch_B` later in the same `0x180049ba0` invocation.
+`0x18004b460` reads `scratch_A` but does not write it directly. It adaptively updates late per-pixel Q13 factor surfaces that are composed into `scratch_A/scratch_B` later in the same `0x180049ba0` invocation.
 
-It forms a Q13 ratio array:
+Initial Q13 ratio:
 
 ```text
 if scratch_A[i] == 0:
@@ -237,22 +236,22 @@ else:
     ratio32[i] = round((reference[i] << 13) / scratch_A[i])
 ```
 
-computes a rounded full-plane mean and a global Q13 scale, and builds a temporary u16 ratio plane. If an optional factor plane is present, it first composes:
+If an optional factor is present:
 
 ```text
 combined = Q13_mul(scratch_A[i], optional_factor[i])
 ```
 
-and uses `reference / combined` for that temporary plane.
+and the temporary ratio uses `reference/combined`.
 
-Then it calls:
+Then:
 
 ```text
 0x1800501a0(...)
 0x18004e110(temp_object, work_object, packed_dims, 9, -1, -1)
 ```
 
-After this child stage:
+After that operation:
 
 ```text
 if work[i] != 0:
@@ -261,7 +260,7 @@ else:
     local_ratio = 0x2000
 ```
 
-The late factor is updated only when:
+Update only when:
 
 ```text
 abs(local_ratio - 0x2000) < 0x148
@@ -276,60 +275,40 @@ factor[i] = round((factor[i]*n + local_ratio) / (n+1))
 observation_count = min(observation_count + 1, 30)
 ```
 
-The two calls update the two late factor surfaces used by the already-proven Q13 composition path. See `docs/CHICAGO_GATED_FACTOR_UPDATE_B460_2026-08-28.md`.
+## `0x18004e110` — wrapper, not pixel filter
 
-## `0x18004e110` — PROVEN wrapper, not the pixel filter
+Exact PE region `0x18004e110..0x18004e378`; real return `0x18004e377`.
 
-Exact PE runtime function:
+It validates/reconciles image objects, temporarily rewrites format metadata, builds context using `0x18004e820`, dispatches through `0x18004fff0`, restores metadata and frees context allocations.
 
-```text
-RVA 0x0004e110 .. 0x0004e378
-normal ret 0x18004e377
-```
+Mode `9` sets `ctx+0x88 = 0`. Modes `6` or `8` set it to `1`. Therefore the constant `9` is a mode selector, not a 9x9-window size.
 
-It has no pixel loop. It validates/reconciles two image objects, temporarily rewrites their format metadata, builds a context using `0x18004e820`, dispatches the actual operation through `0x18004fff0`, restores metadata and frees context allocations.
+## Mode-9 static Gaussian kernel — PROVEN
 
-Authoritative call path:
-
-```text
-0x18004e820(
-    object1_format & 0x0fff,
-    object2_format & 0x0fff,
-    packed two-DWORD value from 0x1800501a0,
-    mode = 9,
-    -1,
-    -1
-) -> ctx
-
-0x18004fff0(ctx, ratio_object, output/work_object)
-```
-
-For mode `9`, `ctx+0x88` is set to `0`. The same flag is set to `1` only for modes `6` or `8`.
-
-Therefore **do not call the constant 9 a 9x9 window**. At this level it is a mode/operation selector.
-
-## Mode-9 static kernel — PROVEN
-
-`0x18004fbf0` selects mode records in `0x40`-byte strides. For mode `9` with class `4`:
+`0x18004fbf0` uses `0x40`-byte mode records. For mode `9`, class `4`:
 
 ```text
 record = 0x1800932b0 + 9*0x40
        = 0x1800934f0
-```
 
-The record contains:
-
-```text
 count = 5
 coefficients = [7869, 15328, 19142, 15328, 7869]
 sum = 65536
 ```
 
-These values exactly equal the normalized five-sample Gaussian for positions `[-2,-1,0,1,2]` with `sigma=1.5`, rounded to Q16. Therefore mode `9` selects a normalized **1D 5-tap Gaussian kernel, sigma=1.5, Q16**. Do not yet claim horizontal+vertical or 5x5 application until the executor proves it.
+These are exactly the normalized discrete Gaussian samples at `[-2,-1,0,1,2]` for `sigma=1.5`, rounded to Q16.
 
-## `0x18004fff0` — PROVEN geometry/dispatch wrapper
+Therefore:
 
-It has no coefficient loop. It computes a start index through `0x18004ddf0`, then calls:
+```text
+mode 9 = 1D 5-tap Gaussian, sigma=1.5, Q16 coefficients
+```
+
+Do not yet claim horizontal+vertical or a 5x5 2D application until the pixel helper proves it.
+
+## `0x18004fff0` — geometry/dispatch wrapper
+
+No coefficient loop. It computes a start index via `0x18004ddf0`, then calls:
 
 ```text
 0x18004e380(
@@ -342,27 +321,47 @@ It has no coefficient loop. It computes a start index through `0x18004ddf0`, the
 )
 ```
 
-Therefore `0x18004e380` is the first confirmed routine receiving raw input/output pointers, stride/row-byte-like values, and the active span for the mode-9 operation.
+## `0x18004e380` — PROVEN streaming/ring-buffer orchestrator
 
-See `docs/CHICAGO_MODE9_GAUSSIAN_EXECUTOR_4FFF0_2026-08-28.md`.
+The logical routine crosses unwind regions and returns at `0x18004e817`.
+
+It manages context geometry and rolling row/span state, copies incoming data into context-owned working/ring buffers, constructs stored-row pointers and dispatches actual per-row processing. It does not contain a direct Gaussian coefficient multiply-accumulate loop.
+
+For mode `9`, `ctx+0x88 == 0`, proving the selected helpers are:
+
+```text
+0x18004f5f0  selected per-row processing helper
+0x18004fd20  selected flush/output helper
+```
+
+and these alternate helpers are **not** selected:
+
+```text
+0x18004f790
+0x18004f940
+```
+
+See `docs/CHICAGO_MODE9_STREAMING_EXECUTOR_E380_2026-08-28.md`.
 
 ## Immediate next task
 
-Reverse exact function:
+Reverse exact routine:
 
 ```text
-AlgoChicago.dll 0x18004e380
+AlgoChicago.dll 0x18004f5f0
 ```
 
 Need to prove:
 
-1. whether the five-tap Gaussian is applied horizontally, vertically, or in multiple passes;
-2. exact accumulation and Q16 rounding;
-3. border handling;
-4. whether context supplies one or two coefficient descriptors;
-5. whether another child helper performs a second separable pass.
+1. whether it directly consumes the known five Gaussian coefficients;
+2. exact source neighborhood and axis;
+3. accumulation width;
+4. exact Q16 rounding/shift;
+5. output/storage destination;
+6. whether this is one axis of a separable Gaussian;
+7. whether `0x18004fd20` later performs a second axis or only flush/output handling.
 
-Do not descend into `0x18004ddf0` unless exact border/start-index semantics become necessary.
+Only inspect `0x18004fd20` after closing `0x18004f5f0`, unless `0x4f5f0` proves it delegates arithmetic there.
 
 After closing this gated factor update, return to final Q13 composition and trace `state+0x13244` toward matcher/enrollment. Independently prove the producer of `state+0x9924` before equating it with gfusb ImageBase.
 
