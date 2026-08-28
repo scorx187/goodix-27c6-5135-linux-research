@@ -12,6 +12,7 @@ EngineAdapter.dll
   -> logical outer routine 0x18000e780..0x18000e947
   -> core helper/orchestrator 0x1800484e0
   -> first image/state-plane combiner 0x180044970
+  -> mask/statistics consumer beginning 0x180043c40
 ```
 
 `0x1800484e0` is a preprocessing orchestrator with many allocations, scratch buffers and specialized helper calls. It is not one simple flat pixel loop.
@@ -142,30 +143,72 @@ It is not yet statically proven that `state+0x9924` is the exact same persisted 
 
 The next data-flow task is to determine how this internal state plane is populated from calibration/base inputs and whether it is derived from, copied from, or independent of gfusb's ImageBase.
 
-## Next active stage
+## `0x180043c40` first unwind segment — mask row/column aggregation
 
-After `0x180044970`, `0x1800484e0` copies its result structure and calls:
+`0x180043c40` is called after `0x180044970`. The first x64 `RUNTIME_FUNCTION` entry is only:
 
 ```text
-0x180043c40(
-    copied_source_u16,
-    copied_state_plane_u16,
-    mode_or_flag,
-    another_flag,
-    selector,
-    copied_0x4ca0_result
-)
+0x180043c40 .. 0x180043d84
 ```
 
-For the tested type-0x0c path this is the next primary reverse-engineering target.
+but this is **not the complete logical routine**. There is no `ret` before `0x180043d84`, so execution falls into later adjacent compiler-split unwind regions. Bounds-check branches also leave this first region. The full logical end must therefore be established before assigning the entire routine a semantic name.
 
-Goals:
+The sixth Windows-x64 argument is loaded from the entry stack slot into `r14`. At the proven call site this argument is the copied result structure produced by `0x180044970`.
 
-1. prove what `0x180043c40` does to the source/state pair and the subtraction-derived mask/statistics;
-2. prove how `state+0x9924` is populated;
-3. locate normalization/gain/clamp/crop if present;
-4. identify the exact processed pixel buffer eventually returned to the outer preprocessor;
-5. trace that buffer into `identifyImage` / enrollment.
+The first segment reads:
+
+```text
+[result + 0x04] -> first dimension
+[result + 0x08] -> second dimension
+[result + 0x10 + index] -> byte mask
+```
+
+It zeroes two local arrays of 256 WORD entries and then performs two nested aggregation passes.
+
+### First pass
+
+For each index of the first dimension, it sums every mask byte across the second dimension and stores the total in a local WORD array.
+
+Equivalent shape:
+
+```text
+row_sum[y] = sum(mask[y * width + x])
+```
+
+where `row_sum` is a descriptive name only; exact row/column orientation is intentionally deferred until the dimension fields are tied to the 80x64 geometry at this layer.
+
+### Second pass
+
+It then accumulates the same byte mask by the other axis into the second local WORD array:
+
+```text
+column_sum[x] += mask[y * width + x]
+```
+
+Again, `row_sum`/`column_sum` describe the two orthogonal aggregation axes, not yet a proven physical orientation.
+
+The explicit bound check compares `2 * axis_index` against `0x200`, consistent with the local arrays containing at most 256 16-bit counters.
+
+### Consequence
+
+This first `0x180043c40` segment does **not** perform the next source/calibration pixel transform. In the observed segment it consumes the byte mask/statistics object from `0x180044970` and builds per-axis mask counts. The primary source image (`RCX` at function entry) is saved but not consumed in this first segment; the other image/calibration arguments likewise have not yet been reached in the visible region.
+
+This strongly places the beginning of `0x180043c40` in a mask-geometry / coverage-analysis role rather than as the first normalization loop.
+
+## Immediate next target
+
+Do not stop at the first unwind record of `0x180043c40`.
+
+Expand the adjacent x64 runtime-function regions starting at `0x180043c40` until the real logical `ret`, and trace:
+
+1. how the two per-axis mask-sum arrays are consumed;
+2. whether the routine derives crop bounds / finger bounding box / coverage geometry;
+3. where saved source-image and state-plane arguments are first consumed;
+4. whether any later segment performs normalization, gain, clamp, crop, or pixel rewriting;
+5. exact output/result fields written by the full routine;
+6. whether bounds-check branches around `0x180043ff6` / `0x180043ffc` are compiler failure stubs or part of normal flow.
+
+Only after the full logical boundary is proven should the routine receive a stronger semantic name.
 
 ## Additional orchestration facts already proven
 
