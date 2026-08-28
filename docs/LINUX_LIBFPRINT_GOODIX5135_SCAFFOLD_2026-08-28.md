@@ -187,15 +187,30 @@ Added a host-only request model layered on top of lifecycle accounting. Each fut
 
 The request model validates endpoint direction, rejects zero lengths/timeouts, rejects double begin, keeps cancellation separate from callback drain, and marks completion stale when its lifecycle generation has already stopped.
 
-Permanent `goodix5135-request` tests pass 10/10 synthetic cases. At this checkpoint all five Goodix host suites pass 5/5:
+Permanent `goodix5135-request` tests pass 10/10 synthetic cases. At this checkpoint all five Goodix host suites pass 5/5.
 
-- `goodix5135-image`
-- `goodix5135-proto`
-- `goodix5135-image-response`
-- `goodix5135-io`
-- `goodix5135-request`
+### 9. Prepare-only `FpiUsbTransfer` bulk wrapper
 
-No `FpiUsbTransfer` has yet been created or submitted by the Goodix5135 driver.
+Local libfprint commit:
+
+`0d3faa576dd4c596a6f498b53186b3340ec180e9`
+
+Commit subject:
+
+`goodix5135: add bulk transfer preparation wrapper`
+
+Added `goodix5135_transport_prepare_transfer()` as the first layer that constructs real libfprint `FpiUsbTransfer` objects. It remains intentionally isolated from the `FpImageDevice` runtime and does not submit transfers.
+
+The preparation contract is:
+
+- only validated in-flight `Goodix5135Request` objects are accepted,
+- `BULK_IN` prepares endpoint `0x81` with the requested receive length,
+- `BULK_OUT` prepares endpoint `0x01`, requires exact payload length, and copies the outgoing payload with `g_memdup2()` so asynchronous ownership will not depend on caller storage,
+- no control or interrupt transfers are introduced,
+- no `fpi_usb_transfer_submit()` or synchronous submit call exists in the Goodix5135 driver,
+- the transport preparation function is not called from activate/deactivate/change-state runtime paths.
+
+A fresh targeted build completed `123/123`; the transport object was compiled into the driver library. All five existing Goodix host suites remained green 5/5. No transfer was submitted and no device protocol command was sent.
 
 ## Full default-driver regression checkpoint
 
@@ -224,7 +239,9 @@ logical I/O generation / pending accounting
       ↓
 request kind / endpoint / length / timeout / cancellation bookkeeping
       ↓
-stop -> reject new work -> drain stale callbacks -> safe deactivation completion
+prepare-only bulk FpiUsbTransfer construction
+      ↓
+STOP — no submit yet
 ```
 
 ## Safety state
@@ -239,4 +256,4 @@ No private capture, fingerprint image/raw/template, factory secret, PSK material
 
 ## Next implementation step
 
-Introduce a narrow `FpiUsbTransfer` preparation wrapper behind the proven request model. The first step should only construct/fill a bulk transfer from a validated `Goodix5135Request`; it must not submit the transfer, must not be wired into activation, and must not send any Goodix command. Build-test that wrapper first. Only after the ownership/buffer mapping is explicit and compile-tested should asynchronous submission/callback/cancellation wiring be introduced.
+Before introducing the first asynchronous submit call, inspect the exact core cancellation sequencing around `fpi_device_get_cancellable()`: determine when libfprint cancels the action cancellable relative to the image-device `deactivate` vfunc and how transfer callbacks are expected to observe that cancellation. Then implement an isolated asynchronous bulk submit/callback wrapper behind the proven request/lifecycle model, still not wired into activate or any Goodix command sequence. The wrapper must have explicit callback ownership, stale-generation handling, timeout propagation, and deactivation drain semantics before any hardware protocol command is enabled.
