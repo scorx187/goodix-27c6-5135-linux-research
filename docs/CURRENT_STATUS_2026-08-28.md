@@ -2,13 +2,13 @@
 
 Target: Goodix USB fingerprint sensor `27c6:5135`, firmware `GF_HC460SEC_APP_12508`, logical chip `0x2504`, ChicagoHS / ChicagoHU, sensor family/type `0x0c`.
 
-This is the canonical checkpoint after identifying the Windows biometric layer above `gfusb.dll`, reaching the real Chicago preprocessing implementation, and proving the complete outer control flow of `preprocessor_wrapper`.
+This is the canonical checkpoint after identifying the Windows biometric layer above `gfusb.dll`, reaching the real Chicago preprocessing implementation, and proving the first exact per-pixel arithmetic used by the tested type-`0x0c` path.
 
 ## Plain-language position
 
-The difficult device-communication half is already solved. Linux can safely reach the sensor, establish the factory-compatible encrypted session, detect finger state, request a real image, decrypt it, validate it, decode the packed 12-bit samples, and place the image into the same 80x64 downstream layout used by Windows.
+The difficult device-communication half is solved. Linux can safely reach the sensor, establish the factory-compatible encrypted session, detect finger state, request a real image, decrypt it, validate it, decode the packed 12-bit samples, and place the image into the same 80x64 downstream layout used by Windows.
 
-The current blocker is no longer USB/TLS/image transport. It is reproducing the Windows image preprocessing/matcher behavior well enough for reliable enrollment and verification under libfprint.
+The current blocker is now narrower: reproduce the remaining Chicago preprocessing stages, then connect their exact output to identification/enrollment and implement the resulting pipeline under libfprint.
 
 ## End-to-end milestone table
 
@@ -38,81 +38,39 @@ EngineAdapter family 0x0c algorithm selection      PROVEN -> AlgoChicago.dll
 AlgoChicago preprocessor export resolution         PROVEN
 Real preprocessor implementation entry             PROVEN -> 0x18000e780
 Outer preprocessor semantic routine                PROVEN -> 0x18000e780..0x18000e947
-Core preprocessing helper                          IDENTIFIED -> 0x1800484e0
-Exact preprocessing arithmetic                     NOT YET PROVEN
+Core preprocessing orchestrator                    PROVEN -> 0x1800484e0
+First image/state-plane combiner                    PROVEN -> 0x180044970
+Type-0x0c first pixel subtraction                  PROVEN
+Full normalization/threshold/mask semantics         PARTIAL / IN PROGRESS
+Exact matcher input                                 NOT YET PROVEN
 Matcher/enrollment                                 NOT YET IMPLEMENTED
 libfprint/fprintd integration                       NOT YET IMPLEMENTED
 Reboot/suspend/recovery validation                  NOT YET COMPLETE
 ```
 
-## Windows biometric architecture now identified
+## Windows biometric architecture
 
-The installed Goodix package configures the Windows Biometric Framework as:
+The installed package configures Windows Biometric Framework with the Windows built-in SensorAdapter and StorageAdapter plus Goodix `EngineAdapter.dll` as the vendor engine.
 
-```text
-Windows built-in SensorAdapter
-        |
-        v
-EngineAdapter.dll       (Goodix vendor engine adapter)
-        |
-        +-- AlgoMilan.dll
-        +-- AlgoChicago.dll
-        +-- AlgoChicagoT.dll
-```
-
-For the tested `0x2504` / family `0x0c` device, static EngineAdapter control flow selects `AlgoChicago.dll`.
-
-EngineAdapter dynamically resolves algorithm functions with `LoadLibraryW` / `GetProcAddress`, including:
+For the tested logical chip `0x2504` / family `0x0c`, static EngineAdapter control flow selects:
 
 ```text
-preprocessor_wrapper
-preprocessor_init_wrapper
-preprocessor_exit_wrapper
-preprocess_get_calidata_len_wrapper
-preprocess_init_calidata_wrapper
-preprocess_load_calidata_wrapper
-preprocess_save_calidata_wrapper
-gx_sensorCheckWrapper
-identifyImageWrapper
-enrolAddImageWrapper
+AlgoChicago.dll
 ```
 
-This proves preprocessing/calibration/matching are performed above `gfusb.dll`, inside the Goodix algorithm layer rather than the USB transport driver.
+EngineAdapter dynamically resolves preprocessing, calibration, sensor-check, identify, enroll and template functions from that DLL.
 
-## Exact Chicago preprocessor outer routine — proven
+Therefore final matcher preprocessing is above `gfusb.dll`; the USB driver is no longer the place to search for final pixel arithmetic.
 
-`AlgoChicago.dll` exports:
+## Exact Chicago outer preprocessor routine
 
-```text
-preprocessor_wrapper RVA 0x0000b560
-```
-
-The export is an ABI forwarding shim into:
-
-```text
-0x18000e780
-```
-
-The first x64 unwind record covers only `0x18000e780..0x18000e880`, but direct control flow continues through adjacent compiler-split runtime-function regions:
-
-```text
-0x18000e780 .. 0x18000e880
-0x18000e880 .. 0x18000e8e0
-0x18000e8e0 .. 0x18000e91a
-0x18000e91a .. 0x18000e947
-```
-
-The logical routine terminates at the real `ret` at `0x18000e946`. Therefore the complete outer preprocessing routine is now proven as:
+`AlgoChicago.dll` exports `preprocessor_wrapper`, which forwards into the logical routine:
 
 ```text
 0x18000e780 .. 0x18000e947
 ```
 
-The adjacent routines beginning at `0x18000e950`, `0x18000e990`, and `0x18000e9f0` are separate functions and must not be merged into the preprocessor body merely because they are nearby in the file.
-
-## What the outer routine actually does
-
-The seven-argument outer routine performs validation, builds the parameter set for the core preprocessing helper, receives a temporary processed-image object, copies the processed bytes to the caller's output descriptor, writes quality/coverage metadata, cleans the temporary object, and returns the helper status.
+The real return is at `0x18000e946`. The routine validates state, calls `0x1800484e0`, receives a temporary processed-image object, copies its processed bytes to the caller result descriptor, writes quality/coverage bytes, cleans the temporary object and propagates the helper return code.
 
 The central call is:
 
@@ -120,106 +78,122 @@ The central call is:
 0x18000e8ac -> 0x1800484e0
 ```
 
-Therefore `0x1800484e0` is the immediate current reverse-engineering target for exact pixel/calibration arithmetic.
+## `0x1800484e0` — preprocessing orchestrator
 
-### Proven outer-argument structure facts
+This helper is a 2891-byte orchestrator, not one flat pixel loop.
 
-Without yet assigning all seven arguments higher-level semantic names, static field use proves:
-
-- argument 1 is a source-image-descriptor-like object:
-  - `+0x00` is a data pointer passed to `0x1800484e0`;
-  - `+0x14` is a size/count passed as `r8d` to `0x1800484e0`;
-- argument 4 is an output/result-image-descriptor-like object:
-  - `+0x00` is the destination buffer pointer;
-  - `+0x14` is the number of processed bytes copied into that destination;
-  - `+0x28` receives quality as one byte;
-  - `+0x29` receives coverage as one byte;
-- argument 5 points to a two-DWORD quality/coverage result pair:
-  - `+0x00` is coverage;
-  - `+0x04` is quality;
-- argument 7 is a byte mode flag; value `1` selects internal mode value `0`, otherwise the outer routine selects internal mode value `2`;
-- argument 6 has not yet been given a semantic role from this outer routine and must remain unnamed until proven.
-
-The quality/coverage ordering is proven by the diagnostic call using the format string `preprocessor: quality %d, coverage %d`: the first formatted value is read from argument5+4 and the second from argument5+0.
-
-### Core-helper call shape proven from the outer routine
-
-Immediately before `0x1800484e0`, the outer routine supplies:
+It proves that the source image is treated as a 16-bit plane whose size must equal:
 
 ```text
-RCX = address of local temporary processed-image object
-RDX = argument1->data
-R8D = argument1->size/count
-R9  = global calibration/preprocessor state at 0x18009aa00
-
-stack arg 5  = packed global preprocessing configuration bits
-stack arg 6  = address of global calibrated-state flag 0x18009a9f4
-stack arg 7  = global value 0x18009a9dc
-stack arg 8  = argument5 + 4   (quality output)
-stack arg 9  = argument5       (coverage output)
-stack arg 10 = original argument2
-stack arg 11 = original argument3
-stack arg 12 = 0
+width * height * 2
 ```
 
-These names intentionally stop at what is statically proven. Original arguments 2 and 3 still require data-flow tracing through `0x1800484e0` before being labeled ImageBase/live/calibration/etc.
-
-### Processed output path
-
-After `0x1800484e0` returns:
-
-1. its return code is preserved as the outer routine's result;
-2. the temporary result pointer is checked;
-3. processed data is obtained from temporary-object field `+0x18`;
-4. exactly `argument4->+0x14` bytes are copied byte-for-byte into `argument4->+0x00`;
-5. temporary result state is cleaned through `0x180043420`;
-6. quality and coverage are written into `argument4+0x28/+0x29`.
-
-Thus the outer routine is not itself the main pixel loop. The pixel/calibration transformation is below it, principally in or below `0x1800484e0`.
-
-## Outer routine status behavior proven so far
-
-- null required input/output arguments reach an error path returning `0x81`;
-- uninitialized preprocessor state reaches a diagnostic path returning `0x80`;
-- uncalibrated state reaches the explicit `preprocessor is not calibrated` path returning `0x80`;
-- on the processing path, the return value from `0x1800484e0` is propagated to the caller;
-- EngineAdapter's observed special result `0x84` remains intentionally unnamed until its producer and semantics are proven below the core helper.
-
-## Immediate technical objective
-
-Do **not** spend more time expanding `0x18000e780`; its outer semantic role and real end are now established.
-
-The immediate target is:
+For 5135 this is consistent with:
 
 ```text
-AlgoChicago.dll 0x1800484e0
+80 * 64 * 2 = 10240 bytes
 ```
 
-Trace its complete reachable control flow and prove how these inputs are consumed:
+It copies that source image into a temporary buffer.
 
-1. source data pointer and size;
-2. global calibration/preprocessor state;
-3. packed preprocessing configuration;
-4. calibrated-state pointer;
-5. quality/coverage outputs;
-6. original outer arguments 2 and 3;
-7. temporary processed-image object.
+It also copies a second `2 * pixel_count` plane from the internal AlgoChicago preprocessing state at:
 
-Then identify the first exact pixel-wise/calibration operation and prove, if present:
+```text
+state + 0x9924
+```
 
-- which plane is ImageBase and which is current live image;
-- subtraction direction;
-- signed/unsigned handling;
-- clamp/saturation;
-- gain/normalization;
-- per-pixel calibration/noise correction;
-- crop/grow/geometry changes;
-- quality and coverage calculations;
-- exact matcher input buffer.
+When an internal mode equals `2`, that second plane receives an interpolation pass based on neighboring WORD averages.
 
-## What is already safe to stop re-investigating
+Important: this `state+0x9924` plane is proven to be an internal preprocessing/calibration-state plane, but it is **not yet statically proven identical to gfusb.dll's persisted ImageBase**.
 
-Unless a later dependency contradicts the proof, do not spend more time on:
+## First exact pixel arithmetic — PROVEN
+
+`0x1800484e0` calls:
+
+```text
+0x180044970(
+    copied_source_u16,
+    copied_state_plane_u16,
+    output_structure,
+    selector
+)
+```
+
+with:
+
+```text
+RCX = copied source image u16 plane
+RDX = copied state+0x9924 u16 plane
+R8  = output/result structure
+R9D = six-bit sensor/algorithm selector
+```
+
+For the tested 5135 path the relevant selector is type/family `0x0c`.
+
+At `0x180044ad8`, the helper checks selector `== 4`. Type `0x0c` takes the other branch.
+
+The active type-0x0c vector loop is equivalent to:
+
+```text
+diff16[i] = source_u16[i] - state_plane_u16[i]
+```
+
+implemented with `psubw`, with an equivalent scalar WORD tail.
+
+There is no clamp, saturation or gain in this subtraction loop.
+
+The 16-bit subtraction wraps naturally, and later code reads the result with `movsx`, proving the produced difference plane is intended to be interpreted as **signed 16-bit**. Negative differences therefore survive in two's-complement form rather than being clipped to zero.
+
+A selector-4-only branch instead applies `source - state_plane + 0x0fff`; that branch is not the tested 5135/type-0x0c path.
+
+See `docs/CHICAGO_PREPROCESS_CORE_2026-08-28.md` for the assembly-level checkpoint.
+
+## What `0x180044970` does after subtraction
+
+Static analysis further proves that the same function:
+
+- computes block/window statistics over the signed difference plane;
+- uses 16-sample neighborhoods and integer averages;
+- derives minimum/maximum and dynamic threshold-like values;
+- partitions pixels relative to a selected threshold;
+- generates/updates a byte mask in its result structure;
+- computes a percentage-like result field as `count * 100 / pixel_count` at result offset `+0x0e`;
+- contains explicit later branches for selector/type `0x0c`;
+- frees its temporary difference plane and returns success (`0`).
+
+Exact semantic names for all threshold/mask/result fields remain intentionally open until their consumers are traced.
+
+## Next active stage
+
+After `0x180044970`, the orchestrator calls:
+
+```text
+0x180043c40
+```
+
+with the copied source image, copied internal state plane, flags/mode, selector, and a copy of the `0x180044970` result structure.
+
+This is the next primary target.
+
+Need to prove:
+
+1. how `0x180043c40` consumes the signed difference-derived mask/statistics;
+2. how `state+0x9924` is populated and whether it derives from gfusb ImageBase;
+3. normalization/gain/clamp/crop behavior, if present;
+4. the exact processed image buffer returned to the outer preprocessor;
+5. the exact buffer passed into `identifyImage` and enrollment.
+
+## Outer routine status behavior
+
+- null required input/output arguments -> `0x81`;
+- uninitialized preprocessor state -> `0x80`;
+- explicit uncalibrated state -> `0x80`;
+- processing path propagates the return value from `0x1800484e0`;
+- special values such as EngineAdapter's observed `0x84`, and internal `0x7531`, `0x7532`, `0xc351`, remain unnamed until proven.
+
+## What is safe to stop re-investigating
+
+Unless a later dependency contradicts existing proof, do not return to:
 
 - generic USB transport;
 - TLS handshake/cipher discovery;
@@ -231,11 +205,12 @@ Unless a later dependency contradicts the proof, do not spend more time on:
 - gfusb.dll detector arithmetic;
 - gfusb.dll post-detection callback `0x180013280`;
 - request completion helper `0x18001393c`;
-- the outer boundary of `AlgoChicago` preprocessor routine `0x18000e780..0x18000e947`.
+- the outer boundary of `AlgoChicago` preprocessor routine `0x18000e780..0x18000e947`;
+- the first type-0x0c subtraction loop in `0x180044970`.
 
 ## Definition of project completion
 
-The project is not complete merely when an image can be captured.
+The project is not complete merely when an image can be captured or the first subtraction is known.
 
 Release success requires all of the following:
 
@@ -254,7 +229,7 @@ See `docs/RELEASE_READINESS_AND_SAFETY_GATES.md` for the explicit completion gat
 
 ## Privacy / publication boundary
 
-Public repository documentation may contain protocol structure, control-flow conclusions, function identities, and synthetic tests.
+Public documentation may contain protocol structure, control-flow conclusions, function identities, arithmetic descriptions and synthetic tests.
 
 Never publish:
 
