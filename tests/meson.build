@@ -321,6 +321,27 @@ foreach test_name: unit_tests
     )
 endforeach
 
+
+if 'goodix5135' in drivers
+    goodix5135_image_test = executable(
+        'test-goodix5135-image',
+        sources: [
+            'test-goodix5135-image.c',
+            '../libfprint/drivers/goodix5135/goodix5135-image.c',
+        ],
+        dependencies: glib_dep,
+        c_args: common_cflags,
+        install: false,
+    )
+
+    test(
+        'goodix5135-image',
+        goodix5135_image_test,
+        suite: ['unit-tests'],
+        env: envs,
+    )
+endif
+
 # Run udev rule generator with fatal warnings
 envs.set('UDEV_HWDB', udev_hwdb.full_path())
 envs.set('UDEV_HWDB_CHECK_CONTENTS', default_drivers_are_enabled ? '1' : '0')

@@ -36,6 +36,72 @@ goodix5135_crc32_mpeg2 (const guint8 *data,
 }
 
 gboolean
+goodix5135_crc32_from_stored (const guint8 *stored,
+                              gsize         stored_length,
+                              guint32      *crc)
+{
+  if (stored == NULL || crc == NULL)
+    return FALSE;
+
+  if (stored_length != GOODIX5135_IMAGE_CRC_BYTES)
+    return FALSE;
+
+  *crc = ((guint32) stored[2] << 24) |
+         ((guint32) stored[3] << 16) |
+         ((guint32) stored[0] << 8) |
+         ((guint32) stored[1]);
+
+  return TRUE;
+}
+
+gboolean
+goodix5135_decode_raw12 (const guint8 *packed,
+                         gsize         packed_length,
+                         guint16      *pixels,
+                         gsize         pixel_count)
+{
+  gsize input_offset;
+  gsize output_offset = 0;
+
+  if (packed == NULL || pixels == NULL)
+    return FALSE;
+
+  if (packed_length != GOODIX5135_RAW12_PACKED_BYTES)
+    return FALSE;
+
+  if (pixel_count < GOODIX5135_IMAGE_PIXELS)
+    return FALSE;
+
+  if ((packed_length % 6) != 0)
+    return FALSE;
+
+  for (input_offset = 0;
+       input_offset < packed_length;
+       input_offset += 6)
+    {
+      const guint8 *c = packed + input_offset;
+
+      pixels[output_offset++] =
+        ((guint16) (c[0] & 0x0f) << 8) |
+        (guint16) c[1];
+
+      pixels[output_offset++] =
+        ((guint16) c[3] << 4) |
+        ((guint16) c[0] >> 4);
+
+      pixels[output_offset++] =
+        ((guint16) (c[5] & 0x0f) << 8) |
+        (guint16) c[2];
+
+      pixels[output_offset++] =
+        ((guint16) c[4] << 4) |
+        ((guint16) c[5] >> 4);
+    }
+
+  return output_offset == GOODIX5135_IMAGE_PIXELS;
+}
+
+gboolean
 goodix5135_chicagohu_regroup_u16 (const guint16 *src,
                                   gsize          src_pixels,
                                   guint16       *dst,
