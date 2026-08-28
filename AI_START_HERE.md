@@ -19,408 +19,350 @@ USB bulk IN: 0x81
 USB bulk OUT:0x01
 ```
 
-## Canonical checkpoints
-
-Read first:
+## Read these first
 
 1. `docs/CURRENT_STATUS_2026-08-28.md`
-2. `docs/CHICAGO_PREPROCESS_CORE_2026-08-28.md`
-3. `docs/CHICAGO_POST_MASK_STAGE_4AEA0_2026-08-28.md`
-4. `docs/CHICAGO_Q13_BASE_UPDATE_D6F0_2026-08-28.md`
-5. `docs/CHICAGO_SPATIAL_MEDIAN_FILTER_C3B0_2026-08-28.md`
-6. `docs/CHICAGO_497C0_GATE_TO_B460_2026-08-28.md`
-7. `docs/CHICAGO_GATED_FACTOR_UPDATE_B460_2026-08-28.md`
-8. `docs/CHICAGO_E110_WRAPPER_TO_FFF0_2026-08-28.md`
-9. `docs/CHICAGO_MODE9_GAUSSIAN_EXECUTOR_4FFF0_2026-08-28.md`
-10. `docs/CHICAGO_MODE9_STREAMING_EXECUTOR_E380_2026-08-28.md`
-11. `docs/CHICAGO_MODE9_HORIZONTAL_GAUSSIAN_F5F0_2026-08-28.md`
-12. `docs/CHICAGO_MODE9_VERTICAL_GAUSSIAN_FD20_2026-08-28.md`
-13. `docs/RELEASE_READINESS_AND_SAFETY_GATES.md`
-14. `docs/DEVELOPER_ROADMAP.md`
-15. `docs/WINDOWS_IMAGE_LAYOUT_5135_PROOF_2026-08-27.md`
-16. `docs/IMAGE_TRANSPORT_5135_PROOF_2026-08-27.md`
-17. `docs/FDT_5135_PROOF_2026-08-27.md`
-18. `docs/LINUX_CFG70_UPLOAD_PROOF_2026-08-27.md`
-19. `docs/FAILURES_AND_RECOVERIES_2026-08-27.md`
-20. `docs/SAFETY.md`
+2. `docs/CHICAGO_FEATURE_EXTRACTION_AND_PRUNING_2026-08-28.md`
+3. `docs/CHICAGO_435A0_LOCAL_CONTRAST_NORMALIZATION_2026-08-28.md`
+4. `docs/CHICAGO_PREPROCESS_CORE_2026-08-28.md`
+5. `docs/CHICAGO_POST_MASK_STAGE_4AEA0_2026-08-28.md`
+6. `docs/CHICAGO_MODE9_GAUSSIAN_EXECUTOR_4FFF0_2026-08-28.md`
+7. `docs/CHICAGO_MODE9_STREAMING_EXECUTOR_E380_2026-08-28.md`
+8. `docs/CHICAGO_MODE9_HORIZONTAL_GAUSSIAN_F5F0_2026-08-28.md`
+9. `docs/CHICAGO_MODE9_VERTICAL_GAUSSIAN_FD20_2026-08-28.md`
+10. `docs/RELEASE_READINESS_AND_SAFETY_GATES.md`
+11. `docs/DEVELOPER_ROADMAP.md`
+12. `docs/SAFETY.md`
 
-Older handoff/current-status documents are historical evidence and may describe blockers already solved.
+Older handoff/status text may describe blockers already solved. `docs/CURRENT_STATUS_2026-08-28.md` is the current high-level truth.
 
-## Do not repeat solved work
+## Current position
+
+Do **not** restart from USB, TLS, image decode, preprocessing, or Gaussian analysis.
+
+The active work is now inside the matcher/enrollment side of `AlgoChicago.dll`.
+
+Current reconstructed path:
 
 ```text
-CFG70 reconstruction                         DONE
-command 0x90 upload                          DONE
-factory TLS                                  DONE
-activation/reset recovery                    DONE
-FDT manual/down/up                           DONE on tested unit
-image transport/decrypt                      DONE
-Windows-compatible image CRC                 DONE on one private capture
-RAW12 -> 5120 samples                        DONE
-ChicagoHU regroup                            PROVEN
-ImageBase downstream layout                  PROVEN
-Candidate A                                  PROVEN
-Candidate B double-regroup                   REJECTED
-gfusb post-detection packaging               PROVEN
-WBDI EngineAdapter architecture              PROVEN
-family 0x0c -> AlgoChicago.dll               PROVEN
-preprocessor wrapper / real entry            PROVEN
-outer semantic preprocessor                  PROVEN 0x18000e780..0x18000e947
-core orchestrator                            PROVEN 0x1800484e0
-state-source signed subtraction              PROVEN 0x180044970
-mask geometry/source-range cleanup           PROVEN 0x180043c40
-post-mask parent correction                  PROVEN 0x18004aea0
-persistent corrected plane                   PROVEN state+0x13244
-Q13 primary/secondary surfaces               PROVEN
-late type-0x0c Q13 composition               PROVEN
-base scratch_A adaptive update               PROVEN 0x18004d6f0
-spatial ratio median filter                  PROVEN 0x18004c3b0
-0x1800497c0 caller role                      PROVEN boolean gate
-gated late-factor updater                    PROVEN 0x18004b460
-0x18004e110 role                             PROVEN generic wrapper/orchestrator
-mode-9 static selector 0x18004fbf0           PROVEN
-mode-9 kernel                                PROVEN 5-tap Gaussian sigma=1.5 Q16
-0x18004fff0 role                             PROVEN geometry/dispatch wrapper
-0x18004e380 role                             PROVEN streaming/ring-buffer orchestrator
-mode-9 horizontal pass                       PROVEN 0x18004f5f0
-mode-9 vertical pass                         PROVEN 0x18004fd20
-mode-9 2D structure                          PROVEN separable 5x5 Gaussian
-vertical bias/shift derivation                CURRENT via 0x18004f480/context builder
-matcher/enrollment                           LATER
-libfprint/fprintd integration                LATER
-release/safety matrix                        FINAL
+USB/TLS/image acquisition                       DONE
+RAW12 + ChicagoHU regroup                       DONE
+Windows-compatible 80x64 image                  DONE
+preprocessing/correction/normalization          SUBSTANTIALLY CLOSED
+quality/segmentation/output-mask gates          PROVEN
+accepted fingerprint-feature extraction         PROVEN at orchestrator level
+retained 0x3c feature records                   PROVEN
+local orientation + compact descriptors         PROVEN substantially
+post-extraction feature pruning                 PROVEN
+first matcher-ready representation after prune  CURRENT
+matcher/enrollment semantics                    NEXT
+libfprint/fprintd                               LATER
+release/lifecycle safety matrix                 FINAL
 ```
 
-## Preprocessing proof summary
+## Critical facts — do not regress
 
-### Signed difference — IMPORTANT CORRECT DIRECTION
+### Preprocessing subtraction direction
 
-For selector `0x0c`, `0x180044970` performs:
+For selector/type `0x0c`:
 
 ```text
 diff16[i] = state_plus_0x9924_u16[i] - source_u16[i]
 ```
 
-This direction is proven independently by both SIMD and scalar code:
+It is state minus source, wrapping as U16 and later sign-extended.
 
-```asm
-xmm1 = state_plane
-xmm0 = source
-psubw xmm1,xmm0
-```
-
-and the scalar tail loads state then subtracts source. Negative values are intentionally retained as signed 16-bit.
-
-For selector `4` only:
+Selector `4` has:
 
 ```text
 state_plane - source + 0x0fff
 ```
 
-Older text claiming `source - state_plane` is stale and must not be reused.
+Never change this back to source-minus-state.
 
 Do **not** equate AlgoChicago `state+0x9924` with gfusb persisted ImageBase until its producer is independently proven.
 
-### Mask cleanup
+## Preprocessing is no longer the active blocker
 
-`0x180043c40` cleans/fills mask geometry and recomputes coverage. For type `0x0c`, a mask pixel is rejected when:
-
-```text
-source <= 100
-or
-source >= 3800
-```
-
-### Post-mask parent correction
-
-`0x18004aea0` allocates `scratch_A/B/C`. For type `0x0c`:
+Proven later stages include:
 
 ```text
-scratch_C[i] = 3 * source_side_word[i]
-global_work[i] = 3 * state_plus_0x9924[i]
+state+0x13244 corrected U16
+  -> 0x1800435a0 local contrast normalization
+  -> state+0x1cb64 normalized U8
+  -> 0x180050550 directional edge/texture mask
+  -> 0x180046ff0 quality/segmentation gate
+  -> 0x180046930 multi-policy orchestrator
+  -> 0x180045bf0 mask consistency/coverage evaluator
+  -> 0x1800547c0 final U8 output-mask/validity stage
+  -> 0x18000e780 outer copy-out
 ```
 
-It later writes the persistent corrected image-like plane at `state+0x13244`, using shift 14:
+Mode 9 is already closed as a separable 5x5 Gaussian with Q16 kernel:
 
 ```text
-if gate_word[i] != 0:
-    if scratch_A[i] == 0:
-        processed[i] = scratch_C[i] << 14
-    else:
-        processed[i] = round((scratch_C[i] << 14) / scratch_A[i])
-else:
-    processed[i] = scratch_C[i]
+[7869, 15328, 19142, 15328, 7869]
 ```
 
-### Q13 composition
+including the fixed-point/border path needed for the current reconstruction.
 
-Inside `0x180049ba0`, `scratch_A` starts at Q13 unity:
+## Matcher/enrollment entry points
+
+Exports/wrappers:
 
 ```text
-0x2000 == 8192
+preprocessor_wrapper      RVA 0x0000b560 -> 0x18000e780
+identifyImageWrapper      RVA 0x0000b790 -> 0x18000d6c0
+enrolAddImageWrapper      RVA 0x0000b6b0 -> 0x18000cd70
+getQuality                RVA 0x0000d440
 ```
 
-with exact rounded multiplication:
+`0x180016920` is a thunk to `0x1800139e0`.
+
+Direct callers prove `0x1800139e0` is a shared representation builder used by both identify and enrollment.
+
+Known output-object fields:
 
 ```text
-Q13_mul(a,b) = (a*b + 0x1000) >> 13
+output+0xf0 = retained feature count
+output+0xf8 = retained feature-array pointer
+feature stride = 0x3c bytes
 ```
 
-Late type-`0x0c` composition of `scratch_A` and `scratch_B` is proven; see `docs/CHICAGO_POST_MASK_STAGE_4AEA0_2026-08-28.md`.
+## Fingerprint feature extraction — proven checkpoint
 
-## Base adaptive update `0x18004d6f0` — PROVEN
+`0x180011080` is the feature-extraction orchestrator.
 
-It forms:
+`0x1800153b0` is the first fingerprint-specific candidate scanner/detector stage.
+
+`0x180014560` is the accepted-feature emitter and increments `feature_count`.
+
+Proven retained-record fields:
 
 ```text
-if scratch_A[i] == 0:
-    ratio_raw[i] = reference[i] << 13
-else:
-    ratio_raw[i] = round((reference[i] << 13) / scratch_A[i])
+feature+0x02 = X Q8
+feature+0x04 = Y Q8
+feature+0x06 = signed Q12-radian direction
 ```
 
-then applies `0x18004c3b0`.
+`feature+0x00` and `feature+0x08` have quality/response-like roles, but exact semantic names remain unclaimed.
+
+`0x180011a60` builds a 36-bin circular local orientation histogram. It uses a spatial neighborhood controlled by candidate `+0x14`, applies opposite-orientation symmetry on the normal type-`0x0c` path, smooths circularly with exact binomial kernel:
+
+```text
+[1,4,6,4,1] / 16
+```
+
+and feeds peak/sub-bin direction estimation in `0x180014560`.
+
+Important correction:
+
+```text
+candidate+0x14 is a local scale/neighborhood parameter,
+not the final direction angle.
+```
+
+## Compact local descriptor — proven checkpoint
+
+`0x1800157d0` calls `0x180017730` twice:
+
+```text
+Pass A = 128 components
+Pass B =  32 components
+```
+
+`0x180056b10` returns the lower median:
+
+```text
+N=128 -> descriptor rank 63
+N=32  -> descriptor rank 15
+```
+
+`0x180056520` packs one bit per selected component:
+
+```text
+bit = 1 iff component > lower_median
+```
 
 For type `0x0c`:
 
 ```text
-threshold = 1800
+Pass A:
+  output bits = 64
+  source stride = 2
+  source indices = 1,3,5,...,127
+  feature+0x20..+0x27 = 8-byte median-threshold mask
+
+Pass B:
+  output bits = 32
+  source stride = 1
+  source indices = 0..31
+  feature+0x2c..+0x2f = 4-byte median-threshold mask
 ```
 
-and:
+`0x180056780` builds four 32-bit Pass-A sign/projection masks at `feature+0x10..+0x1f`.
+
+`0x180056670` builds a 32-bit Pass-B sign/projection mask at `feature+0x28..+0x2b`. On the normal type-`0x0c` path, `+0x30..+0x37` are cleared and not populated by this writer.
+
+## `0x1800371c0` — post-extraction feature pruning
+
+This is the first proven whole-feature-list consumer after extraction.
+
+It receives both:
 
 ```text
-q = ratio_filtered[i]
-x = work_object.data[i]
-
-if q != 0 and x != 0 and abs(q-x) > 1800:
-    scratch_A[i] = min(
-        round((scratch_A[i] * q) / x),
-        0x7fff
-    )
+feature_array
+&feature_count
 ```
 
-otherwise `scratch_A[i]` is unchanged.
+It is **not** the matcher/template builder.
 
-## Spatial median `0x18004c3b0` — PROVEN
-
-For interior pixels:
+It rounds feature coordinates:
 
 ```text
-H(y,x) = median(src[y][x-1], src[y][x], src[y][x+1])
-out(y,x) = median(H(y-1,x), H(y,x), H(y+1,x))
+x = (x_q8 + 0x80) >> 8
+y = (y_q8 + 0x80) >> 8
 ```
 
-Borders are copied unchanged. This is separable median-of-three horizontal then vertical, not the true median of all nine 3x3 samples.
+and indexes a temporary WORD map.
 
-## `0x1800497c0` caller role — PROVEN
+When the map value is greater than `1`, it deletes that feature by moving the last `0x3c` record into the current slot, zeroing the old last slot, decrementing the count, and rechecking the moved record.
 
-On the tested path:
+It writes the final count back through `feature_count`.
+
+## `0x18003b820` — CLOSED; do not descend further
+
+This function builds the WORD map used by `0x1800371c0`.
+
+Caller-proven ABI:
 
 ```text
-call 0x1800497c0
-test eax,eax
-je   skip_B460_branch
+RCX  = input byte mask/buffer
+RDX  = destination WORD map
+R8D  = width
+R9D  = height
+arg5 = local radius/policy
+arg6 = &total_zero_count
 ```
 
-`scratch_A` is not passed directly to this gate. If nonzero, `0x18004b460` is called twice with `R8 = scratch_A`.
-
-Do not descend into `0x1800497c0` unless the exact predicate becomes necessary later.
-
-## Gated late-factor updater `0x18004b460` — PROVEN at parent level
-
-`0x18004b460` reads `scratch_A` but does not write it directly. It adaptively updates late per-pixel Q13 factor surfaces that are composed into `scratch_A/scratch_B` later in the same `0x180049ba0` invocation.
-
-Initial Q13 ratio:
+It allocates a temporary `(width+1)x(height+1)` WORD summed-area table over:
 
 ```text
-if scratch_A[i] == 0:
-    ratio32[i] = reference[i] << 13
-else:
-    ratio32[i] = round((reference[i] << 13) / scratch_A[i])
+z(y,x) = 1 if input_byte(y,x) == 0
+         0 otherwise
 ```
 
-If an optional factor is present:
+and returns:
 
 ```text
-combined = Q13_mul(scratch_A[i], optional_factor[i])
+total_zero_count = count(input_byte == 0)
 ```
 
-and the temporary ratio uses `reference/combined`.
-
-Then:
+Then for every pixel it computes by four integral-image corner reads:
 
 ```text
-0x1800501a0(...)
-0x18004e110(temp_object, work_object, packed_dims, 9, -1, -1)
+local_zero_count[y,x]
 ```
 
-After that operation:
+inside the clipped square neighborhood:
 
 ```text
-if work[i] != 0:
-    local_ratio = round((temp_filtered[i] << 13) / work[i])
-else:
-    local_ratio = 0x2000
+radius = arg5
+nominal window = (2*radius+1) x (2*radius+1)
 ```
 
-Update only when:
+The second direct caller independently corroborates this by comparing map values with approximately half the nominal square area.
+
+`0x1800371c0` prunes only if:
 
 ```text
-abs(local_ratio - 0x2000) < 0x148
+0x18003b820 succeeded
+and total_zero_count >= 50
 ```
 
-where `0x148 = 328`.
-
-With `n = observation_count`:
+and removes a retained feature when:
 
 ```text
-factor[i] = round((factor[i]*n + local_ratio) / (n+1))
-observation_count = min(observation_count + 1, 30)
+local_zero_count[round(y),round(x)] > 1
 ```
 
-## `0x18004e110` — wrapper, not pixel filter
-
-Exact PE region `0x18004e110..0x18004e378`; real return `0x18004e377`.
-
-It validates/reconciles image objects, temporarily rewrites format metadata, builds context using `0x18004e820`, dispatches through `0x18004fff0`, restores metadata and frees context allocations.
-
-Mode `9` sets `ctx+0x88 = 0`. Modes `6` or `8` set it to `1`. Therefore the constant `9` is a mode selector, not a 9x9-window size.
-
-## Mode-9 static Gaussian kernel — PROVEN
-
-`0x18004fbf0` uses `0x40`-byte mode records. For mode `9`, class `4`:
-
-```text
-record = 0x1800932b0 + 9*0x40
-       = 0x1800934f0
-
-count = 5
-coefficients = [7869, 15328, 19142, 15328, 7869]
-sum = 65536
-```
-
-These are exactly the normalized discrete Gaussian samples at `[-2,-1,0,1,2]` for `sigma=1.5`, rounded to Q16.
-
-Therefore:
-
-```text
-mode 9 = 1D 5-tap Gaussian, sigma=1.5, Q16 coefficients
-```
-
-## Mode-9 separable Gaussian application — PROVEN
-
-`0x18004f5f0` is the horizontal pixel helper. It reads the five Q16 coefficients through `ctx+0x90` and computes:
-
-```text
-H[y,x] = (
-    7869  * src[y,x-2]
-  + 15328 * src[y,x-1]
-  + 19142 * src[y,x]
-  + 15328 * src[y,x+1]
-  + 7869  * src[y,x+2]
-) >> 16
-```
-
-There is no `+0x8000` before the shift in this pass; Q16 conversion is truncation. The intermediate output is stored as DWORD values.
-
-`0x18004fd20` is the second-axis helper. It reads an array of pointers to those horizontally filtered DWORD rows and uses the descriptor at `ctx+0x98`. For five taps, it centers on the middle row and computes symmetrically:
-
-```text
-V[y,x] = (
-    7869  * H[y-2,x]
-  + 15328 * H[y-1,x]
-  + 19142 * H[y,x]
-  + 15328 * H[y+1,x]
-  + 7869  * H[y+2,x]
-  + vertical_bias
-) >> vertical_shift
-```
-
-then stores a U16 output word.
-
-Thus mode 9 is **PROVEN separable 5x5 Gaussian**: horizontal five-tap pass followed by vertical five-tap pass, rather than a monolithic 25-coefficient convolution.
-
-The only unresolved numeric detail in this Gaussian stage is how the context builder derives:
-
-```text
-ctx+0x98 descriptor +0x28 = vertical_bias
-ctx+0x98 descriptor +0x2c = vertical_shift
-```
-
-Do not assume `vertical_bias=0x8000` or `vertical_shift=16` until statically proven.
-
-## `0x18004fff0` — geometry/dispatch wrapper
-
-No coefficient loop. It computes a start index via `0x18004ddf0`, then calls:
-
-```text
-0x18004e380(
-    ctx,
-    input.data + input[0x08] * start_index,
-    input[0x08],
-    ctx[0x74] - ctx[0x6c],
-    output.data,
-    output[0x08]
-)
-```
-
-## `0x18004e380` — PROVEN streaming/ring-buffer orchestrator
-
-The logical routine crosses unwind regions and returns at `0x18004e817`.
-
-It manages context geometry and rolling row/span state, copies incoming data into context-owned working/ring buffers, constructs stored-row pointers and dispatches actual per-row processing.
-
-For mode `9`, `ctx+0x88 == 0`, proving the selected helpers are:
-
-```text
-0x18004f5f0  horizontal Gaussian helper
-0x18004fd20  vertical Gaussian/output helper
-```
-
-and these alternate helpers are **not** selected:
-
-```text
-0x18004f790
-0x18004f940
-```
+Do not rename zero-valued pixels as background/invalid until the polarity/producer of this exact input buffer is independently proven.
 
 ## Immediate next task
 
-Reverse exact routine:
+Continue **inside `0x1800139e0` immediately after the call to `0x1800371c0`**.
+
+Goal: identify the first persistent matcher-ready probe/template-side representation built from the pruned `0x3c` feature list.
+
+Then connect that representation to:
 
 ```text
-AlgoChicago.dll 0x18004f480
+enrollment core   0x18000cd70
+identify core     0x18000d6c0
+matcher           0x180028c90
 ```
 
-Focus only on the construction of the descriptors later stored at `ctx+0x90` and `ctx+0x98`, especially the second descriptor fields consumed by `0x18004fd20`:
+`0x180028c90` is already strongly proven as a per-candidate compare/score orchestrator, but exact scoring/decision semantics are not yet closed.
 
-```text
-+0x28 additive bias
-+0x2c right-shift count
-```
+Reverse only decisive children required for compatibility. Do not recursively reverse every reachable helper.
 
-Need to prove the exact mode-9 values and close the Gaussian output equation. If `0x18004f480` delegates those calculations, descend only into the decisive child helper.
+## What not to repeat
 
-After closing this gated factor update, return to final Q13 composition and trace `state+0x13244` toward matcher/enrollment. Independently prove the producer of `state+0x9924` before equating it with gfusb ImageBase.
+Do not restart or re-prove unless a new dependency demands it:
 
-Do not return to USB/TLS/CRC/regroup/gfusb callbacks, `0x180044970`, `0x180043c40`, `0x18004d6f0`, `0x18004c3b0`, `0x1800497c0`, `0x18004b460`, `0x18004e110`, `0x18004fff0`, `0x18004e380`, `0x18004f5f0`, or `0x18004fd20` unless a newly discovered dependency requires it.
+- USB transport;
+- CFG70 reconstruction;
+- command `0x90` upload;
+- factory TLS;
+- activation;
+- FDT;
+- image `0x20` transport/framing/CRC;
+- RAW12 decode;
+- ChicagoHU regroup;
+- gfusb ImageBase packaging;
+- outer preprocessing stages;
+- Q13 correction stages;
+- mode-9 Gaussian;
+- local normalization/quality/output-mask stages;
+- `0x180011080` / `0x1800153b0` / `0x180014560` roles;
+- `0x180011a60` histogram role;
+- `0x180056b10` lower median;
+- `0x180056520` bitset packing;
+- `0x1800371c0` list compaction;
+- `0x18003b820` local zero-count integral-image map.
 
-## Safety / privacy
+## Release readiness definition
 
-Never publish or ask the user to upload:
+Do not call the project complete until all defined safety gates pass with no known unsafe behavior:
 
-- plaintext factory PSK or hashes;
+- `fprintd-enroll` works;
+- `fprintd-verify` works;
+- cold boot/reboot works;
+- suspend/resume works;
+- cancellation/timeouts recover;
+- no secrets/biometric payloads in logs;
+- Windows Hello still works;
+- existing Windows fingerprints still work;
+- no firmware erase/flash;
+- no factory PSK rewrite/reprovision.
+
+## Safety / privacy — strict
+
+Never ask for, print, commit, publish, upload, or publicly hash:
+
+- plaintext factory PSK;
+- PSK files/hashes;
 - full OTP;
-- fingerprint images/raw frames/templates;
-- `goodix.dat`, `goodix_calib.dat`, `Goodix_Cache.bin`;
-- proprietary Goodix DLL/EXE/CAT binaries;
-- Windows biometric database material;
-- process memory dumps;
-- full unit-specific runtime configuration or private hashes.
+- fingerprint images/raw/templates;
+- `goodix.dat`;
+- `goodix_calib.dat`;
+- `Goodix_Cache.bin`;
+- proprietary Goodix DLL/EXE/CAT files;
+- Windows biometric DB material;
+- full process/memory dumps;
+- full unit-specific 224-byte runtime config;
+- unit-specific runtime-config hash.
 
-Never erase/flash firmware or write/re-provision PSK. Preserving Windows Hello is a release requirement.
+Never firmware erase/flash, rewrite/reprovision the PSK, run destructive 5117 tooling, perform arbitrary persistent register writes, or remove/re-enroll Windows fingerprints as a shortcut.
 
-## Working style
-
-One terminal block at a time. Do not repeat solved steps. Use proof-driven labels (`PROVEN` vs open hypothesis) and preserve decisive checkpoints in this repository.
+The Windows partition must remain read-only during analysis.
