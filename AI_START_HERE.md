@@ -11,7 +11,7 @@ USB VID:PID: 27c6:5135
 Firmware:    GF_HC460SEC_APP_12508
 Chip ID:     raw a2042500 / logical 0x2504
 Profile:     ChicagoHS / ChicagoHU
-Sensor type: 12
+Sensor type: 12 / family 0x0c
 Packed axis: 64 fast x 80 slow
 Output plane:80 columns x 64 rows
 Pixels:      5120
@@ -19,77 +19,102 @@ USB bulk IN: 0x81
 USB bulk OUT:0x01
 ```
 
-## Current state — do not repeat solved work
-
-As of 2026-08-27 the project is **past config, TLS, FDT, image transport, image CRC, RAW12 decode, ChicagoHU regroup, ImageBase/live spatial-order proof, and the gfusb.dll post-detection request handoff**.
-
-```text
-CFG70 reconstruction              DONE
-command 0x90 upload               DONE
-factory TLS                       DONE
-verified activation sequence      DONE
-FDT manual 0x36                   DONE
-FDT-down 0x32                     DONE
-FDT-up 0x34                       DONE
-image command 0x20 ACK            DONE
-TLS image transport               DONE
-TLS image decrypt                 DONE
-Goodix image framing              DONE
-Windows-compatible image CRC      DONE (one private capture)
-RAW12 -> 5120 samples             DONE
-ChicagoHU regroup                 PROVEN
-ImageBase/live relative layout    PROVEN
-Candidate A                       PROVEN
-Candidate B double-regroup        REJECTED
-post-detection callback           RESOLVED: 0x180013280
-gfusb.dll request handoff         PROVEN
-higher-layer matcher preprocessing NEXT
-```
+## Canonical current checkpoint
 
 Read first:
 
-1. `docs/CURRENT_STATUS_2026-08-27.md`
-2. `docs/WINDOWS_IMAGE_LAYOUT_5135_PROOF_2026-08-27.md`
-3. `docs/IMAGE_TRANSPORT_5135_PROOF_2026-08-27.md`
-4. `docs/FDT_5135_PROOF_2026-08-27.md`
-5. `docs/LINUX_CFG70_UPLOAD_PROOF_2026-08-27.md`
-6. `docs/FAILURES_AND_RECOVERIES_2026-08-27.md`
-7. `docs/SAFETY.md`
-8. `docs/DEVELOPER_ROADMAP.md`
+1. `docs/CURRENT_STATUS_2026-08-28.md`
+2. `docs/RELEASE_READINESS_AND_SAFETY_GATES.md`
+3. `docs/DEVELOPER_ROADMAP.md`
+4. `docs/WINDOWS_IMAGE_LAYOUT_5135_PROOF_2026-08-27.md`
+5. `docs/IMAGE_TRANSPORT_5135_PROOF_2026-08-27.md`
+6. `docs/FDT_5135_PROOF_2026-08-27.md`
+7. `docs/LINUX_CFG70_UPLOAD_PROOF_2026-08-27.md`
+8. `docs/FAILURES_AND_RECOVERIES_2026-08-27.md`
+9. `docs/SAFETY.md`
+
+Older current-status/handoff documents are historical evidence and may describe blockers that have already been solved.
+
+## Current state — do not repeat solved work
+
+The project is **past config, TLS, FDT, image transport, image CRC, RAW12 decode, ChicagoHU regroup, ImageBase/live layout proof, and gfusb.dll result packaging/handoff**.
+
+The Windows biometric layer above `gfusb.dll` has now also been identified.
+
+```text
+CFG70 reconstruction                         DONE
+command 0x90 upload                          DONE
+factory TLS                                  DONE
+verified activation sequence                 DONE
+FDT manual/down/up                           DONE on tested unit
+image transport/decrypt                      DONE
+Windows-compatible image CRC                 DONE on one private capture
+RAW12 -> 5120 samples                        DONE
+ChicagoHU regroup                            PROVEN
+ImageBase/live relative layout               PROVEN
+Candidate A                                  PROVEN
+Candidate B double-regroup                   REJECTED
+gfusb.dll post-detection packaging           PROVEN
+gfusb.dll Windows request handoff             PROVEN
+Windows engine component                     IDENTIFIED: EngineAdapter.dll
+0x2504 / family 0x0c algorithm selection     PROVEN: AlgoChicago.dll
+AlgoChicago preprocessor export              PROVEN: RVA 0x0000b560
+real preprocessor entry                      PROVEN: 0x18000e780
+full semantic preprocessor CFG               CURRENT TASK
+exact preprocessing arithmetic               NOT YET PROVEN
+matcher/enrollment                           LATER
+libfprint/fprintd integration                 LATER
+release/safety matrix                        FINAL STAGE
+```
 
 ## Immediate next task
 
-**Stop investigating transport, ImageBase orientation, the detector, callback `0x180013280`, and request helper `0x18001393c`.**
+**Do not return to transport, ImageBase orientation, the detector, callback `0x180013280`, or request helper `0x18001393c` unless a new dependency requires it.**
 
-The concrete post-detection callback is proven:
-
-```text
-0x18059cb60 -> 0x180013280
-```
-
-It receives:
+The current reverse-engineering target is the complete reachable control flow beginning at:
 
 ```text
-(context, persisted ImageBase, regrouped live image, flags)
+AlgoChicago.dll 0x18000e780
 ```
 
-and copies the two image planes as blocks into a large result package. No pixel-wise baseline subtraction, normalization, clamp/saturation, or crop occurs in this callback.
+`preprocessor_wrapper` at RVA `0x0000b560` is only a seven-argument forwarding shim to this implementation.
 
-The package is submitted through `0x18001393c`, which copies `0xeb70` bytes into a pending request output buffer, reports total result size `0xeb88`, completes the request through `0x18001d64c`, and clears the pending request state. This is the boundary where the examined `gfusb.dll` hands the image result to the next Windows layer.
-
-Therefore the current target is the **Windows component that opens/reads this driver interface and consumes the `0xeb88` result**. Identify that local Goodix/Windows biometric DLL/EXE/service from the installed driver/software files, then statically trace the two `10240`-byte `80x64 u16` planes into the actual matcher/feature extractor.
+Important correction: the first x64 `RUNTIME_FUNCTION` record covering the entry ends at `0x18000e880`, but code in that region directly branches to at least `0x18000e91a` and `0x18000e92e`. Therefore one unwind record is **not** the complete semantic routine boundary. Follow the control-flow graph across all reachable fragments/funclets until actual returns are reached.
 
 Need exact proof, if present, for:
 
-1. baseline subtraction direction;
-2. clamp/saturation rules;
-3. normalization/gain scaling;
-4. per-pixel calibration/noise correction;
-5. crop/output dimensions;
-6. any role of `goodix_calib.dat`;
-7. exact buffer handed to matcher/feature extraction.
+1. identities of the seven preprocessor arguments;
+2. ImageBase input;
+3. live-image input;
+4. processed-image output;
+5. calibration state/data;
+6. subtraction direction and signedness;
+7. clamp/saturation;
+8. normalization/gain;
+9. per-pixel correction/noise handling;
+10. crop/grow/output dimensions;
+11. quality/coverage outputs;
+12. exact buffer passed into identification/enrollment.
 
-Do not request or upload proprietary binaries; inspect the user's local files in place using metadata/disassembly only.
+Do not name unexplained status values such as EngineAdapter's observed special `0x84` result until the producer/meaning is proven from the algorithm code.
+
+## Windows biometric architecture checkpoint
+
+The installed package configures Windows Biometric Framework with the Windows sensor/storage adapters and Goodix `EngineAdapter.dll` as the vendor engine adapter.
+
+Static EngineAdapter analysis proves family selection includes:
+
+```text
+family 0x03 -> Milan algorithm path
+family 0x0c -> AlgoChicago.dll
+family 0x0e -> AlgoChicagoT.dll
+```
+
+For this device, logical chip `0x2504` maps to family/type `0x0c`, therefore the active algorithm DLL is `AlgoChicago.dll`.
+
+EngineAdapter resolves algorithm functions dynamically through `LoadLibraryW` / `GetProcAddress`, including preprocessing, calibration, sensor check, identify, enroll, and template operations.
+
+This establishes that final preprocessing/matching is above `gfusb.dll`; do not search the USB driver for final matcher arithmetic.
 
 ## Windows live-image layout proof — critical checkpoint
 
@@ -158,7 +183,21 @@ It compares ImageBase and live image at the same pixel index, computes tile stat
 3 = bad
 ```
 
-This is a base/live detector/classifier, **not** the final matcher preprocessing output routine. Do not spend more time reverse engineering it unless required by a later dependency.
+This is a base/live detector/classifier, **not** the final matcher preprocessing output routine.
+
+## gfusb.dll result handoff — solved
+
+The concrete post-detection callback registered in `0x18059cb60` is `0x180013280`.
+
+It receives the effective shape:
+
+```text
+(context, persisted ImageBase, regrouped live image, flags)
+```
+
+and packages the two image planes with metadata. No final per-pixel matcher preprocessing occurs there.
+
+`0x18001393c` then completes the pending Windows request and hands the result to the higher biometric layer. This boundary is solved; do not spend more time there.
 
 ## Image CRC
 
@@ -181,7 +220,7 @@ For stored bytes `[a,b,c,d]`, Windows reconstructs:
 
 CRC domain is the 7680 packed RAW12 bytes; checker input block is packed RAW12 + 4-byte stored CRC (`7684` bytes total).
 
-A second independent private capture is desirable as cross-capture confirmation, but it is not the current blocker.
+A second independent private capture is desirable before release as cross-capture confirmation.
 
 ## Verified 5135 activation sequence
 
@@ -212,13 +251,12 @@ The factory host PSK was recovered privately from the user's own Windows DPAPI-p
 
 ## CFG70 / command 0x90
 
-The original config blocker is solved.
-
 - Windows upload length: exactly 224 bytes (`0xe0`).
 - Correct static family: CFG70.
 - Linux rebuild from live OTP matched the private Windows runtime reference byte-for-byte.
 - Config checksum rule is proven.
 - One controlled Linux `0x90` upload was accepted and post-upload calibration verified.
+- Runtime `0x90` is a volatile MCU write; describe it accurately.
 - Do not publish the full unit-specific runtime config or its private hash.
 
 ## FDT
@@ -231,28 +269,6 @@ The original config blocker is solved.
 - up `0x34`: `0a02 + regs12`;
 - current FDT-up success uses a private Windows-traced per-unit threshold set; generic derivation remains future work.
 
-## Image transport facts
-
-Image request:
-
-```text
-command 0x20
-payload 01 00
-```
-
-Reply order:
-
-```text
-normal ACK for 0x20
-then Goodix transport frame flags 0xb0, len 7722
-TLS 1.2 application-data at offset 0
-TLS plaintext len 7693
-```
-
-The decrypted Goodix message uses `checksum=False` / trailer `0x88`.
-
-Do not repeat the old `0xb2` assumption.
-
 ## Mandatory privacy/safety
 
 Never publish or ask the user to upload:
@@ -262,13 +278,16 @@ Never publish or ask the user to upload:
 - full OTP;
 - fingerprint images/raw frames/templates;
 - `goodix.dat`, `goodix_calib.dat`, `Goodix_Cache.bin`;
-- proprietary Windows DLL/EXE/CAT;
+- proprietary Goodix DLL/EXE/CAT binaries;
+- Windows biometric database material;
 - process memory dumps;
 - full unit-specific 224-byte runtime config or its private hash.
 
 Never erase/flash firmware or write/re-provision PSK.
 
-A runtime config upload (`0x90`) is a volatile MCU write. Describe it accurately.
+Preserving Windows Hello is a release requirement.
+
+For completion criteria, use `docs/RELEASE_READINESS_AND_SAFETY_GATES.md`. Do not claim universal mathematical `100% safety`; the practical engineering target is **all defined safety gates passed and no known unsafe behavior**.
 
 ## Working style
 
