@@ -6,13 +6,15 @@ This is the canonical high-level checkpoint for the Linux enablement effort. Sta
 
 ## Plain-language position
 
-The device/transport side is solved on the tested unit: USB transport, volatile runtime configuration, factory-compatible TLS, activation, finger detection, image request/decrypt/framing/CRC, RAW12 decode, ChicagoHU regroup, and Windows-compatible 80x64 downstream layout are all established.
+The device/transport side is solved on the tested unit: USB transport, volatile runtime configuration, factory-compatible TLS, activation, finger detection, image request/decrypt/framing/CRC, RAW12 decode, ChicagoHU regroup, and Windows-compatible 80x64 downstream layout are established.
 
-The preprocessing pipeline is also substantially closed. We have traced the correction/normalization path through the persistent corrected U16 plane, local contrast normalization to U8, directional/texture mask generation, quality/segmentation policy gates, and final U8 output-mask postprocessing. The outer preprocessor copy-out boundary is known.
+The preprocessing pipeline is also substantially closed through correction, normalization, texture/mask generation, quality/segmentation policy, final output-mask processing, and outer copy-out.
 
-The active work is now Phase 8: fingerprint feature extraction, post-extraction filtering, and the representation consumed by enrollment/identify/matching.
+Feature extraction is substantially mapped: retained minutiae are `0x3c` bytes each, their coordinates/direction are known, the local binary descriptors are structurally mapped, post-extraction spatial pruning is proven, and later per-feature quality/support refinement is substantially understood.
 
-The current exact checkpoint is immediately after the post-extraction spatial-pruning stage `0x1800371c0` / `0x18003b820`. The next task is to continue through `0x1800139e0` and identify the first matcher-ready probe/template-side representation.
+The active work is now inside the matcher. A major new checkpoint is closed: `0x18005baf0` directly performs pairwise binary-descriptor comparison across the retained `0x3c` feature lists. It traverses both lists with nested loops, XORs descriptor DWORDs, converts XOR bytes through a fixed lookup table, produces pair costs/variant flags, and tracks best/second-best candidate indices per feature. This logic is implemented directly in `0x5baf0`; it is not delegated to another matcher child.
+
+The immediate next target is `0x18005a350`, which consumes the two directional `0x5baf0` result sets and is expected to consolidate them into the correspondence state reduced later by `0x18001f840`.
 
 ## Milestones
 
@@ -53,21 +55,30 @@ mask consistency evaluator 0x180045bf0                  PROVEN
 final U8 output-mask postprocessor 0x1800547c0          PROVEN
 outer preprocessor copy-out boundary                    PROVEN
 identify wrapper -> 0x18000d6c0                         PROVEN
- enrollment wrapper -> 0x18000cd70                       PROVEN target
+enrollment wrapper -> 0x18000cd70                       PROVEN target
 shared identify/enrollment builder 0x1800139e0          PROVEN role
 feature extraction orchestrator 0x180011080             PROVEN
 feature candidate scanner 0x1800153b0                   PROVEN role
 accepted-feature emitter 0x180014560                    PROVEN
 36-bin local orientation histogram 0x180011a60          PROVEN role
 retained feature stride 0x3c                            PROVEN
-local descriptor median threshold 0x180056b10           PROVEN
-binary descriptor packer 0x180056520                    PROVEN
-Pass-A / Pass-B descriptor dimensions                   PROVEN
+Pass-A sign descriptor +0x10..+0x1f                    PROVEN structurally
+Pass-A median descriptor +0x20..+0x27                  PROVEN
+Pass-B sign descriptor +0x28..+0x2b                    PROVEN structurally
+Pass-B median descriptor +0x2c..+0x2f                  PROVEN
 post-extraction spatial pruning 0x1800371c0             PROVEN
 local zero-count map builder 0x18003b820                PROVEN
-first matcher-ready representation after pruning        CURRENT
-per-candidate matcher 0x180028c90                       PROVEN role only
-exact matcher scoring/decision                          NOT YET CLOSED
+per-feature local score 0x180016930                     PROVEN role
+per-feature neighborhood support 0x180016bd0            PROVEN role
+feature reorder/finalizer 0x18000ede0                   PROVEN role
+identify per-candidate wrapper 0x180028c90              PROVEN role
+matcher orchestrator / score fusion 0x1800293c0         PROVEN role
+early multi-channel matcher 0x180028de0                 PROVEN role
+spatial similarity channel 0x180050c80                  PROVEN role
+primary correspondence builder 0x180059580              PROVEN role
+pairwise descriptor-cost primitive 0x18005baf0          PROVEN
+correspondence consolidation 0x18005a350                CURRENT
+exact final matcher scoring/decision                    NOT YET CLOSED
 enrollment template update/storage representation       NOT YET CLOSED
 Linux feature extraction/matcher implementation         NOT YET IMPLEMENTED
 libfprint/fprintd integration                           NOT YET IMPLEMENTED
@@ -90,167 +101,148 @@ Selector `4` has the separate relation:
 state_plane - source + 0x0fff
 ```
 
-Do not regress to `source-state`.
+Never regress to `source-state`.
 
-Also, `state+0x9924` remains an AlgoChicago internal preprocessing/calibration-state plane. It is not yet independently proven identical to gfusb persisted ImageBase.
+`state+0x9924` remains an AlgoChicago internal preprocessing/calibration-state plane. It is not yet independently proven identical to gfusb persisted ImageBase.
 
-## Preprocessor output path now closed far past the old checkpoint
+## Retained feature record — current proven structure
 
-The mode-9 transform is a separable 5x5 Gaussian using the five Q16 coefficients:
+The final retained feature stride is exactly `0x3c` bytes.
 
-```text
-[7869, 15328, 19142, 15328, 7869]
-```
-
-with the border behavior and fixed-point application already closed.
-
-The later preprocessing chain is also mapped:
+Current structure:
 
 ```text
-state+0x13244 corrected U16
-  -> 0x1800435a0 local contrast normalization
-  -> state+0x1cb64 normalized U8
-  -> 0x180050550 directional edge/texture mask
-  -> 0x180046ff0 quality/segmentation acceptance
-  -> 0x180046930 multi-policy quality/preprocessing
-  -> 0x180045bf0 mask consistency/coverage evaluation
-  -> 0x1800547c0 final U8 validity/output-mask postprocessing
-  -> outer wrapper copy-out
++0x00        local flag / quality-like field; exact name unclaimed
++0x02        X Q8
++0x04        Y Q8
++0x06        signed Q12-radian direction
++0x08        response/strength-like field; exact name unclaimed
++0x0c        Y-border classification after extraction orchestration
++0x10..+0x1f 128-bit Pass-A sign/projection descriptor
++0x20..+0x27 64-bit Pass-A lower-median-threshold descriptor
++0x28..+0x2b 32-bit Pass-B sign/projection descriptor
++0x2c..+0x2f 32-bit Pass-B lower-median-threshold descriptor
++0x30..+0x37 cleared/reserved on normal type-0x0c extraction path before later consumers
++0x38        status/validity-like byte
++0x39        neighborhood/spatial-support score
 ```
 
-Preprocessing is therefore no longer the immediate blocker.
+`0x180056780` produces the four Pass-A sign/projection DWORDs at `+0x10..+0x1f`; `0x180056670` produces the Pass-B sign/projection DWORD at `+0x28..+0x2b`.
 
-## Feature extraction checkpoint
+`0x180056520` produces the median-threshold bitsets, using the lower median returned by `0x180056b10`.
 
-`0x180016920` thunks to shared builder `0x1800139e0`, which is called by both enrollment and identify paths.
+## Post-extraction list and quality finalization
 
-Its output object contains:
+### `0x1800371c0` / `0x18003b820`
+
+`0x371c0` filters the retained list in-place using a local zero-count WORD map produced exactly by `0x3b820` via a summed-area/integral image. This stage is sufficiently closed; do not descend further unless a new dependency requires it.
+
+### `0x180016930`
+
+Computes one local image/map-derived score per retained feature. One caller writes these scores directly to the parallel `object+0x164` array.
+
+### `0x180016bd0`
+
+Performs pairwise local-neighborhood analysis between retained features and writes a clamped support-like score to `feature+0x39`. It also contributes to the final status refinement using local and neighbor-smoothed scores.
+
+### `0x18000ede0`
+
+Whole-feature-list reorder/finalizer. It partitions/reorders `0x3c` records based on low status bits and swaps the parallel `object+0x164` entries in lockstep. It writes a partition/count-like value at `output+0x108`.
+
+## Identify / matcher ABI checkpoint
+
+`identifyImageWrapper` enters `0x18000d6c0`.
+
+The identify path builds the probe through `0x180016920` and then loops over candidate templates.
+
+`0x180028c90` is the per-candidate matcher wrapper. Proven high-level ABI:
 
 ```text
-output+0xf0 = retained feature count
-output+0xf8 = retained feature array
+first argument  = match-result/score output pointer
+second argument = probe fingerprint object
+third argument  = candidate/template container
+return EAX      = execution/status
 ```
 
-with each feature exactly `0x3c` bytes.
+The actual match decision/result is written through the first argument, while nonzero `EAX` indicates execution failure/status.
 
-### Accepted feature fields
+`0x28c90` prepares matcher context and delegates the substantial work to `0x1800293c0`.
 
-`0x180014560` is proven to append accepted features and increment the count.
+## Matcher evidence channels
 
-Known fields:
+The matcher combines multiple evidence channels rather than using one descriptor distance alone.
+
+Current reconstruction:
 
 ```text
-+0x02 = X Q8
-+0x04 = Y Q8
-+0x06 = signed Q12-radian direction
+binary minutia correspondence evidence
+  -> 0x59580 / 0x5baf0 / 0x5a350
+
+spatial/image representation similarity
+  -> 0x50c80 and helpers
+
+additional relation/geometry metrics
+  -> 0x51980 / 0x5a6b0 and surrounding orchestration
+
+quality / coverage / policy gates
+  -> 0x258c0 / 0x1c920 and other thresholds
+
+final score fusion
+  -> 0x293c0
 ```
 
-The final direction comes from a 36-bin circular local orientation histogram built by `0x180011a60`, followed by sub-bin interpolation in `0x180014560`.
+`0x258c0` and `0x1c920` are threshold/policy predicates over already-computed metrics; they are not raw minutia descriptor comparators.
 
-### Compact local descriptors
+`0x50c80` is primarily a spatial/image-representation similarity channel and does not directly traverse `output+0xf8` as `0x3c` minutiae.
 
-`0x180017730` enriches each retained feature using two passes.
+## `0x18005baf0` — pairwise binary descriptor correspondence primitive
 
-`0x180056b10` returns the lower median of the descriptor components:
+This is the newest major closed checkpoint.
+
+A previous run incorrectly stopped at the first PE `RUNTIME_FUNCTION` boundary. Full CFG recovery proves the logical function crosses three unwind entries and spans:
 
 ```text
-N=128 -> rank 63
-N=32  -> rank 15
+0x18005baf0 .. 0x18005bf35
+273 reachable instructions
 ```
 
-`0x180056520` produces bitsets using the rule:
+The function contains nested loops with explicit `0x3c` stride arithmetic over both retained-feature lists.
+
+For each feature pair, the primary descriptor comparison starts at `feature+0x10` and covers the 16-byte Pass-A sign/projection descriptor. It XORs corresponding DWORDs, extracts the four bytes of each XOR result, and accumulates values from the fixed lookup table at:
 
 ```text
-bit = 1 iff selected_component > lower_median
+0x180079730
 ```
 
-For type `0x0c`:
+This is operationally a Hamming-like byte-lookup binary-descriptor distance. Do not yet label the table itself as an exact popcount table until its entries are independently verified.
 
-```text
-Pass A: 64 bits, source stride 2, 8 bytes at feature+0x20..+0x27
-Pass B: 32 bits, source stride 1, 4 bytes at feature+0x2c..+0x2f
-```
+The function also performs additional XOR + lookup cost terms using selected later binary fields in the `0x3c` record.
 
-The associated sign/projection masks are produced by `0x180056780` and `0x180056670`.
+It writes pairwise byte costs/variant flags and maintains the best two observed pair costs plus associated opposite-list indices for each outer feature.
 
-See `docs/CHICAGO_FEATURE_EXTRACTION_AND_PRUNING_2026-08-28.md` for the current detailed record map.
+There is no substantive child below this comparison: the only direct call is the teardown/security-cookie helper `0x18000c170`.
 
-## `0x1800371c0` — proven post-extraction pruning
+Therefore the actual pairwise binary-descriptor comparison primitive has now been reached.
 
-This function receives both the complete retained feature array and `&feature_count`.
-
-It does not build the matcher template. Instead it filters the list in-place.
-
-For each feature:
-
-```text
-x = (x_q8 + 0x80) >> 8
-y = (y_q8 + 0x80) >> 8
-```
-
-It then checks a temporary WORD map at `map[y*width+x]`.
-
-When the map value is greater than `1`, the feature is removed by swapping the final retained `0x3c` record into the current slot, zeroing the old last record, decrementing the count, and rechecking the moved record. The final feature count is written back.
-
-Therefore `0x1800371c0` is a real post-extraction feature-list pruning/compaction stage.
-
-## `0x18003b820` — exact local zero-count map
-
-This helper is now algorithmically closed.
-
-It receives an input byte mask/buffer, output WORD map, width, height, local radius, and total-zero-count output pointer.
-
-It builds a `(width+1)x(height+1)` summed-area/integral image of:
-
-```text
-z(y,x) = 1 when input_byte(y,x) == 0
-         0 otherwise
-```
-
-and simultaneously returns:
-
-```text
-total_zero_count = number of zero-valued input pixels
-```
-
-It then uses the four-corner summed-area formula to write, for each image location:
-
-```text
-local_zero_count[y,x]
-```
-
-inside a clipped square neighborhood whose nominal size is:
-
-```text
-(2*radius+1) x (2*radius+1)
-```
-
-`0x1800371c0` only applies the pruning path when the global zero count is at least 50, and removes a feature when its local zero count is greater than 1.
-
-Do not yet assign semantic polarity such as "background" or "invalid" to zero values until the exact producer of this particular byte mask is independently closed.
+Detailed checkpoint: `docs/CHICAGO_MATCHER_CORRESPONDENCE_5BAF0_2026-08-28.md`.
 
 ## Immediate task
 
-Return to `0x1800139e0` immediately after its `0x1800371c0` call.
+Reverse `0x18005a350` next.
 
-Do not spend more time on `0x18003b820`; it is sufficiently closed.
+It is called immediately after the two directional `0x18005baf0` passes from `0x180059580`.
 
-Trace the next representation-building operations until the first object that is demonstrably consumed by:
+Determine:
 
-```text
-enrollment core 0x18000cd70
-identify core   0x18000d6c0
-matcher         0x180028c90
-```
+1. whether it enforces reciprocal/mutual nearest-neighbor correspondences;
+2. how best/second-best costs and indices are filtered;
+3. the exact correspondence list/record it emits;
+4. how that state is reduced by `0x18001f840`;
+5. where geometry/direction consistency joins the descriptor-distance evidence.
 
-Prioritize the minimum decisive path needed to reproduce:
+After that, continue only the minimum decisive path needed to close final matcher scoring and then enrollment update/template storage.
 
-1. probe/template representation;
-2. enrollment accumulation/update;
-3. per-candidate comparison/scoring;
-4. final identify/verify decision.
-
-Do not reverse every helper merely because it is reachable.
+Do not return to USB/TLS/preprocessing/Gaussian or previously closed feature-pruning helpers unless a newly proven dependency requires it.
 
 ## Completion / safety gates
 
