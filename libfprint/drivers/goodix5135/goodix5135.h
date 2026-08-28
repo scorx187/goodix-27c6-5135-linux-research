@@ -13,7 +13,7 @@
 #define GOODIX5135_USB_VID          0x27c6
 #define GOODIX5135_USB_PID          0x5135
 
-#define GOODIX5135_USB_INTERFACE    0
+#define GOODIX5135_USB_INTERFACE    1
 
 #define GOODIX5135_EP_IN            0x81
 #define GOODIX5135_EP_OUT           0x01
