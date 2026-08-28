@@ -1,4 +1,4 @@
-# Chicago matcher geometry checkpoint — 0x586c0 / 0x430f0 — 2026-08-28
+# Chicago matcher geometry checkpoint — 0x586c0 / 0x430f0 / 0x5e790 — 2026-08-28
 
 Target: `AlgoChicago.dll`, normal family/type `0x0c` path for Goodix `27c6:5135`.
 
@@ -13,6 +13,7 @@ This document records static reverse-engineering results only. No fingerprint im
   -> 0x1f840 correspondence inlier reducer
        -> 0x586c0 geometric consensus / inlier-mask stage
             -> 0x430f0 exact three-point affine solver
+            -> 0x5e790 affine linear-part singular-value plausibility gate
        -> 0x24880 additional pair validity filter
 ```
 
@@ -60,7 +61,7 @@ Model selection is lexicographic:
 
 The error metric is computed from the accumulated squared reprojection residuals divided by the number of inliers (with integer rounding). The metric later checked by `0x1f840` against `0x4000` therefore lives in the same squared Q8 coordinate-error domain. `0x4000 / 65536 = 0.25 pixel^2`, corresponding to about `0.5 px` RMS.
 
-`0x5e790` is used as an additional model acceptance/plausibility gate before the winning transform/mask is committed. Its exact rule remains to be reversed.
+Before committing a winning model/mask, `0x586c0` additionally calls `0x5e790(transform, 401, 163)`. That helper is now proven to bound the singular values of the affine linear part; details are below.
 
 ## 0x1800430f0 — exact three-point affine solver
 
@@ -153,14 +154,109 @@ If a required determinant is zero, the solver substitutes `0x7fffffff` for the a
 
 Important interpretation correction: `0x430f0` itself solves a general affine transform. The near-similarity/rotation-scale restriction is imposed by `0x586c0` after solving, not by `0x430f0`.
 
+## 0x18005e790 — affine linear-part singular-value gate
+
+Function boundary:
+
+```text
+0x18005e790 .. 0x18005e8ae
+82 reachable instructions
+no child calls
+```
+
+The helper ignores translation completely. It reads only:
+
+```text
+M = [[a,b],
+     [c,d]]
+```
+
+from transform offsets `+0x00,+0x04,+0x0c,+0x10`.
+
+It forms the symmetric Gram matrix:
+
+```text
+G = M * M^T
+
+g00 = a*a + b*b
+g01 = a*c + b*d
+g11 = c*c + d*d
+```
+
+Then it computes:
+
+```text
+T     = g00 + g11                         # trace(G)
+Delta = T*T - 4*(g00*g11 - g01*g01)      # eigenvalue discriminant
+```
+
+The call used by `0x586c0` is:
+
+```text
+0x5e790(transform, 401, 163)
+```
+
+Internally the two scalar bounds are shifted by nine bits:
+
+```text
+L = 163 << 9
+H = 401 << 9
+```
+
+Acceptance requires, with strict squared-discriminant inequalities:
+
+```text
+Delta >= 0
+T >= 0
+T >= L
+T <= H
+(T - L)^2 > Delta
+(H - T)^2 > Delta
+```
+
+For the two eigenvalues of `G`,
+
+```text
+lambda_min = (T - sqrt(Delta)) / 2
+lambda_max = (T + sqrt(Delta)) / 2
+```
+
+this is equivalent to:
+
+```text
+lambda_min > (163 << 8)
+lambda_max < (401 << 8)
+```
+
+Because `a,b,c,d` are Q8, the eigenvalues of `G` are Q16 squared singular values. Therefore the real squared singular values of the affine linear part must satisfy approximately:
+
+```text
+163/256 < sigma_min^2
+sigma_max^2 < 401/256
+```
+
+or, in singular-value/scale terms:
+
+```text
+sigma_min > sqrt(163/256) ~= 0.79795
+sigma_max < sqrt(401/256) ~= 1.25156
+```
+
+So `0x5e790` is a translation-independent **affine scale/shear plausibility gate**. It rejects a model if any principal scale is roughly below `0.80x` or above `1.25x`. It does not itself require perfect isotropy; the tighter near-similarity conditions are separately enforced by `0x586c0`.
+
+On success it returns `1`; otherwise it returns `0`.
+
+This helper has two direct matcher callers, both using the same constants `(401,163)`, so it is a shared affine-model plausibility primitive rather than a one-off branch condition.
+
 ## Current next targets
 
-Do not reopen already-solved descriptor/correspondence stages.
+Do not reopen already-solved descriptor/correspondence/geometric-solver stages.
 
 Immediate decisive work:
 
-1. reverse `0x18005e790` to identify the additional winning-model acceptance rule inside `0x586c0`;
-2. reverse `0x180024880` to recover the exact post-geometry per-pair direction/feature invalidation rule;
-3. then return to the minimum remaining final score/policy fusion path.
+1. reverse `0x180024880` to recover the exact post-geometry per-pair direction/feature invalidation rule;
+2. then return to the minimum remaining final score/policy fusion path.
+
+Do not descend into `0x58f90` unless a later consumer proves that side effect is needed for final score reproduction.
 
 Enrollment/template update and Linux/libfprint implementation remain after matcher closure.
