@@ -54,6 +54,18 @@ struct _FpiDeviceGoodix5135
   Goodix5135OtpReadTransaction         otp_read_transaction;
   Goodix5135OtpCalibration             otp_calibration;
   gboolean                             otp_calibration_valid;
+
+  /*
+   * Volatile preparation state for the future CFG70 upload path.
+   *
+   * No template, config payload, Windows reference, or biometric
+   * material is retained here.
+   *
+   * The transaction remains IDLE until a later explicitly-gated
+   * runtime step supplies an approved CFG70 template.
+   */
+  Goodix5135ConfigUploadTransaction    config_upload_transaction;
+  gboolean                             config_calibration_ready;
 };
 
 G_DECLARE_FINAL_TYPE (FpiDeviceGoodix5135,
@@ -3052,6 +3064,16 @@ goodix5135_otp_response_cb (
   self->otp_calibration_valid =
     TRUE;
 
+  /*
+   * At this point the only retained device-specific material is
+   * the already-validated derived calibration.
+   *
+   * No CFG70 template has been supplied and no config upload has
+   * been prepared or submitted.
+   */
+  self->config_calibration_ready =
+    TRUE;
+
   goodix5135_secure_zero (
     &calibration,
     sizeof (calibration));
@@ -3072,6 +3094,20 @@ goodix5135_otp_response_cb (
     NULL);
 }
 
+
+
+static void
+goodix5135_config_runtime_state_reset (
+  FpiDeviceGoodix5135 *self)
+{
+  g_assert (self != NULL);
+
+  goodix5135_config_upload_transaction_init (
+    &self->config_upload_transaction);
+
+  self->config_calibration_ready =
+    FALSE;
+}
 
 static void
 goodix5135_start_otp_read (
@@ -3098,6 +3134,15 @@ goodix5135_start_otp_read (
   goodix5135_secure_zero (
     &self->otp_calibration,
     sizeof (self->otp_calibration));
+
+  /*
+   * A new OTP gate invalidates any previous config-preparation
+   * readiness and restores the upload transaction to IDLE.
+   *
+   * This performs no USB I/O.
+   */
+  goodix5135_config_runtime_state_reset (
+    self);
 
   goodix5135_otp_read_transaction_init (
     &self->otp_read_transaction);
