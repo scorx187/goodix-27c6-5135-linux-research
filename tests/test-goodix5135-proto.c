@@ -2467,6 +2467,328 @@ test_d4_transaction_invalid_order (void)
 }
 
 
+
+static void
+test_enable_chip_request_true_vector (void)
+{
+  guint8 packet[GOODIX5135_USB_PACKET_LENGTH];
+  gsize logical_length = 0;
+
+  static const guint8 expected[] = {
+    0xa0, 0x06, 0x00, 0xa6,
+    0x96, 0x03, 0x00,
+    0x01, 0x00,
+    0x10,
+  };
+
+  g_assert_true (
+    goodix5135_build_enable_chip_request (
+      TRUE,
+      packet,
+      sizeof (packet),
+      &logical_length));
+
+  g_assert_cmpuint (
+    logical_length,
+    ==,
+    GOODIX5135_ENABLE_CHIP_REQUEST_LENGTH);
+
+  g_assert_cmpmem (
+    packet,
+    logical_length,
+    expected,
+    sizeof (expected));
+
+  for (gsize i = logical_length;
+       i < sizeof (packet);
+       i++)
+    g_assert_cmpuint (
+      packet[i],
+      ==,
+      0);
+}
+
+
+static void
+test_enable_chip_request_false_vector (void)
+{
+  guint8 packet[GOODIX5135_USB_PACKET_LENGTH];
+  gsize logical_length = 0;
+
+  static const guint8 expected[] = {
+    0xa0, 0x06, 0x00, 0xa6,
+    0x96, 0x03, 0x00,
+    0x00, 0x00,
+    0x11,
+  };
+
+  g_assert_true (
+    goodix5135_build_enable_chip_request (
+      FALSE,
+      packet,
+      sizeof (packet),
+      &logical_length));
+
+  g_assert_cmpmem (
+    packet,
+    logical_length,
+    expected,
+    sizeof (expected));
+}
+
+
+static void
+test_enable_chip_request_arguments (void)
+{
+  guint8 packet[GOODIX5135_USB_PACKET_LENGTH];
+  gsize logical_length = 0;
+
+  g_assert_false (
+    goodix5135_build_enable_chip_request (
+      TRUE,
+      NULL,
+      sizeof (packet),
+      &logical_length));
+
+  g_assert_false (
+    goodix5135_build_enable_chip_request (
+      TRUE,
+      packet,
+      GOODIX5135_USB_PACKET_LENGTH - 1,
+      &logical_length));
+
+  g_assert_false (
+    goodix5135_build_enable_chip_request (
+      TRUE,
+      packet,
+      sizeof (packet),
+      NULL));
+}
+
+
+static void
+test_enable_chip_ack_success (void)
+{
+  static const guint8 ack[GOODIX5135_USB_PACKET_LENGTH] = {
+    0xa0, 0x06, 0x00, 0xa6,
+    0xb0, 0x03, 0x00,
+    0x96, 0x01,
+    0x60,
+  };
+
+  g_assert_true (
+    goodix5135_parse_enable_chip_ack (
+      ack,
+      sizeof (ack)));
+}
+
+
+static void
+test_enable_chip_ack_negative (void)
+{
+  static const guint8 ack[GOODIX5135_USB_PACKET_LENGTH] = {
+    0xa0, 0x06, 0x00, 0xa6,
+    0xb0, 0x03, 0x00,
+    0x96, 0x00,
+    0x61,
+  };
+
+  g_assert_false (
+    goodix5135_parse_enable_chip_ack (
+      ack,
+      sizeof (ack)));
+}
+
+
+static void
+test_enable_chip_transaction_happy_path (void)
+{
+  Goodix5135EnableChipTransaction transaction;
+
+  guint8 packet[GOODIX5135_USB_PACKET_LENGTH];
+  gsize logical_length = 0;
+
+  static const guint8 ack[GOODIX5135_USB_PACKET_LENGTH] = {
+    0xa0, 0x06, 0x00, 0xa6,
+    0xb0, 0x03, 0x00,
+    0x96, 0x01,
+    0x60,
+  };
+
+  goodix5135_enable_chip_transaction_init (
+    &transaction);
+
+  g_assert_true (
+    goodix5135_enable_chip_transaction_begin (
+      &transaction,
+      TRUE,
+      packet,
+      sizeof (packet),
+      &logical_length));
+
+  g_assert_cmpint (
+    transaction.state,
+    ==,
+    GOODIX5135_ENABLE_CHIP_TRANSACTION_WAIT_OUT);
+
+  g_assert_true (
+    goodix5135_enable_chip_transaction_out_complete (
+      &transaction,
+      TRUE));
+
+  g_assert_cmpint (
+    transaction.state,
+    ==,
+    GOODIX5135_ENABLE_CHIP_TRANSACTION_WAIT_ACK);
+
+  g_assert_true (
+    goodix5135_enable_chip_transaction_ack_complete (
+      &transaction,
+      TRUE,
+      ack,
+      sizeof (ack)));
+
+  g_assert_cmpint (
+    transaction.state,
+    ==,
+    GOODIX5135_ENABLE_CHIP_TRANSACTION_DONE);
+}
+
+
+static void
+test_enable_chip_transaction_out_failure (void)
+{
+  Goodix5135EnableChipTransaction transaction;
+
+  guint8 packet[GOODIX5135_USB_PACKET_LENGTH];
+  gsize logical_length = 0;
+
+  goodix5135_enable_chip_transaction_init (
+    &transaction);
+
+  g_assert_true (
+    goodix5135_enable_chip_transaction_begin (
+      &transaction,
+      TRUE,
+      packet,
+      sizeof (packet),
+      &logical_length));
+
+  g_assert_false (
+    goodix5135_enable_chip_transaction_out_complete (
+      &transaction,
+      FALSE));
+
+  g_assert_cmpint (
+    transaction.state,
+    ==,
+    GOODIX5135_ENABLE_CHIP_TRANSACTION_FAILED);
+}
+
+
+static void
+test_enable_chip_transaction_ack_transport_failure (void)
+{
+  Goodix5135EnableChipTransaction transaction;
+
+  guint8 packet[GOODIX5135_USB_PACKET_LENGTH];
+  gsize logical_length = 0;
+
+  goodix5135_enable_chip_transaction_init (
+    &transaction);
+
+  g_assert_true (
+    goodix5135_enable_chip_transaction_begin (
+      &transaction,
+      TRUE,
+      packet,
+      sizeof (packet),
+      &logical_length));
+
+  g_assert_true (
+    goodix5135_enable_chip_transaction_out_complete (
+      &transaction,
+      TRUE));
+
+  g_assert_false (
+    goodix5135_enable_chip_transaction_ack_complete (
+      &transaction,
+      FALSE,
+      NULL,
+      0));
+
+  g_assert_cmpint (
+    transaction.state,
+    ==,
+    GOODIX5135_ENABLE_CHIP_TRANSACTION_FAILED);
+}
+
+
+static void
+test_enable_chip_transaction_bad_ack (void)
+{
+  Goodix5135EnableChipTransaction transaction;
+
+  guint8 packet[GOODIX5135_USB_PACKET_LENGTH];
+  gsize logical_length = 0;
+
+  static const guint8 bad_ack[GOODIX5135_USB_PACKET_LENGTH] = {
+    0xa0, 0x06, 0x00, 0xa6,
+    0xb0, 0x03, 0x00,
+    0x96, 0x00,
+    0x61,
+  };
+
+  goodix5135_enable_chip_transaction_init (
+    &transaction);
+
+  g_assert_true (
+    goodix5135_enable_chip_transaction_begin (
+      &transaction,
+      TRUE,
+      packet,
+      sizeof (packet),
+      &logical_length));
+
+  g_assert_true (
+    goodix5135_enable_chip_transaction_out_complete (
+      &transaction,
+      TRUE));
+
+  g_assert_false (
+    goodix5135_enable_chip_transaction_ack_complete (
+      &transaction,
+      TRUE,
+      bad_ack,
+      sizeof (bad_ack)));
+
+  g_assert_cmpint (
+    transaction.state,
+    ==,
+    GOODIX5135_ENABLE_CHIP_TRANSACTION_FAILED);
+}
+
+
+static void
+test_enable_chip_transaction_invalid_order (void)
+{
+  Goodix5135EnableChipTransaction transaction;
+
+  goodix5135_enable_chip_transaction_init (
+    &transaction);
+
+  g_assert_false (
+    goodix5135_enable_chip_transaction_out_complete (
+      &transaction,
+      TRUE));
+
+  g_assert_cmpint (
+    transaction.state,
+    ==,
+    GOODIX5135_ENABLE_CHIP_TRANSACTION_FAILED);
+}
+
+
 int
 main (int argc, char **argv)
 {
@@ -2908,6 +3230,147 @@ main (int argc, char **argv)
 
 
                    test_d4_transaction_invalid_order);
+
+
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/enable-chip/request-true",
+
+
+
+
+
+
+                   test_enable_chip_request_true_vector);
+
+
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/enable-chip/request-false",
+
+
+
+
+
+
+                   test_enable_chip_request_false_vector);
+
+
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/enable-chip/request-arguments",
+
+
+
+
+
+
+                   test_enable_chip_request_arguments);
+
+
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/enable-chip/ack-success",
+
+
+
+
+
+
+                   test_enable_chip_ack_success);
+
+
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/enable-chip/ack-negative",
+
+
+
+
+
+
+                   test_enable_chip_ack_negative);
+
+
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/enable-chip-transaction/happy-path",
+
+
+
+
+
+
+                   test_enable_chip_transaction_happy_path);
+
+
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/enable-chip-transaction/out-failure",
+
+
+
+
+
+
+                   test_enable_chip_transaction_out_failure);
+
+
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/enable-chip-transaction/ack-transport-failure",
+
+
+
+
+
+
+                   test_enable_chip_transaction_ack_transport_failure);
+
+
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/enable-chip-transaction/bad-ack",
+
+
+
+
+
+
+                   test_enable_chip_transaction_bad_ack);
+
+
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/enable-chip-transaction/invalid-order",
+
+
+
+
+
+
+                   test_enable_chip_transaction_invalid_order);
+
 
 
 

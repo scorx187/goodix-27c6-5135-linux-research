@@ -12,6 +12,7 @@
 #define GOODIX5135_PACK_FLAGS_MESSAGE_PROTOCOL  0xa0U
 #define GOODIX5135_COMMAND_NOP                  0x00U
 #define GOODIX5135_COMMAND_READ_SENSOR_REGISTER 0x82U
+#define GOODIX5135_COMMAND_ENABLE_CHIP          0x96U
 #define GOODIX5135_COMMAND_FIRMWARE_VERSION     0xa8U
 #define GOODIX5135_COMMAND_QUERY_MCU_STATE      0xaeU
 #define GOODIX5135_COMMAND_ACK                  0xb0U
@@ -23,6 +24,7 @@
 #define GOODIX5135_FIRMWARE_REQUEST_LENGTH      10U
 #define GOODIX5135_MCU_STATE_REQUEST_LENGTH      9U
 #define GOODIX5135_D4_REQUEST_LENGTH             10U
+#define GOODIX5135_ENABLE_CHIP_REQUEST_LENGTH    10U
 
 #define GOODIX5135_IMAGE_COMMAND             0x20U
 #define GOODIX5135_PROTOCOL_TRAILER          0x88U
@@ -64,6 +66,20 @@ typedef struct
   Goodix5135RegisterReadTransactionState state;
   gsize                                  expected_length;
 } Goodix5135RegisterReadTransaction;
+
+typedef enum
+{
+  GOODIX5135_ENABLE_CHIP_TRANSACTION_IDLE = 0,
+  GOODIX5135_ENABLE_CHIP_TRANSACTION_WAIT_OUT,
+  GOODIX5135_ENABLE_CHIP_TRANSACTION_WAIT_ACK,
+  GOODIX5135_ENABLE_CHIP_TRANSACTION_DONE,
+  GOODIX5135_ENABLE_CHIP_TRANSACTION_FAILED,
+} Goodix5135EnableChipTransactionState;
+
+typedef struct
+{
+  Goodix5135EnableChipTransactionState state;
+} Goodix5135EnableChipTransaction;
 
 typedef enum
 {
@@ -258,6 +274,69 @@ gboolean goodix5135_register_read_transaction_response_complete (
   gsize                              data_length,
   const guint8                     **value,
   gsize                             *value_length);
+
+
+/*
+ * Build ENABLE_CHIP command 0x96.
+ *
+ * Public reference payload:
+ *
+ *   enable=true  -> 01 00
+ *   enable=false -> 00 00
+ *
+ * Normal Goodix protocol checksum is used.
+ *
+ * enable=true exact logical frame:
+ *
+ *   a0 06 00 a6
+ *   96 03 00
+ *   01 00
+ *   10
+ *
+ * This helper performs no USB operation.
+ */
+gboolean goodix5135_build_enable_chip_request (
+  gboolean enable,
+  guint8  *packet,
+  gsize    packet_size,
+  gsize   *logical_length);
+
+/*
+ * Parse the ACK belonging specifically to ENABLE_CHIP 0x96.
+ */
+gboolean goodix5135_parse_enable_chip_ack (
+  const guint8 *data,
+  gsize         data_length);
+
+/*
+ * Host-only ENABLE_CHIP transaction:
+ *
+ * IDLE
+ *   -> WAIT_OUT
+ *   -> WAIT_ACK
+ *   -> DONE
+ *
+ * Any transport/protocol/order failure -> FAILED.
+ */
+void goodix5135_enable_chip_transaction_init (
+  Goodix5135EnableChipTransaction *transaction);
+
+gboolean goodix5135_enable_chip_transaction_begin (
+  Goodix5135EnableChipTransaction *transaction,
+  gboolean                         enable,
+  guint8                          *packet,
+  gsize                            packet_size,
+  gsize                           *logical_length);
+
+gboolean goodix5135_enable_chip_transaction_out_complete (
+  Goodix5135EnableChipTransaction *transaction,
+  gboolean                         transport_can_advance);
+
+gboolean goodix5135_enable_chip_transaction_ack_complete (
+  Goodix5135EnableChipTransaction *transaction,
+  gboolean                         transport_can_advance,
+  const guint8                    *data,
+  gsize                            data_length);
 
 
 /*
