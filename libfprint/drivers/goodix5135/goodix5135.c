@@ -2808,7 +2808,7 @@ goodix5135_capture_down_ack_cb (
     GOODIX5135_CAPTURE_RUNTIME_WAIT_DOWN_RESPONSE;
 
   fp_dbg (
-    "Native capture prompt: PLACE_FINGER_NOW");
+    "Native FpImage prompt: PLACE_FINGER_NOW");
 
   if (!goodix5135_capture_submit_in (
         device,
@@ -7959,9 +7959,6 @@ goodix5135_change_state (
   switch (state)
     {
     case FPI_IMAGE_DEVICE_STATE_AWAIT_FINGER_ON:
-      fp_dbg (
-        "Native FpImage prompt: PLACE_FINGER_NOW");
-
       if (!goodix5135_capture_runtime_start (
             FP_DEVICE (dev)))
         {
