@@ -603,6 +603,532 @@ goodix5135_register_read_transaction_response_complete (
 }
 
 
+static guint8
+goodix5135_crc8 (
+  const guint8 *data,
+  gsize         length)
+{
+  guint8 crc = 0;
+
+  for (gsize i = 0;
+       i < length;
+       i++)
+    {
+      crc ^= data[i];
+
+      for (guint bit = 0;
+           bit < 8;
+           bit++)
+        {
+          if ((crc & 0x80U) != 0)
+            crc =
+              (guint8) (
+                (crc << 1) ^ 0x07U);
+          else
+            crc =
+              (guint8) (
+                crc << 1);
+        }
+    }
+
+  return crc;
+}
+
+
+static guint8
+goodix5135_inv_crc8_parts (
+  const guint8 *part1,
+  gsize         part1_length,
+  const guint8 *part2,
+  gsize         part2_length,
+  const guint8 *part3,
+  gsize         part3_length,
+  const guint8 *part4,
+  gsize         part4_length)
+{
+  guint8 buffer[64];
+  gsize offset = 0;
+
+  const guint8 *parts[] = {
+    part1,
+    part2,
+    part3,
+    part4,
+  };
+
+  const gsize lengths[] = {
+    part1_length,
+    part2_length,
+    part3_length,
+    part4_length,
+  };
+
+  for (guint p = 0; p < G_N_ELEMENTS (parts); p++)
+    {
+      if (parts[p] == NULL &&
+          lengths[p] != 0)
+        return 0;
+
+      if (offset + lengths[p] >
+          sizeof (buffer))
+        return 0;
+
+      if (lengths[p] != 0)
+        memcpy (
+          buffer + offset,
+          parts[p],
+          lengths[p]);
+
+      offset += lengths[p];
+    }
+
+  return (guint8) ~goodix5135_crc8 (
+    buffer,
+    offset);
+}
+
+
+static guint16
+goodix5135_u16le (
+  const guint8 *data,
+  gsize         offset)
+{
+  return
+    (guint16) data[offset] |
+    ((guint16) data[offset + 1] << 8);
+}
+
+
+static void
+goodix5135_put_u16le (
+  guint8  *data,
+  gsize    offset,
+  guint16  value)
+{
+  data[offset] =
+    (guint8) (
+      value & 0xffU);
+
+  data[offset + 1] =
+    (guint8) (
+      (value >> 8) & 0xffU);
+}
+
+
+static guint8
+goodix5135_majority_fdt_offset (
+  guint8 encoded)
+{
+  guint8 a;
+  guint8 b;
+  guint8 c;
+
+  if (encoded == 0)
+    return 0;
+
+  a = encoded & 0x03U;
+  b = (encoded >> 2) & 0x03U;
+  c = (encoded >> 4) & 0x03U;
+
+  if (a == c ||
+      a == b)
+    return a;
+
+  if (c == b)
+    return c;
+
+  return 0;
+}
+
+
+gboolean
+goodix5135_validate_otp (
+  const guint8 *otp,
+  gsize         otp_length)
+{
+  guint8 cp;
+  guint8 mt;
+  guint8 ft;
+  guint8 ft_dac;
+  guint8 mt_dac;
+
+  if (otp == NULL ||
+      otp_length != GOODIX5135_OTP_LENGTH)
+    return FALSE;
+
+  /*
+   * CP:
+   *   otp[0:11] + otp[36:40]
+   *   stored at otp[60]
+   */
+  cp =
+    goodix5135_inv_crc8_parts (
+      otp + 0, 11,
+      otp + 36, 4,
+      NULL, 0,
+      NULL, 0);
+
+  /*
+   * FT_DAC:
+   *   otp[50:54]
+   *   stored at otp[62]
+   */
+  ft_dac =
+    goodix5135_inv_crc8_parts (
+      otp + 50, 4,
+      NULL, 0,
+      NULL, 0,
+      NULL, 0);
+
+  /*
+   * MT_DAC:
+   *   otp[46:50]
+   *   stored at otp[22]
+   */
+  mt_dac =
+    goodix5135_inv_crc8_parts (
+      otp + 46, 4,
+      NULL, 0,
+      NULL, 0,
+      NULL, 0);
+
+  /*
+   * MT:
+   *   otp[20:28]
+   * + otp[29:36]
+   * + otp[40:50]
+   * + otp[54:56]
+   * stored at otp[63]
+   */
+  mt =
+    goodix5135_inv_crc8_parts (
+      otp + 20, 8,
+      otp + 29, 7,
+      otp + 40, 10,
+      otp + 54, 2);
+
+  /*
+   * FT:
+   *   otp[11:20]
+   * + otp[28:29]
+   * + otp[50:54]
+   * + otp[56:60]
+   * + otp[62]
+   *
+   * The final one-byte part is appended separately below.
+   */
+  {
+    guint8 ft_buffer[19];
+    gsize offset = 0;
+
+    memcpy (ft_buffer + offset, otp + 11, 9);
+    offset += 9;
+
+    memcpy (ft_buffer + offset, otp + 28, 1);
+    offset += 1;
+
+    memcpy (ft_buffer + offset, otp + 50, 4);
+    offset += 4;
+
+    memcpy (ft_buffer + offset, otp + 56, 4);
+    offset += 4;
+
+    ft_buffer[offset++] = otp[62];
+
+    ft =
+      (guint8) ~goodix5135_crc8 (
+        ft_buffer,
+        offset);
+  }
+
+  if (cp != otp[60] ||
+      ft != otp[61] ||
+      ft_dac != otp[62] ||
+      mt != otp[63] ||
+      mt_dac != otp[22])
+    return FALSE;
+
+  if (memcmp (
+        otp + 46,
+        otp + 50,
+        4) != 0)
+    return FALSE;
+
+  return TRUE;
+}
+
+
+gboolean
+goodix5135_parse_otp_calibration (
+  const guint8             *otp,
+  gsize                     otp_length,
+  Goodix5135OtpCalibration *calibration)
+{
+  guint8 b42;
+  guint16 tcode;
+  guint32 fdt_delta_work;
+
+  if (calibration == NULL)
+    return FALSE;
+
+  memset (
+    calibration,
+    0,
+    sizeof (*calibration));
+
+  if (!goodix5135_validate_otp (
+        otp,
+        otp_length))
+    return FALSE;
+
+  b42 = otp[42];
+
+  tcode =
+    (guint16) (
+      (((b42 >> 4) + 1U) * 16U) +
+      64U);
+
+  fdt_delta_work =
+    ((guint32) ((b42 & 0x0fU) + 2U) *
+     25600U);
+
+  fdt_delta_work /=
+    tcode;
+
+  fdt_delta_work /=
+    3U;
+
+  fdt_delta_work >>=
+    4;
+
+  calibration->tcode =
+    tcode;
+
+  calibration->fdt_delta =
+    (guint8) (
+      fdt_delta_work & 0xffU);
+
+  calibration->fdt_offset =
+    goodix5135_majority_fdt_offset (
+      otp[27]);
+
+  calibration->dac0 =
+    (guint16) (
+      ((guint16) otp[46] << 4) |
+      0x08U);
+
+  calibration->dac1 =
+    otp[47];
+
+  calibration->dac2 =
+    otp[48];
+
+  calibration->dac3 =
+    otp[49];
+
+  return TRUE;
+}
+
+
+typedef struct
+{
+  guint16 address;
+  gsize   address_offset;
+  gsize   value_offset;
+  guint16 static_value;
+} Goodix5135Cfg70RegisterField;
+
+
+static const Goodix5135Cfg70RegisterField
+goodix5135_cfg70_register_fields[] = {
+  { 0x005cU, 0x71U, 0x73U, 0x0180U },
+  { 0x0220U, 0x75U, 0x77U, 0x0808U },
+  { 0x0236U, 0x79U, 0x7bU, 0x0080U },
+  { 0x0238U, 0x7dU, 0x7fU, 0x0080U },
+  { 0x023aU, 0x81U, 0x83U, 0x0080U },
+  { 0x0082U, 0xadU, 0xafU, 0x1580U },
+};
+
+
+gboolean
+goodix5135_validate_cfg70_template (
+  const guint8 *template_data,
+  gsize         template_length)
+{
+  static const guint8 prefix[] = {
+    GOODIX5135_CFG70_PREFIX_0,
+    GOODIX5135_CFG70_PREFIX_1,
+    GOODIX5135_CFG70_PREFIX_2,
+    GOODIX5135_CFG70_PREFIX_3,
+  };
+
+  if (template_data == NULL ||
+      template_length !=
+        GOODIX5135_CONFIG_LENGTH)
+    return FALSE;
+
+  if (memcmp (
+        template_data,
+        prefix,
+        sizeof (prefix)) != 0)
+    return FALSE;
+
+  for (guint i = 0;
+       i < G_N_ELEMENTS (
+         goodix5135_cfg70_register_fields);
+       i++)
+    {
+      const Goodix5135Cfg70RegisterField *field =
+        &goodix5135_cfg70_register_fields[i];
+
+      if (goodix5135_u16le (
+            template_data,
+            field->address_offset) !=
+          field->address)
+        return FALSE;
+
+      if (goodix5135_u16le (
+            template_data,
+            field->value_offset) !=
+          field->static_value)
+        return FALSE;
+    }
+
+  return TRUE;
+}
+
+
+gboolean
+goodix5135_cfg70_checksum (
+  const guint8 *config,
+  gsize         config_length,
+  guint16      *checksum)
+{
+  guint32 total = 0xa5a5U;
+
+  if (checksum != NULL)
+    *checksum = 0;
+
+  if (config == NULL ||
+      checksum == NULL ||
+      config_length !=
+        GOODIX5135_CONFIG_LENGTH)
+    return FALSE;
+
+  for (gsize offset = 0;
+       offset < GOODIX5135_CFG70_CHECKSUM_OFFSET;
+       offset += 2)
+    {
+      total +=
+        goodix5135_u16le (
+          config,
+          offset);
+
+      total &= 0xffffU;
+    }
+
+  *checksum =
+    (guint16) (
+      (0U - total) & 0xffffU);
+
+  return TRUE;
+}
+
+
+gboolean
+goodix5135_build_runtime_config (
+  const guint8                    *template_data,
+  gsize                            template_length,
+  const Goodix5135OtpCalibration *calibration,
+  guint8                          *runtime_config,
+  gsize                            runtime_config_size)
+{
+  guint16 checksum;
+
+  if (template_data == NULL ||
+      calibration == NULL ||
+      runtime_config == NULL)
+    return FALSE;
+
+  if (template_length !=
+      GOODIX5135_CONFIG_LENGTH ||
+      runtime_config_size <
+        GOODIX5135_CONFIG_LENGTH)
+    return FALSE;
+
+  if (!goodix5135_validate_cfg70_template (
+        template_data,
+        template_length))
+    return FALSE;
+
+  memcpy (
+    runtime_config,
+    template_data,
+    GOODIX5135_CONFIG_LENGTH);
+
+  goodix5135_put_u16le (
+    runtime_config,
+    0x73U,
+    calibration->tcode);
+
+  goodix5135_put_u16le (
+    runtime_config,
+    0x77U,
+    calibration->dac0);
+
+  goodix5135_put_u16le (
+    runtime_config,
+    0x7bU,
+    calibration->dac1);
+
+  goodix5135_put_u16le (
+    runtime_config,
+    0x7fU,
+    calibration->dac2);
+
+  goodix5135_put_u16le (
+    runtime_config,
+    0x83U,
+    calibration->dac3);
+
+  goodix5135_put_u16le (
+    runtime_config,
+    0xafU,
+    (guint16) (
+      ((guint16) calibration->fdt_delta << 8) |
+      0x80U));
+
+  if (!goodix5135_cfg70_checksum (
+        runtime_config,
+        GOODIX5135_CONFIG_LENGTH,
+        &checksum))
+    return FALSE;
+
+  goodix5135_put_u16le (
+    runtime_config,
+    GOODIX5135_CFG70_CHECKSUM_OFFSET,
+    checksum);
+
+  {
+    guint16 verify;
+
+    if (!goodix5135_cfg70_checksum (
+          runtime_config,
+          GOODIX5135_CONFIG_LENGTH,
+          &verify))
+      return FALSE;
+
+    if (goodix5135_u16le (
+          runtime_config,
+          GOODIX5135_CFG70_CHECKSUM_OFFSET) !=
+        verify)
+      return FALSE;
+  }
+
+  return TRUE;
+}
+
+
 gboolean
 goodix5135_build_config_upload_transfer (
   const guint8 *config,

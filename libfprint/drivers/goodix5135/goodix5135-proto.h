@@ -54,6 +54,21 @@
 #define GOODIX5135_CONFIG_USB_PACKET_COUNT       4U
 
 /*
+ * ChicagoHU OTP/calibration layout.
+ *
+ * These are format constants only.
+ * No unit-specific OTP bytes live in the source tree.
+ */
+#define GOODIX5135_OTP_LENGTH                    64U
+
+#define GOODIX5135_CFG70_PREFIX_0                0x70U
+#define GOODIX5135_CFG70_PREFIX_1                0x11U
+#define GOODIX5135_CFG70_PREFIX_2                0x74U
+#define GOODIX5135_CFG70_PREFIX_3                0x85U
+
+#define GOODIX5135_CFG70_CHECKSUM_OFFSET         222U
+
+/*
  * Exact historical ChicagoHU reset gate:
  *
  * reset(True, False, 20)
@@ -135,6 +150,19 @@ typedef struct
 {
   Goodix5135ActivationSequenceState state;
 } Goodix5135ActivationSequence;
+
+typedef struct
+{
+  guint16 tcode;
+  guint8  fdt_delta;
+  guint8  fdt_offset;
+
+  guint16 dac0;
+  guint8  dac1;
+  guint8  dac2;
+  guint8  dac3;
+} Goodix5135OtpCalibration;
+
 
 typedef enum
 {
@@ -375,6 +403,68 @@ gboolean goodix5135_register_read_transaction_response_complete (
   gsize                              data_length,
   const guint8                     **value,
   gsize                             *value_length);
+
+
+/*
+ * Validate the 64-byte ChicagoHU OTP structure.
+ *
+ * Validation includes:
+ *
+ *   CP CRC
+ *   MT CRC
+ *   FT CRC
+ *   FT_DAC CRC
+ *   MT_DAC CRC
+ *   DAC mirror equality
+ *
+ * The function does not log, copy, persist, or expose OTP.
+ */
+gboolean goodix5135_validate_otp (
+  const guint8 *otp,
+  gsize         otp_length);
+
+/*
+ * Parse only the calibration values required to construct
+ * CFG70.
+ *
+ * The complete OTP is not retained.
+ */
+gboolean goodix5135_parse_otp_calibration (
+  const guint8              *otp,
+  gsize                      otp_length,
+  Goodix5135OtpCalibration  *calibration);
+
+/*
+ * Validate the public/static CFG70 template family/layout.
+ *
+ * No device-specific calibration values are required.
+ */
+gboolean goodix5135_validate_cfg70_template (
+  const guint8 *template_data,
+  gsize         template_length);
+
+/*
+ * Compute the CFG70 16-bit checksum over bytes 0..221.
+ */
+gboolean goodix5135_cfg70_checksum (
+  const guint8 *config,
+  gsize         config_length,
+  guint16      *checksum);
+
+/*
+ * Derive a complete 224-byte runtime CFG70 from:
+ *
+ *   static template
+ *   + parsed OTP calibration
+ *
+ * The result is written only to caller-owned memory.
+ */
+gboolean goodix5135_build_runtime_config (
+  const guint8                    *template_data,
+  gsize                            template_length,
+  const Goodix5135OtpCalibration *calibration,
+  guint8                          *runtime_config,
+  gsize                            runtime_config_size);
 
 
 /*

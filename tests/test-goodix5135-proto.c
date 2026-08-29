@@ -4194,6 +4194,580 @@ test_config_upload_transaction_invalid_order (void)
 }
 
 
+
+static guint8
+test_cfg70_crc8 (
+  const guint8 *data,
+  gsize         length)
+{
+  guint8 crc = 0;
+
+  for (gsize i = 0; i < length; i++)
+    {
+      crc ^= data[i];
+
+      for (guint bit = 0; bit < 8; bit++)
+        crc =
+          (guint8) (
+            (crc & 0x80U)
+              ? ((crc << 1) ^ 0x07U)
+              : (crc << 1));
+    }
+
+  return crc;
+}
+
+
+static guint8
+test_cfg70_inv_crc8 (
+  const guint8 *data,
+  gsize         length)
+{
+  return (guint8) ~test_cfg70_crc8 (
+    data,
+    length);
+}
+
+
+static void
+test_cfg70_make_valid_otp (
+  guint8 otp[GOODIX5135_OTP_LENGTH])
+{
+  guint8 buffer[32];
+  gsize n;
+
+  memset (
+    otp,
+    0,
+    GOODIX5135_OTP_LENGTH);
+
+  /*
+   * Synthetic calibration only.
+   */
+  otp[42] = 0x23;
+  otp[27] = 0x15;
+
+  otp[46] = 0x12;
+  otp[47] = 0x34;
+  otp[48] = 0x56;
+  otp[49] = 0x78;
+
+  memcpy (
+    otp + 50,
+    otp + 46,
+    4);
+
+  /*
+   * MT_DAC must be established before MT CRC,
+   * because byte 22 participates in the MT range.
+   */
+  otp[22] =
+    test_cfg70_inv_crc8 (
+      otp + 46,
+      4);
+
+  /*
+   * FT_DAC must be established before FT CRC,
+   * because byte 62 participates in FT.
+   */
+  otp[62] =
+    test_cfg70_inv_crc8 (
+      otp + 50,
+      4);
+
+  /*
+   * CP.
+   */
+  n = 0;
+  memcpy (buffer + n, otp + 0, 11);
+  n += 11;
+  memcpy (buffer + n, otp + 36, 4);
+  n += 4;
+
+  otp[60] =
+    test_cfg70_inv_crc8 (
+      buffer,
+      n);
+
+  /*
+   * FT.
+   */
+  n = 0;
+  memcpy (buffer + n, otp + 11, 9);
+  n += 9;
+  memcpy (buffer + n, otp + 28, 1);
+  n += 1;
+  memcpy (buffer + n, otp + 50, 4);
+  n += 4;
+  memcpy (buffer + n, otp + 56, 4);
+  n += 4;
+  buffer[n++] = otp[62];
+
+  otp[61] =
+    test_cfg70_inv_crc8 (
+      buffer,
+      n);
+
+  /*
+   * MT.
+   */
+  n = 0;
+  memcpy (buffer + n, otp + 20, 8);
+  n += 8;
+  memcpy (buffer + n, otp + 29, 7);
+  n += 7;
+  memcpy (buffer + n, otp + 40, 10);
+  n += 10;
+  memcpy (buffer + n, otp + 54, 2);
+  n += 2;
+
+  otp[63] =
+    test_cfg70_inv_crc8 (
+      buffer,
+      n);
+}
+
+
+static void
+test_cfg70_make_template (
+  guint8 cfg[GOODIX5135_CONFIG_LENGTH])
+{
+  memset (
+    cfg,
+    0,
+    GOODIX5135_CONFIG_LENGTH);
+
+  cfg[0] = 0x70;
+  cfg[1] = 0x11;
+  cfg[2] = 0x74;
+  cfg[3] = 0x85;
+
+#define PUT16(off, value)                   \
+  G_STMT_START                              \
+    {                                       \
+      cfg[(off)] =                          \
+        (guint8) ((value) & 0xffU);         \
+      cfg[(off) + 1] =                      \
+        (guint8) (((value) >> 8) & 0xffU); \
+    }                                       \
+  G_STMT_END
+
+  PUT16 (0x71, 0x005c);
+  PUT16 (0x73, 0x0180);
+
+  PUT16 (0x75, 0x0220);
+  PUT16 (0x77, 0x0808);
+
+  PUT16 (0x79, 0x0236);
+  PUT16 (0x7b, 0x0080);
+
+  PUT16 (0x7d, 0x0238);
+  PUT16 (0x7f, 0x0080);
+
+  PUT16 (0x81, 0x023a);
+  PUT16 (0x83, 0x0080);
+
+  PUT16 (0xad, 0x0082);
+  PUT16 (0xaf, 0x1580);
+
+#undef PUT16
+}
+
+
+static guint16
+test_cfg70_u16le (
+  const guint8 *data,
+  gsize         offset)
+{
+  return
+    (guint16) data[offset] |
+    ((guint16) data[offset + 1] << 8);
+}
+
+
+static void
+test_cfg70_otp_valid (void)
+{
+  guint8 otp[GOODIX5135_OTP_LENGTH];
+
+  test_cfg70_make_valid_otp (
+    otp);
+
+  g_assert_true (
+    goodix5135_validate_otp (
+      otp,
+      sizeof (otp)));
+}
+
+
+static void
+test_cfg70_otp_bad_length (void)
+{
+  guint8 otp[GOODIX5135_OTP_LENGTH] = { 0 };
+
+  g_assert_false (
+    goodix5135_validate_otp (
+      otp,
+      GOODIX5135_OTP_LENGTH - 1));
+}
+
+
+static void
+test_cfg70_otp_crc_failure (void)
+{
+  guint8 otp[GOODIX5135_OTP_LENGTH];
+
+  test_cfg70_make_valid_otp (
+    otp);
+
+  otp[0] ^= 0x01U;
+
+  g_assert_false (
+    goodix5135_validate_otp (
+      otp,
+      sizeof (otp)));
+}
+
+
+static void
+test_cfg70_otp_dac_mirror_failure (void)
+{
+  guint8 otp[GOODIX5135_OTP_LENGTH];
+
+  test_cfg70_make_valid_otp (
+    otp);
+
+  /*
+   * Corrupt the mirrored DAC region and deliberately repair
+   * the associated FT_DAC + FT CRCs. Validation must still
+   * reject the mirror mismatch.
+   */
+  otp[50] ^= 0x01U;
+
+  otp[62] =
+    test_cfg70_inv_crc8 (
+      otp + 50,
+      4);
+
+  {
+    guint8 buffer[19];
+    gsize n = 0;
+
+    memcpy (buffer + n, otp + 11, 9);
+    n += 9;
+
+    memcpy (buffer + n, otp + 28, 1);
+    n += 1;
+
+    memcpy (buffer + n, otp + 50, 4);
+    n += 4;
+
+    memcpy (buffer + n, otp + 56, 4);
+    n += 4;
+
+    buffer[n++] = otp[62];
+
+    otp[61] =
+      test_cfg70_inv_crc8 (
+        buffer,
+        n);
+  }
+
+  g_assert_false (
+    goodix5135_validate_otp (
+      otp,
+      sizeof (otp)));
+}
+
+
+static void
+test_cfg70_otp_calibration (void)
+{
+  guint8 otp[GOODIX5135_OTP_LENGTH];
+
+  Goodix5135OtpCalibration cal;
+
+  test_cfg70_make_valid_otp (
+    otp);
+
+  g_assert_true (
+    goodix5135_parse_otp_calibration (
+      otp,
+      sizeof (otp),
+      &cal));
+
+  g_assert_cmpuint (
+    cal.tcode,
+    ==,
+    112);
+
+  g_assert_cmpuint (
+    cal.fdt_delta,
+    ==,
+    23);
+
+  g_assert_cmpuint (
+    cal.fdt_offset,
+    ==,
+    1);
+
+  g_assert_cmpuint (
+    cal.dac0,
+    ==,
+    0x0128);
+
+  g_assert_cmpuint (
+    cal.dac1,
+    ==,
+    0x34);
+
+  g_assert_cmpuint (
+    cal.dac2,
+    ==,
+    0x56);
+
+  g_assert_cmpuint (
+    cal.dac3,
+    ==,
+    0x78);
+}
+
+
+static void
+test_cfg70_template_valid (void)
+{
+  guint8 cfg[GOODIX5135_CONFIG_LENGTH];
+
+  test_cfg70_make_template (
+    cfg);
+
+  g_assert_true (
+    goodix5135_validate_cfg70_template (
+      cfg,
+      sizeof (cfg)));
+}
+
+
+static void
+test_cfg70_template_bad_prefix (void)
+{
+  guint8 cfg[GOODIX5135_CONFIG_LENGTH];
+
+  test_cfg70_make_template (
+    cfg);
+
+  cfg[0] ^= 0x01U;
+
+  g_assert_false (
+    goodix5135_validate_cfg70_template (
+      cfg,
+      sizeof (cfg)));
+}
+
+
+static void
+test_cfg70_template_bad_register_layout (void)
+{
+  guint8 cfg[GOODIX5135_CONFIG_LENGTH];
+
+  test_cfg70_make_template (
+    cfg);
+
+  cfg[0x75] ^= 0x01U;
+
+  g_assert_false (
+    goodix5135_validate_cfg70_template (
+      cfg,
+      sizeof (cfg)));
+}
+
+
+static void
+test_cfg70_checksum (void)
+{
+  guint8 cfg[GOODIX5135_CONFIG_LENGTH];
+
+  guint16 checksum = 0;
+
+  test_cfg70_make_template (
+    cfg);
+
+  g_assert_true (
+    goodix5135_cfg70_checksum (
+      cfg,
+      sizeof (cfg),
+      &checksum));
+
+  /*
+   * Do not assert a private/unit value here.
+   * Merely prove deterministic calculation.
+   */
+  guint16 second = 0;
+
+  g_assert_true (
+    goodix5135_cfg70_checksum (
+      cfg,
+      sizeof (cfg),
+      &second));
+
+  g_assert_cmpuint (
+    checksum,
+    ==,
+    second);
+}
+
+
+static void
+test_cfg70_runtime_config (void)
+{
+  guint8 otp[GOODIX5135_OTP_LENGTH];
+  guint8 template_data[GOODIX5135_CONFIG_LENGTH];
+  guint8 runtime[GOODIX5135_CONFIG_LENGTH];
+
+  Goodix5135OtpCalibration cal;
+  guint16 checksum;
+
+  test_cfg70_make_valid_otp (
+    otp);
+
+  test_cfg70_make_template (
+    template_data);
+
+  g_assert_true (
+    goodix5135_parse_otp_calibration (
+      otp,
+      sizeof (otp),
+      &cal));
+
+  g_assert_true (
+    goodix5135_build_runtime_config (
+      template_data,
+      sizeof (template_data),
+      &cal,
+      runtime,
+      sizeof (runtime)));
+
+  g_assert_cmpuint (
+    test_cfg70_u16le (
+      runtime,
+      0x73),
+    ==,
+    cal.tcode);
+
+  g_assert_cmpuint (
+    test_cfg70_u16le (
+      runtime,
+      0x77),
+    ==,
+    cal.dac0);
+
+  g_assert_cmpuint (
+    test_cfg70_u16le (
+      runtime,
+      0x7b),
+    ==,
+    cal.dac1);
+
+  g_assert_cmpuint (
+    test_cfg70_u16le (
+      runtime,
+      0x7f),
+    ==,
+    cal.dac2);
+
+  g_assert_cmpuint (
+    test_cfg70_u16le (
+      runtime,
+      0x83),
+    ==,
+    cal.dac3);
+
+  g_assert_cmpuint (
+    test_cfg70_u16le (
+      runtime,
+      0xaf),
+    ==,
+    ((guint16) cal.fdt_delta << 8) |
+      0x80U);
+
+  g_assert_true (
+    goodix5135_cfg70_checksum (
+      runtime,
+      sizeof (runtime),
+      &checksum));
+
+  g_assert_cmpuint (
+    test_cfg70_u16le (
+      runtime,
+      GOODIX5135_CFG70_CHECKSUM_OFFSET),
+    ==,
+    checksum);
+}
+
+
+static void
+test_cfg70_runtime_invalid_template (void)
+{
+  guint8 template_data[GOODIX5135_CONFIG_LENGTH] = { 0 };
+  guint8 runtime[GOODIX5135_CONFIG_LENGTH];
+
+  Goodix5135OtpCalibration cal = { 0 };
+
+  g_assert_false (
+    goodix5135_build_runtime_config (
+      template_data,
+      sizeof (template_data),
+      &cal,
+      runtime,
+      sizeof (runtime)));
+}
+
+
+static void
+test_cfg70_runtime_arguments (void)
+{
+  guint8 template_data[GOODIX5135_CONFIG_LENGTH];
+  guint8 runtime[GOODIX5135_CONFIG_LENGTH];
+
+  Goodix5135OtpCalibration cal = { 0 };
+
+  test_cfg70_make_template (
+    template_data);
+
+  g_assert_false (
+    goodix5135_build_runtime_config (
+      NULL,
+      sizeof (template_data),
+      &cal,
+      runtime,
+      sizeof (runtime)));
+
+  g_assert_false (
+    goodix5135_build_runtime_config (
+      template_data,
+      sizeof (template_data),
+      NULL,
+      runtime,
+      sizeof (runtime)));
+
+  g_assert_false (
+    goodix5135_build_runtime_config (
+      template_data,
+      sizeof (template_data),
+      &cal,
+      NULL,
+      sizeof (runtime)));
+
+  g_assert_false (
+    goodix5135_build_runtime_config (
+      template_data,
+      sizeof (template_data),
+      &cal,
+      runtime,
+      sizeof (runtime) - 1));
+}
+
+
 int
 main (int argc, char **argv)
 {
@@ -5391,6 +5965,271 @@ main (int argc, char **argv)
 
 
                    test_config_upload_transaction_invalid_order);
+
+
+
+
+
+
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/cfg70/otp-valid",
+
+
+
+
+
+
+
+
+
+
+                   test_cfg70_otp_valid);
+
+
+
+
+
+
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/cfg70/otp-bad-length",
+
+
+
+
+
+
+
+
+
+
+                   test_cfg70_otp_bad_length);
+
+
+
+
+
+
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/cfg70/otp-crc-failure",
+
+
+
+
+
+
+
+
+
+
+                   test_cfg70_otp_crc_failure);
+
+
+
+
+
+
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/cfg70/otp-dac-mirror-failure",
+
+
+
+
+
+
+
+
+
+
+                   test_cfg70_otp_dac_mirror_failure);
+
+
+
+
+
+
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/cfg70/otp-calibration",
+
+
+
+
+
+
+
+
+
+
+                   test_cfg70_otp_calibration);
+
+
+
+
+
+
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/cfg70/template-valid",
+
+
+
+
+
+
+
+
+
+
+                   test_cfg70_template_valid);
+
+
+
+
+
+
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/cfg70/template-bad-prefix",
+
+
+
+
+
+
+
+
+
+
+                   test_cfg70_template_bad_prefix);
+
+
+
+
+
+
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/cfg70/template-bad-register-layout",
+
+
+
+
+
+
+
+
+
+
+                   test_cfg70_template_bad_register_layout);
+
+
+
+
+
+
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/cfg70/checksum",
+
+
+
+
+
+
+
+
+
+
+                   test_cfg70_checksum);
+
+
+
+
+
+
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/cfg70/runtime-config",
+
+
+
+
+
+
+
+
+
+
+                   test_cfg70_runtime_config);
+
+
+
+
+
+
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/cfg70/runtime-invalid-template",
+
+
+
+
+
+
+
+
+
+
+                   test_cfg70_runtime_invalid_template);
+
+
+
+
+
+
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/cfg70/runtime-arguments",
+
+
+
+
+
+
+
+
+
+
+                   test_cfg70_runtime_arguments);
+
 
 
 
