@@ -46,6 +46,14 @@ struct _FpiDeviceGoodix5135
   Goodix5135EnableChipTransaction      enable_chip_transaction;
   Goodix5135SensorResetTransaction     sensor_reset_transaction;
   Goodix5135ActivationSequence         activation_sequence;
+
+  /*
+   * READ_OTP state plus derived calibration only.
+   * Raw OTP is deliberately never stored here.
+   */
+  Goodix5135OtpReadTransaction         otp_read_transaction;
+  Goodix5135OtpCalibration             otp_calibration;
+  gboolean                             otp_calibration_valid;
 };
 
 G_DECLARE_FINAL_TYPE (FpiDeviceGoodix5135,
@@ -319,6 +327,30 @@ static void goodix5135_activation_chip_id_response_cb (
   gpointer                        user_data);
 
 static void goodix5135_start_activation_chip_id_read (
+  FpDevice *device);
+
+static void goodix5135_otp_out_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data);
+
+static void goodix5135_otp_ack_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data);
+
+static void goodix5135_otp_response_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data);
+
+static void goodix5135_start_otp_read (
   FpDevice *device);
 
 static void
@@ -2627,9 +2659,6 @@ goodix5135_activation_chip_id_response_cb (
   FpiDeviceGoodix5135 *self =
     FPI_DEVICE_GOODIX5135 (device);
 
-  FpImageDevice *dev =
-    FP_IMAGE_DEVICE (device);
-
   gboolean transport_can_advance;
   gboolean protocol_ok;
 
@@ -2727,7 +2756,309 @@ goodix5135_activation_chip_id_response_cb (
     }
 
   fp_dbg (
-    "Guarded Goodix activation sequence validated");
+    "Guarded Goodix activation sequence validated; "
+    "starting read-only OTP calibration gate");
+
+  goodix5135_start_otp_read (
+    device);
+}
+
+
+static void
+goodix5135_secure_zero (
+  gpointer data,
+  gsize    length)
+{
+  volatile guint8 *p =
+    (volatile guint8 *) data;
+
+  if (p == NULL)
+    return;
+
+  while (length > 0)
+    {
+      *p++ = 0;
+      length--;
+    }
+}
+
+
+static void
+goodix5135_otp_out_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (device);
+
+  gboolean transport_can_advance;
+
+  (void) user_data;
+
+  transport_can_advance =
+    goodix5135_async_result_can_advance (
+      completion,
+      error);
+
+  if (transport_can_advance &&
+      (transfer == NULL ||
+       transfer->actual_length !=
+         GOODIX5135_USB_PACKET_LENGTH))
+    transport_can_advance = FALSE;
+
+  g_clear_error (&error);
+
+  if (!goodix5135_otp_read_transaction_out_complete (
+        &self->otp_read_transaction,
+        transport_can_advance))
+    {
+      goodix5135_open_transaction_fail (
+        device,
+        "Goodix READ_OTP OUT transport failed");
+      return;
+    }
+
+  if (!goodix5135_async_submit (
+        device,
+        &self->io,
+        GOODIX5135_REQUEST_BULK_IN,
+        GOODIX5135_USB_PACKET_LENGTH,
+        GOODIX5135_FIRMWARE_IO_TIMEOUT_MS,
+        NULL,
+        0,
+        goodix5135_otp_ack_cb,
+        NULL))
+    {
+      goodix5135_otp_read_transaction_ack_complete (
+        &self->otp_read_transaction,
+        FALSE,
+        NULL,
+        0);
+
+      goodix5135_open_transaction_fail (
+        device,
+        "Could not submit Goodix READ_OTP ACK receive");
+    }
+}
+
+
+static void
+goodix5135_otp_ack_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (device);
+
+  gboolean transport_can_advance;
+  gboolean protocol_ok;
+
+  (void) user_data;
+
+  transport_can_advance =
+    goodix5135_in_transfer_can_parse (
+      transfer,
+      completion,
+      error);
+
+  protocol_ok =
+    goodix5135_otp_read_transaction_ack_complete (
+      &self->otp_read_transaction,
+      transport_can_advance,
+      transport_can_advance
+        ? transfer->buffer
+        : NULL,
+      transport_can_advance
+        ? (gsize) transfer->actual_length
+        : 0);
+
+  g_clear_error (&error);
+
+  if (!protocol_ok ||
+      self->otp_read_transaction.state !=
+        GOODIX5135_OTP_READ_TRANSACTION_WAIT_RESPONSE)
+    {
+      goodix5135_open_transaction_fail (
+        device,
+        transport_can_advance
+          ? "Goodix READ_OTP returned invalid ACK"
+          : "Goodix READ_OTP ACK transport failed");
+      return;
+    }
+
+  if (!goodix5135_async_submit (
+        device,
+        &self->io,
+        GOODIX5135_REQUEST_BULK_IN,
+        GOODIX5135_OTP_READ_RESPONSE_LENGTH,
+        GOODIX5135_FIRMWARE_IO_TIMEOUT_MS,
+        NULL,
+        0,
+        goodix5135_otp_response_cb,
+        NULL))
+    {
+      guint8 otp[GOODIX5135_OTP_LENGTH] = { 0 };
+
+      goodix5135_otp_read_transaction_response_complete (
+        &self->otp_read_transaction,
+        FALSE,
+        NULL,
+        0,
+        otp,
+        sizeof (otp));
+
+      goodix5135_secure_zero (
+        otp,
+        sizeof (otp));
+
+      goodix5135_open_transaction_fail (
+        device,
+        "Could not submit Goodix READ_OTP response receive");
+    }
+}
+
+
+static void
+goodix5135_otp_response_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (device);
+
+  FpImageDevice *dev =
+    FP_IMAGE_DEVICE (device);
+
+  gboolean transport_can_advance;
+  gboolean protocol_ok;
+  gboolean calibration_ok = FALSE;
+
+  guint8 otp[GOODIX5135_OTP_LENGTH] = { 0 };
+  Goodix5135OtpCalibration calibration = { 0 };
+
+  (void) user_data;
+
+  transport_can_advance =
+    goodix5135_in_transfer_can_parse (
+      transfer,
+      completion,
+      error);
+
+  if (transport_can_advance &&
+      (transfer == NULL ||
+       transfer->actual_length !=
+         GOODIX5135_OTP_READ_RESPONSE_LENGTH))
+    transport_can_advance = FALSE;
+
+  protocol_ok =
+    goodix5135_otp_read_transaction_response_complete (
+      &self->otp_read_transaction,
+      transport_can_advance,
+      transport_can_advance
+        ? transfer->buffer
+        : NULL,
+      transport_can_advance
+        ? (gsize) transfer->actual_length
+        : 0,
+      otp,
+      sizeof (otp));
+
+  g_clear_error (&error);
+
+  if (protocol_ok &&
+      self->otp_read_transaction.state ==
+        GOODIX5135_OTP_READ_TRANSACTION_DONE)
+    {
+      calibration_ok =
+        goodix5135_parse_otp_calibration (
+          otp,
+          sizeof (otp),
+          &calibration);
+    }
+
+  /*
+   * Raw OTP must not survive this callback.
+   */
+  goodix5135_secure_zero (
+    otp,
+    sizeof (otp));
+
+  if (transfer != NULL &&
+      transfer->buffer != NULL &&
+      transfer->actual_length > 0)
+    {
+      goodix5135_secure_zero (
+        transfer->buffer,
+        (gsize) transfer->actual_length);
+    }
+
+  if (!protocol_ok ||
+      self->otp_read_transaction.state !=
+        GOODIX5135_OTP_READ_TRANSACTION_DONE)
+    {
+      goodix5135_secure_zero (
+        &calibration,
+        sizeof (calibration));
+
+      self->otp_calibration_valid =
+        FALSE;
+
+      goodix5135_secure_zero (
+        &self->otp_calibration,
+        sizeof (self->otp_calibration));
+
+      goodix5135_open_transaction_fail (
+        device,
+        transport_can_advance
+          ? "Goodix READ_OTP response failed protocol validation"
+          : "Goodix READ_OTP response transport/length failed");
+      return;
+    }
+
+  if (!calibration_ok)
+    {
+      goodix5135_secure_zero (
+        &calibration,
+        sizeof (calibration));
+
+      self->otp_calibration_valid =
+        FALSE;
+
+      goodix5135_secure_zero (
+        &self->otp_calibration,
+        sizeof (self->otp_calibration));
+
+      goodix5135_open_transaction_fail (
+        device,
+        "Goodix OTP calibration validation failed");
+      return;
+    }
+
+  /*
+   * Retain derived calibration only.
+   */
+  self->otp_calibration =
+    calibration;
+
+  self->otp_calibration_valid =
+    TRUE;
+
+  goodix5135_secure_zero (
+    &calibration,
+    sizeof (calibration));
+
+  fp_dbg (
+    "Read-only OTP calibration gate validated; "
+    "raw OTP discarded");
 
   goodix5135_io_stop (
     &self->io);
@@ -2739,6 +3070,85 @@ goodix5135_activation_chip_id_response_cb (
   fpi_image_device_open_complete (
     dev,
     NULL);
+}
+
+
+static void
+goodix5135_start_otp_read (
+  FpDevice *device)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (device);
+
+  guint8 packet[GOODIX5135_USB_PACKET_LENGTH];
+  gsize logical_length = 0;
+
+  if (self->activation_sequence.state !=
+      GOODIX5135_ACTIVATION_DONE)
+    {
+      goodix5135_open_transaction_fail (
+        device,
+        "Attempted READ_OTP before activation identity DONE");
+      return;
+    }
+
+  self->otp_calibration_valid =
+    FALSE;
+
+  goodix5135_secure_zero (
+    &self->otp_calibration,
+    sizeof (self->otp_calibration));
+
+  goodix5135_otp_read_transaction_init (
+    &self->otp_read_transaction);
+
+  if (!goodix5135_otp_read_transaction_begin (
+        &self->otp_read_transaction,
+        packet,
+        sizeof (packet),
+        &logical_length))
+    {
+      goodix5135_open_transaction_fail (
+        device,
+        "Could not build Goodix READ_OTP request");
+      return;
+    }
+
+  if (logical_length !=
+      GOODIX5135_OTP_READ_REQUEST_LENGTH)
+    {
+      goodix5135_otp_read_transaction_out_complete (
+        &self->otp_read_transaction,
+        FALSE);
+
+      goodix5135_open_transaction_fail (
+        device,
+        "Unexpected Goodix READ_OTP request length");
+      return;
+    }
+
+  fp_dbg (
+    "Submitting read-only Goodix OTP calibration gate");
+
+  if (!goodix5135_async_submit (
+        device,
+        &self->io,
+        GOODIX5135_REQUEST_BULK_OUT,
+        GOODIX5135_USB_PACKET_LENGTH,
+        GOODIX5135_FIRMWARE_IO_TIMEOUT_MS,
+        packet,
+        sizeof (packet),
+        goodix5135_otp_out_cb,
+        NULL))
+    {
+      goodix5135_otp_read_transaction_out_complete (
+        &self->otp_read_transaction,
+        FALSE);
+
+      goodix5135_open_transaction_fail (
+        device,
+        "Could not submit Goodix READ_OTP request");
+    }
 }
 
 
@@ -3285,8 +3695,18 @@ goodix5135_open (FpImageDevice *dev)
 static void
 goodix5135_close (FpImageDevice *dev)
 {
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (dev);
+
   GError *error = NULL;
   GUsbDevice *usb_dev;
+
+  self->otp_calibration_valid =
+    FALSE;
+
+  goodix5135_secure_zero (
+    &self->otp_calibration,
+    sizeof (self->otp_calibration));
 
   usb_dev = fpi_device_get_usb_device (FP_DEVICE (dev));
 
@@ -3442,6 +3862,17 @@ fpi_device_goodix5135_init (FpiDeviceGoodix5135 *self)
 
   goodix5135_activation_sequence_init (
     &self->activation_sequence);
+
+  goodix5135_otp_read_transaction_init (
+    &self->otp_read_transaction);
+
+  memset (
+    &self->otp_calibration,
+    0,
+    sizeof (self->otp_calibration));
+
+  self->otp_calibration_valid =
+    FALSE;
 }
 
 static void
