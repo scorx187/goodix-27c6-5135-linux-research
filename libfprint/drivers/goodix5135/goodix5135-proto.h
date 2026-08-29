@@ -15,12 +15,14 @@
 #define GOODIX5135_COMMAND_FIRMWARE_VERSION     0xa8U
 #define GOODIX5135_COMMAND_QUERY_MCU_STATE      0xaeU
 #define GOODIX5135_COMMAND_ACK                  0xb0U
+#define GOODIX5135_COMMAND_TLS_SUCCESSFULLY_ESTABLISHED 0xd4U
 #define GOODIX5135_ACK_MIN_PAYLOAD_LENGTH       2U
 #define GOODIX5135_USB_PACKET_LENGTH            64U
 #define GOODIX5135_NOP_REQUEST_LENGTH           12U
 #define GOODIX5135_REGISTER_READ_REQUEST_LENGTH 12U
 #define GOODIX5135_FIRMWARE_REQUEST_LENGTH      10U
 #define GOODIX5135_MCU_STATE_REQUEST_LENGTH      9U
+#define GOODIX5135_D4_REQUEST_LENGTH             10U
 
 #define GOODIX5135_IMAGE_COMMAND             0x20U
 #define GOODIX5135_PROTOCOL_TRAILER          0x88U
@@ -62,6 +64,20 @@ typedef struct
   Goodix5135RegisterReadTransactionState state;
   gsize                                  expected_length;
 } Goodix5135RegisterReadTransaction;
+
+typedef enum
+{
+  GOODIX5135_D4_TRANSACTION_IDLE = 0,
+  GOODIX5135_D4_TRANSACTION_WAIT_OUT,
+  GOODIX5135_D4_TRANSACTION_WAIT_ACK,
+  GOODIX5135_D4_TRANSACTION_DONE,
+  GOODIX5135_D4_TRANSACTION_FAILED,
+} Goodix5135TlsEstablishedTransactionState;
+
+typedef struct
+{
+  Goodix5135TlsEstablishedTransactionState state;
+} Goodix5135TlsEstablishedTransaction;
 
 typedef enum
 {
@@ -242,6 +258,66 @@ gboolean goodix5135_register_read_transaction_response_complete (
   gsize                              data_length,
   const guint8                     **value,
   gsize                             *value_length);
+
+
+/*
+ * Build command 0xd4:
+ * TLS_SUCCESSFULLY_ESTABLISHED.
+ *
+ * Public Goodix reference payload:
+ *   00 00
+ *
+ * This uses the normal Goodix protocol checksum.
+ *
+ * Logical frame:
+ *   a0 06 00 a6
+ *   d4 03 00
+ *   00 00
+ *   d3
+ *
+ * This helper performs no USB operation.
+ */
+gboolean goodix5135_build_d4_request (
+  guint8 *packet,
+  gsize   packet_size,
+  gsize  *logical_length);
+
+/*
+ * Parse the USB ACK belonging specifically to command 0xd4.
+ */
+gboolean goodix5135_parse_d4_ack (
+  const guint8 *data,
+  gsize         data_length);
+
+/*
+ * Host-only transaction controller:
+ *
+ * IDLE
+ *   -> WAIT_OUT
+ *   -> WAIT_ACK
+ *   -> DONE
+ *
+ * No timeout-as-success rule exists here.
+ * Any transport/protocol/order failure -> FAILED.
+ */
+void goodix5135_d4_transaction_init (
+  Goodix5135TlsEstablishedTransaction *transaction);
+
+gboolean goodix5135_d4_transaction_begin (
+  Goodix5135TlsEstablishedTransaction *transaction,
+  guint8                              *packet,
+  gsize                                packet_size,
+  gsize                               *logical_length);
+
+gboolean goodix5135_d4_transaction_out_complete (
+  Goodix5135TlsEstablishedTransaction *transaction,
+  gboolean                             transport_can_advance);
+
+gboolean goodix5135_d4_transaction_ack_complete (
+  Goodix5135TlsEstablishedTransaction *transaction,
+  gboolean                             transport_can_advance,
+  const guint8                        *data,
+  gsize                                data_length);
 
 
 /*

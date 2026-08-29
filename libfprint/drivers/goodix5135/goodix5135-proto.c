@@ -604,6 +604,217 @@ goodix5135_register_read_transaction_response_complete (
 
 
 gboolean
+goodix5135_build_d4_request (
+  guint8 *packet,
+  gsize   packet_size,
+  gsize  *logical_length)
+{
+  guint outer_sum;
+
+  if (packet == NULL ||
+      logical_length == NULL)
+    return FALSE;
+
+  if (packet_size <
+      GOODIX5135_USB_PACKET_LENGTH)
+    return FALSE;
+
+  memset (
+    packet,
+    0,
+    GOODIX5135_USB_PACKET_LENGTH);
+
+  /*
+   * Public reference:
+   *
+   * encode_message_protocol(
+   *   b"\x00\x00",
+   *   COMMAND_TLS_SUCCESSFULLY_ESTABLISHED)
+   *
+   * Inner:
+   *   d4 03 00 00 00 d3
+   *
+   * Outer:
+   *   a0 06 00 a6
+   */
+  packet[0] =
+    GOODIX5135_PACK_FLAGS_MESSAGE_PROTOCOL;
+
+  packet[1] = 0x06;
+  packet[2] = 0x00;
+
+  outer_sum =
+    (guint) packet[0] +
+    (guint) packet[1] +
+    (guint) packet[2];
+
+  packet[3] =
+    (guint8) (outer_sum & 0xffU);
+
+  packet[4] =
+    GOODIX5135_COMMAND_TLS_SUCCESSFULLY_ESTABLISHED;
+
+  packet[5] = 0x03;
+  packet[6] = 0x00;
+
+  packet[7] = 0x00;
+  packet[8] = 0x00;
+
+  packet[9] =
+    goodix5135_checksum_aa (
+      packet + 4,
+      5);
+
+  *logical_length =
+    GOODIX5135_D4_REQUEST_LENGTH;
+
+  return TRUE;
+}
+
+
+gboolean
+goodix5135_parse_d4_ack (
+  const guint8 *data,
+  gsize         data_length)
+{
+  const guint8 *payload;
+  gsize payload_length;
+  guint8 status;
+
+  if (!goodix5135_parse_wrapped_protocol (
+        data,
+        data_length,
+        GOODIX5135_COMMAND_ACK,
+        &payload,
+        &payload_length))
+    return FALSE;
+
+  if (payload_length <
+      GOODIX5135_ACK_MIN_PAYLOAD_LENGTH)
+    return FALSE;
+
+  if (payload[0] !=
+      GOODIX5135_COMMAND_TLS_SUCCESSFULLY_ESTABLISHED)
+    return FALSE;
+
+  status = payload[1];
+
+  if ((status & 0x01U) == 0)
+    return FALSE;
+
+  return TRUE;
+}
+
+
+static gboolean
+goodix5135_d4_transaction_fail (
+  Goodix5135TlsEstablishedTransaction *transaction)
+{
+  if (transaction != NULL)
+    transaction->state =
+      GOODIX5135_D4_TRANSACTION_FAILED;
+
+  return FALSE;
+}
+
+
+void
+goodix5135_d4_transaction_init (
+  Goodix5135TlsEstablishedTransaction *transaction)
+{
+  g_return_if_fail (transaction != NULL);
+
+  transaction->state =
+    GOODIX5135_D4_TRANSACTION_IDLE;
+}
+
+
+gboolean
+goodix5135_d4_transaction_begin (
+  Goodix5135TlsEstablishedTransaction *transaction,
+  guint8                              *packet,
+  gsize                                packet_size,
+  gsize                               *logical_length)
+{
+  if (transaction == NULL)
+    return FALSE;
+
+  if (transaction->state !=
+      GOODIX5135_D4_TRANSACTION_IDLE)
+    return goodix5135_d4_transaction_fail (
+      transaction);
+
+  if (!goodix5135_build_d4_request (
+        packet,
+        packet_size,
+        logical_length))
+    return goodix5135_d4_transaction_fail (
+      transaction);
+
+  transaction->state =
+    GOODIX5135_D4_TRANSACTION_WAIT_OUT;
+
+  return TRUE;
+}
+
+
+gboolean
+goodix5135_d4_transaction_out_complete (
+  Goodix5135TlsEstablishedTransaction *transaction,
+  gboolean                             transport_can_advance)
+{
+  if (transaction == NULL)
+    return FALSE;
+
+  if (transaction->state !=
+      GOODIX5135_D4_TRANSACTION_WAIT_OUT)
+    return goodix5135_d4_transaction_fail (
+      transaction);
+
+  if (!transport_can_advance)
+    return goodix5135_d4_transaction_fail (
+      transaction);
+
+  transaction->state =
+    GOODIX5135_D4_TRANSACTION_WAIT_ACK;
+
+  return TRUE;
+}
+
+
+gboolean
+goodix5135_d4_transaction_ack_complete (
+  Goodix5135TlsEstablishedTransaction *transaction,
+  gboolean                             transport_can_advance,
+  const guint8                        *data,
+  gsize                                data_length)
+{
+  if (transaction == NULL)
+    return FALSE;
+
+  if (transaction->state !=
+      GOODIX5135_D4_TRANSACTION_WAIT_ACK)
+    return goodix5135_d4_transaction_fail (
+      transaction);
+
+  if (!transport_can_advance)
+    return goodix5135_d4_transaction_fail (
+      transaction);
+
+  if (!goodix5135_parse_d4_ack (
+        data,
+        data_length))
+    return goodix5135_d4_transaction_fail (
+      transaction);
+
+  transaction->state =
+    GOODIX5135_D4_TRANSACTION_DONE;
+
+  return TRUE;
+}
+
+
+gboolean
 goodix5135_build_nop_request (
   guint8 *packet,
   gsize   packet_size,
