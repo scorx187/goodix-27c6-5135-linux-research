@@ -284,6 +284,154 @@ goodix5135_parse_firmware_version_response (
 }
 
 
+gboolean
+goodix5135_build_read_sensor_register_request (
+  guint16  address,
+  guint8   read_length,
+  guint8  *packet,
+  gsize    packet_size,
+  gsize   *logical_length)
+{
+  guint outer_sum;
+
+  if (packet == NULL || logical_length == NULL)
+    return FALSE;
+
+  if (packet_size < GOODIX5135_USB_PACKET_LENGTH)
+    return FALSE;
+
+  if (read_length == 0)
+    return FALSE;
+
+  /*
+   * Reference single-register request:
+   *
+   * outer pack:
+   *   flags            a0
+   *   payload length   08 00
+   *   header checksum  a8
+   *
+   * inner protocol:
+   *   command          82
+   *   declared length  05 00
+   *   payload:
+   *     mode           00
+   *     address        u16 little-endian
+   *     read length    u8
+   *   checksum         AA-complement
+   */
+  memset (packet, 0, GOODIX5135_USB_PACKET_LENGTH);
+
+  packet[0] = GOODIX5135_PACK_FLAGS_MESSAGE_PROTOCOL;
+  packet[1] = 0x08;
+  packet[2] = 0x00;
+
+  outer_sum =
+    (guint) packet[0] +
+    (guint) packet[1] +
+    (guint) packet[2];
+
+  packet[3] = (guint8) (outer_sum & 0xffU);
+
+  packet[4] = GOODIX5135_COMMAND_READ_SENSOR_REGISTER;
+  packet[5] = 0x05;
+  packet[6] = 0x00;
+
+  packet[7] = 0x00;
+  packet[8] = (guint8) (address & 0xffU);
+  packet[9] = (guint8) ((address >> 8) & 0xffU);
+  packet[10] = read_length;
+
+  packet[11] =
+    goodix5135_checksum_aa (packet + 4, 7);
+
+  *logical_length =
+    GOODIX5135_REGISTER_READ_REQUEST_LENGTH;
+
+  return TRUE;
+}
+
+
+gboolean
+goodix5135_parse_read_sensor_register_ack (
+  const guint8 *data,
+  gsize         data_length)
+{
+  const guint8 *payload;
+  gsize payload_length;
+  guint8 status;
+
+  if (!goodix5135_parse_wrapped_protocol (
+        data,
+        data_length,
+        GOODIX5135_COMMAND_ACK,
+        &payload,
+        &payload_length))
+    return FALSE;
+
+  if (payload_length < GOODIX5135_ACK_MIN_PAYLOAD_LENGTH)
+    return FALSE;
+
+  if (payload[0] !=
+      GOODIX5135_COMMAND_READ_SENSOR_REGISTER)
+    return FALSE;
+
+  status = payload[1];
+
+  /*
+   * Match the same reference ACK semantics used by the firmware
+   * transaction: bit 0 proves a valid ACK structure. Bit 1 is auxiliary
+   * status and is not required by the reference command caller.
+   */
+  if ((status & 0x01U) == 0)
+    return FALSE;
+
+  return TRUE;
+}
+
+
+gboolean
+goodix5135_parse_read_sensor_register_response (
+  const guint8  *data,
+  gsize          data_length,
+  gsize          minimum_length,
+  const guint8 **value,
+  gsize         *value_length)
+{
+  const guint8 *payload;
+  gsize payload_length;
+
+  if (value == NULL || value_length == NULL)
+    return FALSE;
+
+  *value = NULL;
+  *value_length = 0;
+
+  if (minimum_length == 0)
+    return FALSE;
+
+  if (!goodix5135_parse_wrapped_protocol (
+        data,
+        data_length,
+        GOODIX5135_COMMAND_READ_SENSOR_REGISTER,
+        &payload,
+        &payload_length))
+    return FALSE;
+
+  /*
+   * Reference read_sensor_register() only requires the response payload
+   * to contain at least the requested number of bytes.
+   */
+  if (payload_length < minimum_length)
+    return FALSE;
+
+  *value = payload;
+  *value_length = payload_length;
+
+  return TRUE;
+}
+
+
 static gboolean
 goodix5135_firmware_transaction_fail (
   Goodix5135FirmwareTransaction *transaction)

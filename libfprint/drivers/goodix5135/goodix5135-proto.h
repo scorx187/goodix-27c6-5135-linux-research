@@ -10,10 +10,12 @@
 #include <glib.h>
 
 #define GOODIX5135_PACK_FLAGS_MESSAGE_PROTOCOL  0xa0U
+#define GOODIX5135_COMMAND_READ_SENSOR_REGISTER 0x82U
 #define GOODIX5135_COMMAND_FIRMWARE_VERSION     0xa8U
 #define GOODIX5135_COMMAND_ACK                  0xb0U
 #define GOODIX5135_ACK_MIN_PAYLOAD_LENGTH       2U
 #define GOODIX5135_USB_PACKET_LENGTH            64U
+#define GOODIX5135_REGISTER_READ_REQUEST_LENGTH 12U
 #define GOODIX5135_FIRMWARE_REQUEST_LENGTH      10U
 
 #define GOODIX5135_IMAGE_COMMAND             0x20U
@@ -96,6 +98,50 @@ gboolean goodix5135_parse_firmware_version_response (
   gsize          data_length,
   const guint8 **firmware,
   gsize         *firmware_length);
+
+
+/*
+ * Build a wrapped single-register READ_SENSOR_REGISTER (0x82) request.
+ *
+ * Payload:
+ *
+ *   00                single-register mode
+ *   address_lo
+ *   address_hi
+ *   read_length
+ *
+ * Logical Goodix frame: 12 bytes.
+ * USB wire packet:      64 bytes, zero padded.
+ *
+ * This helper performs no USB operation.
+ */
+gboolean goodix5135_build_read_sensor_register_request (
+  guint16  address,
+  guint8   read_length,
+  guint8  *packet,
+  gsize    packet_size,
+  gsize   *logical_length);
+
+/*
+ * Parse the ACK belonging to READ_SENSOR_REGISTER (0x82).
+ */
+gboolean goodix5135_parse_read_sensor_register_ack (
+  const guint8 *data,
+  gsize         data_length);
+
+/*
+ * Parse a wrapped READ_SENSOR_REGISTER (0x82) response.
+ *
+ * @value is a borrowed view into @data.
+ * The response must contain at least @minimum_length bytes.
+ * No register bytes are copied or logged.
+ */
+gboolean goodix5135_parse_read_sensor_register_response (
+  const guint8  *data,
+  gsize          data_length,
+  gsize          minimum_length,
+  const guint8 **value,
+  gsize         *value_length);
 
 
 /*

@@ -1015,6 +1015,170 @@ test_firmware_transaction_begin_failure (void)
     GOODIX5135_FIRMWARE_TRANSACTION_FAILED);
 }
 
+
+static void
+test_register_read_request (void)
+{
+  guint8 packet[GOODIX5135_USB_PACKET_LENGTH];
+  gsize logical_length = 0;
+
+  static const guint8 expected[] = {
+    0xa0, 0x08, 0x00, 0xa8,
+    0x82, 0x05, 0x00,
+    0x00, 0x00, 0x00, 0x04,
+    0x1f,
+  };
+
+  g_assert_true (
+    goodix5135_build_read_sensor_register_request (
+      0x0000,
+      4,
+      packet,
+      sizeof (packet),
+      &logical_length));
+
+  g_assert_cmpuint (
+    logical_length,
+    ==,
+    GOODIX5135_REGISTER_READ_REQUEST_LENGTH);
+
+  g_assert_cmpmem (
+    packet,
+    logical_length,
+    expected,
+    sizeof (expected));
+
+  for (gsize i = logical_length;
+       i < sizeof (packet);
+       i++)
+    g_assert_cmpuint (packet[i], ==, 0);
+}
+
+
+static void
+test_register_read_request_0220 (void)
+{
+  guint8 packet[GOODIX5135_USB_PACKET_LENGTH];
+  gsize logical_length = 0;
+
+  static const guint8 expected[] = {
+    0xa0, 0x08, 0x00, 0xa8,
+    0x82, 0x05, 0x00,
+    0x00, 0x20, 0x02, 0x02,
+    0xff,
+  };
+
+  g_assert_true (
+    goodix5135_build_read_sensor_register_request (
+      0x0220,
+      2,
+      packet,
+      sizeof (packet),
+      &logical_length));
+
+  g_assert_cmpmem (
+    packet,
+    logical_length,
+    expected,
+    sizeof (expected));
+}
+
+
+static void
+test_register_read_request_rejects_zero_length (void)
+{
+  guint8 packet[GOODIX5135_USB_PACKET_LENGTH];
+  gsize logical_length = 123;
+
+  g_assert_false (
+    goodix5135_build_read_sensor_register_request (
+      0x0000,
+      0,
+      packet,
+      sizeof (packet),
+      &logical_length));
+}
+
+
+static void
+test_register_read_ack (void)
+{
+  guint8 ack[GOODIX5135_USB_PACKET_LENGTH] = {
+    0xa0, 0x06, 0x00, 0xa6,
+    0xb0, 0x03, 0x00,
+    0x82, 0x01,
+    0x74,
+  };
+
+  g_assert_true (
+    goodix5135_parse_read_sensor_register_ack (
+      ack,
+      sizeof (ack)));
+
+  /*
+   * Status bit 0 clear -> invalid ACK.
+   * Recompute the protocol checksum for payload status 0x00.
+   */
+  ack[8] = 0x00;
+  ack[9] = 0x75;
+
+  g_assert_false (
+    goodix5135_parse_read_sensor_register_ack (
+      ack,
+      sizeof (ack)));
+}
+
+
+static void
+test_register_read_response (void)
+{
+  const guint8 *value = NULL;
+  gsize value_length = 0;
+
+  static const guint8 expected_chip_id[] = {
+    0xa2, 0x04, 0x25, 0x00,
+  };
+
+  guint8 response[GOODIX5135_USB_PACKET_LENGTH] = {
+    0xa0, 0x08, 0x00, 0xa8,
+    0x82, 0x05, 0x00,
+    0xa2, 0x04, 0x25, 0x00,
+    0x58,
+  };
+
+  g_assert_true (
+    goodix5135_parse_read_sensor_register_response (
+      response,
+      sizeof (response),
+      sizeof (expected_chip_id),
+      &value,
+      &value_length));
+
+  g_assert_nonnull (value);
+  g_assert_cmpuint (
+    value_length,
+    ==,
+    sizeof (expected_chip_id));
+
+  g_assert_cmpmem (
+    value,
+    value_length,
+    expected_chip_id,
+    sizeof (expected_chip_id));
+
+  value = NULL;
+  value_length = 0;
+
+  g_assert_false (
+    goodix5135_parse_read_sensor_register_response (
+      response,
+      sizeof (response),
+      sizeof (expected_chip_id) + 1,
+      &value,
+      &value_length));
+}
+
+
 int
 main (int argc, char **argv)
 {
@@ -1118,6 +1282,27 @@ main (int argc, char **argv)
 
   g_test_add_func ("/goodix5135/proto/firmware-transaction/begin-failure",
                    test_firmware_transaction_begin_failure);
+
+  g_test_add_func ("/goodix5135/proto/register-read-request",
+
+                   test_register_read_request);
+
+  g_test_add_func ("/goodix5135/proto/register-read-request-0220",
+
+                   test_register_read_request_0220);
+
+  g_test_add_func ("/goodix5135/proto/register-read-zero-length",
+
+                   test_register_read_request_rejects_zero_length);
+
+  g_test_add_func ("/goodix5135/proto/register-read-ack",
+
+                   test_register_read_ack);
+
+  g_test_add_func ("/goodix5135/proto/register-read-response",
+
+                   test_register_read_response);
+
 
   return g_test_run ();
 }
