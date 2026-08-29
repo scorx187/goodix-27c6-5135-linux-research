@@ -147,6 +147,7 @@ driver_sources = {
         [ 'drivers/synaptics/synaptics.c', 'drivers/synaptics/bmkt_message.c' ],
     'goodix5135' :
         [ 'drivers/goodix5135/goodix5135.c',
+        'drivers/goodix5135/goodix5135-tls.c',
           'drivers/goodix5135/goodix5135-proto.c',
           'drivers/goodix5135/goodix5135-image.c',
           'drivers/goodix5135/goodix5135-image-response.c',

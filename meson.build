@@ -216,6 +216,7 @@ driver_helper_mapping = {
     'virtual_image'          : [ 'virtual' ],
     'virtual_device'         : [ 'virtual' ],
     'virtual_device_storage' : [ 'virtual' ],
+    'goodix5135' : [ 'openssl' ],
 }
 
 driver_helpers = []
