@@ -25,6 +25,7 @@
 #include "goodix5135-capture-proto.h"
 #include "goodix5135-image.h"
 #include "goodix5135-image-response.h"
+#include "fpi-image.h"
 #include "goodix5135-tls-request.h"
 #include "goodix5135-tls-session.h"
 
@@ -40,10 +41,12 @@ typedef enum
   GOODIX5135_CAPTURE_RUNTIME_WAIT_DOWN_ACK,
   GOODIX5135_CAPTURE_RUNTIME_WAIT_DOWN_RESPONSE,
 
+  GOODIX5135_CAPTURE_RUNTIME_READY_IMAGE,
   GOODIX5135_CAPTURE_RUNTIME_WAIT_IMAGE_OUT,
   GOODIX5135_CAPTURE_RUNTIME_WAIT_IMAGE_ACK,
   GOODIX5135_CAPTURE_RUNTIME_WAIT_IMAGE_TLS,
 
+  GOODIX5135_CAPTURE_RUNTIME_READY_FINGER_OFF,
   GOODIX5135_CAPTURE_RUNTIME_WAIT_UP_OUT,
   GOODIX5135_CAPTURE_RUNTIME_WAIT_UP_ACK,
   GOODIX5135_CAPTURE_RUNTIME_WAIT_UP_RESPONSE,
@@ -233,6 +236,22 @@ goodix5135_capture_runtime_reset (
 
 static gboolean
 goodix5135_live_capture_test_requested (void);
+
+static gboolean
+goodix5135_fpimage_test_requested (void);
+
+static FpImage *
+goodix5135_capture_make_fpimage (
+  const guint16 *pixels,
+  gsize          pixel_count);
+
+static gboolean
+goodix5135_capture_start_image (
+  FpDevice *device);
+
+static gboolean
+goodix5135_capture_start_fdt_up (
+  FpDevice *device);
 
 static gboolean
 goodix5135_capture_runtime_start (
@@ -1697,6 +1716,9 @@ goodix5135_activation_continue_after_nop (
 #define GOODIX5135_LIVE_CAPTURE_TEST_ENV "GOODIX5135_LIVE_CAPTURE_TEST"
 #define GOODIX5135_LIVE_CAPTURE_TEST_VALUE "ONE_SHOT_NATIVE_CAPTURE"
 
+#define GOODIX5135_FPIMAGE_TEST_ENV   "GOODIX5135_FPIMAGE_TEST"
+#define GOODIX5135_FPIMAGE_TEST_VALUE "TWO_CAPTURE_LIFECYCLE"
+
 #define GOODIX5135_LIVE_FDT_SEED_ENV "GOODIX5135_LIVE_FDT_SEED_FILE"
 #define GOODIX5135_LIVE_FDT_UP_ENV   "GOODIX5135_LIVE_FDT_UP_FILE"
 
@@ -1937,6 +1959,19 @@ goodix5135_live_capture_test_requested (void)
 
 
 static gboolean
+goodix5135_fpimage_test_requested (void)
+{
+  const gchar *value =
+    g_getenv (
+      GOODIX5135_FPIMAGE_TEST_ENV);
+
+  return g_strcmp0 (
+           value,
+           GOODIX5135_FPIMAGE_TEST_VALUE) == 0;
+}
+
+
+static gboolean
 goodix5135_capture_load_private_exact (
   const gchar *environment_name,
   guint8      *output,
@@ -2163,6 +2198,151 @@ goodix5135_capture_submit_tls_image_read (
 }
 
 
+static FpImage *
+goodix5135_capture_make_fpimage (
+  const guint16 *pixels,
+  gsize          pixel_count)
+{
+  FpImage *image;
+
+  gsize index;
+
+  if (pixels == NULL ||
+      pixel_count !=
+        GOODIX5135_IMAGE_PIXELS)
+    return NULL;
+
+  image =
+    fp_image_new (
+      GOODIX5135_IMAGE_WIDTH,
+      GOODIX5135_IMAGE_HEIGHT);
+
+  if (image == NULL)
+    return NULL;
+
+  if (image->data == NULL)
+    {
+      g_object_unref (
+        image);
+
+      return NULL;
+    }
+
+  for (index = 0;
+       index < GOODIX5135_IMAGE_PIXELS;
+       index++)
+    {
+      guint16 value =
+        pixels[index];
+
+      if (value > 0x0fffU)
+        value = 0x0fffU;
+
+      image->data[index] =
+        (guchar) (
+          value >> 4
+        );
+    }
+
+  image->flags =
+    FPI_IMAGE_NONE;
+
+  return image;
+}
+
+
+static gboolean
+goodix5135_capture_start_image (
+  FpDevice *device)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (
+      device);
+
+  guint8 packet[
+    GOODIX5135_CAPTURE_USB_LENGTH
+  ];
+
+  gsize logical_length = 0;
+
+  if (self->capture_runtime_state !=
+      GOODIX5135_CAPTURE_RUNTIME_READY_IMAGE)
+    return FALSE;
+
+  if (!goodix5135_capture_build_image_request (
+        packet,
+        sizeof (packet),
+        &logical_length))
+    return FALSE;
+
+  if (logical_length == 0 ||
+      logical_length >
+        GOODIX5135_CAPTURE_USB_LENGTH)
+    return FALSE;
+
+  self->capture_runtime_state =
+    GOODIX5135_CAPTURE_RUNTIME_WAIT_IMAGE_OUT;
+
+  fp_dbg (
+    "Native FpImage prompt: KEEP_FINGER_ON_SENSOR");
+
+  fp_dbg (
+    "Native FpImage stage: image 0x20 request");
+
+  return goodix5135_capture_submit_out (
+    device,
+    packet,
+    goodix5135_capture_image_out_cb);
+}
+
+
+static gboolean
+goodix5135_capture_start_fdt_up (
+  FpDevice *device)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (
+      device);
+
+  guint8 packet[
+    GOODIX5135_CAPTURE_USB_LENGTH
+  ];
+
+  gsize logical_length = 0;
+
+  if (self->capture_runtime_state !=
+      GOODIX5135_CAPTURE_RUNTIME_READY_FINGER_OFF)
+    return FALSE;
+
+  if (!goodix5135_capture_build_fdt_up (
+        self->capture_fdt_up,
+        sizeof (self->capture_fdt_up),
+        packet,
+        sizeof (packet),
+        &logical_length))
+    return FALSE;
+
+  if (logical_length == 0 ||
+      logical_length >
+        GOODIX5135_CAPTURE_USB_LENGTH)
+    return FALSE;
+
+  self->capture_runtime_state =
+    GOODIX5135_CAPTURE_RUNTIME_WAIT_UP_OUT;
+
+  fp_dbg (
+    "Native FpImage stage: FDT-up 0x34 request");
+
+  fp_dbg (
+    "Native FpImage prompt: LIFT_FINGER_NOW");
+
+  return goodix5135_capture_submit_out (
+    device,
+    packet,
+    goodix5135_capture_up_out_cb);
+}
+
+
 static void
 goodix5135_capture_runtime_fail (
   FpDevice    *device,
@@ -2180,6 +2360,24 @@ goodix5135_capture_runtime_fail (
     "Goodix native capture runtime stopped: %s",
     reason);
 
+  if (goodix5135_fpimage_test_requested ())
+    {
+      GError *action_error =
+        fpi_device_error_new_msg (
+          FP_DEVICE_ERROR_GENERAL,
+          "%s",
+          reason);
+
+      goodix5135_capture_runtime_reset (
+        self);
+
+      fpi_image_device_session_error (
+        FP_IMAGE_DEVICE (device),
+        action_error);
+
+      return;
+    }
+
   goodix5135_tls_runtime_reset (
     self);
 
@@ -2187,6 +2385,7 @@ goodix5135_capture_runtime_fail (
     device,
     reason);
 }
+
 
 
 static gboolean
@@ -2203,10 +2402,12 @@ goodix5135_capture_runtime_start (
 
   gsize logical_length = 0;
 
-  if (!goodix5135_live_capture_test_requested ())
+  if (!goodix5135_live_capture_test_requested () &&
+      !goodix5135_fpimage_test_requested ())
     return FALSE;
 
-  if (!self->tls_runtime_open_gate ||
+  if ((!goodix5135_fpimage_test_requested () &&
+       !self->tls_runtime_open_gate) ||
       !self->io.running ||
       self->tls_session == NULL ||
       !goodix5135_tls_session_is_ready (
@@ -2636,12 +2837,6 @@ goodix5135_capture_down_response_cb (
 
   Goodix5135FdtResponse response = { 0 };
 
-  guint8 packet[
-    GOODIX5135_CAPTURE_USB_LENGTH
-  ];
-
-  gsize logical_length = 0;
-
   gboolean transport_ok;
   gboolean protocol_ok;
 
@@ -2686,50 +2881,18 @@ goodix5135_capture_down_response_cb (
       return;
     }
 
-  if (!goodix5135_capture_build_image_request (
-        packet,
-        sizeof (packet),
-        &logical_length))
-    {
-      goodix5135_capture_runtime_fail (
-        device,
-        "could not build image 0x20 request");
-
-      return;
-    }
-
-  if (logical_length == 0 ||
-      logical_length >
-        GOODIX5135_CAPTURE_USB_LENGTH)
-    {
-      goodix5135_capture_runtime_fail (
-        device,
-        "image 0x20 request length was invalid");
-
-      return;
-    }
-
   fp_dbg (
     "Native capture stage: FDT-down event validated");
 
-  fp_dbg (
-    "Native capture prompt: KEEP_FINGER_ON_SENSOR");
-
   self->capture_runtime_state =
-    GOODIX5135_CAPTURE_RUNTIME_WAIT_IMAGE_OUT;
+    GOODIX5135_CAPTURE_RUNTIME_READY_IMAGE;
 
   fp_dbg (
-    "Native capture stage: image 0x20 request");
+    "Native FpImage stage: reporting finger present");
 
-  if (!goodix5135_capture_submit_out (
-        device,
-        packet,
-        goodix5135_capture_image_out_cb))
-    {
-      goodix5135_capture_runtime_fail (
-        device,
-        "could not submit image 0x20 request");
-    }
+  fpi_image_device_report_finger_status (
+    FP_IMAGE_DEVICE (device),
+    TRUE);
 }
 
 
@@ -2867,11 +3030,8 @@ goodix5135_capture_accept_tls_plaintext (
     GOODIX5135_IMAGE_PIXELS
   ];
 
-  guint8 packet[
-    GOODIX5135_CAPTURE_USB_LENGTH
-  ];
+  FpImage *image = NULL;
 
-  gsize logical_length = 0;
   gsize remaining;
 
   gboolean decoded;
@@ -2983,57 +3143,44 @@ goodix5135_capture_accept_tls_plaintext (
       return;
     }
 
+  fp_dbg (
+    "Native capture stage: image 5120-pixel decode validated");
+
+  image =
+    goodix5135_capture_make_fpimage (
+      pixels,
+      G_N_ELEMENTS (pixels));
+
   /*
-   * Fingerprint pixels are deliberately not printed, persisted,
-   * hashed, or retained after this validation gate.
+   * The original 12-bit plane is never printed, persisted, hashed,
+   * or retained after constructing the FpImage.
    */
   goodix5135_live_tls_secure_clear (
     pixels,
     sizeof (pixels));
 
-  fp_dbg (
-    "Native capture stage: image 5120-pixel decode validated");
-
-  if (!goodix5135_capture_build_fdt_up (
-        self->capture_fdt_up,
-        sizeof (self->capture_fdt_up),
-        packet,
-        sizeof (packet),
-        &logical_length))
+  if (image == NULL)
     {
       goodix5135_capture_runtime_fail (
         device,
-        "could not build FDT-up request");
-
-      return;
-    }
-
-  if (logical_length == 0 ||
-      logical_length >
-        GOODIX5135_CAPTURE_USB_LENGTH)
-    {
-      goodix5135_capture_runtime_fail (
-        device,
-        "FDT-up request length was invalid");
+        "could not construct 80x64 FpImage");
 
       return;
     }
 
   self->capture_runtime_state =
-    GOODIX5135_CAPTURE_RUNTIME_WAIT_UP_OUT;
+    GOODIX5135_CAPTURE_RUNTIME_READY_FINGER_OFF;
 
   fp_dbg (
-    "Native capture stage: FDT-up 0x34 request");
+    "Native FpImage stage: handing 80x64 image to libfprint");
 
-  if (!goodix5135_capture_submit_out (
-        device,
-        packet,
-        goodix5135_capture_up_out_cb))
-    {
-      goodix5135_capture_runtime_fail (
-        device,
-        "could not submit FDT-up request");
-    }
+  /*
+   * Ownership transfers to libfprint here.
+   * Do not touch or unref image after this call.
+   */
+  fpi_image_device_image_captured (
+    FP_IMAGE_DEVICE (device),
+    image);
 }
 
 
@@ -3217,6 +3364,26 @@ goodix5135_capture_up_response_cb (
 
   fp_dbg (
     "Native capture stage: FDT-up event validated");
+
+  if (goodix5135_fpimage_test_requested ())
+    {
+      /*
+       * Clear private FDT state before returning control to libfprint.
+       * TLS remains alive across action deactivation for the explicit
+       * two-capture lifecycle gate.
+       */
+      goodix5135_capture_runtime_reset (
+        self);
+
+      fp_dbg (
+        "Native FpImage stage: reporting finger absent");
+
+      fpi_image_device_report_finger_status (
+        FP_IMAGE_DEVICE (device),
+        FALSE);
+
+      return;
+    }
 
   /*
    * Clear all private FDT and fingerprint material before OPEN
@@ -7638,8 +7805,22 @@ goodix5135_maybe_finish_deactivate (FpiDeviceGoodix5135 *self,
   fp_dbg ("I/O lifecycle drained at generation %" G_GUINT64_FORMAT,
           self->io.generation);
 
-  goodix5135_tls_runtime_reset (
-    self);
+  if (goodix5135_fpimage_test_requested () &&
+      self->tls_session != NULL &&
+      goodix5135_tls_session_is_ready (
+        self->tls_session))
+    {
+      goodix5135_capture_runtime_reset (
+        self);
+
+      fp_dbg (
+        "Native FpImage lifecycle preserved READY TLS across deactivation");
+    }
+  else
+    {
+      goodix5135_tls_runtime_reset (
+        self);
+    }
 
   self->deactivating = FALSE;
 
@@ -7670,7 +7851,9 @@ goodix5135_driver_async_drained (FpDevice              *device,
 static void
 goodix5135_activate (FpImageDevice *dev)
 {
-  FpiDeviceGoodix5135 *self = FPI_DEVICE_GOODIX5135 (dev);
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (dev);
+
   GError *error;
 
   if (!goodix5135_io_start (&self->io))
@@ -7682,21 +7865,49 @@ goodix5135_activate (FpImageDevice *dev)
 
       self->active = FALSE;
 
-      fpi_image_device_activate_complete (dev, error);
+      fpi_image_device_activate_complete (
+        dev,
+        error);
+
       return;
     }
 
   self->active = TRUE;
   self->deactivating = FALSE;
 
-  fp_dbg ("Started host I/O lifecycle generation %" G_GUINT64_FORMAT,
-          self->io.generation);
+  fp_dbg (
+    "Started host I/O lifecycle generation %" G_GUINT64_FORMAT,
+    self->io.generation);
 
-  /*
-   * No activation/configuration/TLS/FDT command is sent yet.
-   */
-  fpi_image_device_activate_complete (dev, NULL);
+  if (goodix5135_fpimage_test_requested () &&
+      (
+        self->tls_session == NULL ||
+        !goodix5135_tls_session_is_ready (
+          self->tls_session)
+      ))
+    {
+      goodix5135_io_stop (
+        &self->io);
+
+      self->active = FALSE;
+
+      error =
+        fpi_device_error_new_msg (
+          FP_DEVICE_ERROR_GENERAL,
+          "Goodix5135 FpImage lifecycle requires an existing READY TLS session");
+
+      fpi_image_device_activate_complete (
+        dev,
+        error);
+
+      return;
+    }
+
+  fpi_image_device_activate_complete (
+    dev,
+    NULL);
 }
+
 
 static void
 goodix5135_deactivate (FpImageDevice *dev)
@@ -7723,19 +7934,81 @@ goodix5135_deactivate (FpImageDevice *dev)
 }
 
 static void
-goodix5135_change_state (FpImageDevice      *dev,
-                         FpiImageDeviceState state)
+goodix5135_change_state (
+  FpImageDevice      *dev,
+  FpiImageDeviceState state)
 {
-  FpiDeviceGoodix5135 *self = FPI_DEVICE_GOODIX5135 (dev);
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (dev);
 
   self->state = state;
 
-  /*
-   * Do not perform device I/O in the scaffold.
-   * Later revisions will map these states to FDT/capture lifecycle.
-   */
-  fp_dbg ("Image device state changed to %d (scaffold only)", state);
+  if (!goodix5135_fpimage_test_requested ())
+    {
+      fp_dbg (
+        "Image device state changed to %d (legacy scaffold)",
+        state);
+
+      return;
+    }
+
+  fp_dbg (
+    "Native FpImage state changed to %d",
+    state);
+
+  switch (state)
+    {
+    case FPI_IMAGE_DEVICE_STATE_AWAIT_FINGER_ON:
+      fp_dbg (
+        "Native FpImage prompt: PLACE_FINGER_NOW");
+
+      if (!goodix5135_capture_runtime_start (
+            FP_DEVICE (dev)))
+        {
+          goodix5135_capture_runtime_fail (
+            FP_DEVICE (dev),
+            "could not start FDT finger-on detection");
+        }
+
+      return;
+
+    case FPI_IMAGE_DEVICE_STATE_CAPTURE:
+      if (!goodix5135_capture_start_image (
+            FP_DEVICE (dev)))
+        {
+          goodix5135_capture_runtime_fail (
+            FP_DEVICE (dev),
+            "could not start native FpImage capture");
+        }
+
+      return;
+
+    case FPI_IMAGE_DEVICE_STATE_AWAIT_FINGER_OFF:
+      if (!goodix5135_capture_start_fdt_up (
+            FP_DEVICE (dev)))
+        {
+          goodix5135_capture_runtime_fail (
+            FP_DEVICE (dev),
+            "could not start FDT finger-off detection");
+        }
+
+      return;
+
+    case FPI_IMAGE_DEVICE_STATE_IDLE:
+    case FPI_IMAGE_DEVICE_STATE_ACTIVATING:
+    case FPI_IMAGE_DEVICE_STATE_DEACTIVATING:
+    case FPI_IMAGE_DEVICE_STATE_INACTIVE:
+      return;
+
+    default:
+      goodix5135_capture_runtime_fail (
+        FP_DEVICE (dev),
+        "unexpected FpImageDevice state");
+
+      return;
+    }
 }
+
 
 static void
 fpi_device_goodix5135_init (FpiDeviceGoodix5135 *self)
