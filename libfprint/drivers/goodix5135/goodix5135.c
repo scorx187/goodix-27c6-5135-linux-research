@@ -99,6 +99,7 @@ struct _FpiDeviceGoodix5135
   Goodix5135TlsSession                *tls_session;
   Goodix5135TlsRequestTransaction      tls_request_transaction;
   Goodix5135TlsEstablishedTransaction  tls_runtime_d4_transaction;
+  gboolean                             tls_runtime_open_gate;
 };
 
 G_DECLARE_FINAL_TYPE (FpiDeviceGoodix5135,
@@ -1523,6 +1524,228 @@ goodix5135_activation_continue_after_nop (
 
 #define GOODIX5135_TLS_RUNTIME_SENSOR_READ_SIZE 0x10000U
 
+#define GOODIX5135_LIVE_TLS_TEST_ENV "GOODIX5135_LIVE_TLS_TEST"
+#define GOODIX5135_LIVE_TLS_PSK_ENV  "GOODIX5135_LIVE_TLS_PSK_FILE"
+#define GOODIX5135_LIVE_TLS_TEST_VALUE "ONE_SHOT_NATIVE_TLS"
+
+#define GOODIX5135_PRIVATE_PSK_HEX_LENGTH 64U
+#define GOODIX5135_PRIVATE_PSK_LENGTH     32U
+
+
+static void
+goodix5135_live_tls_secure_clear (
+  gpointer data,
+  gsize    length)
+{
+  volatile guint8 *cursor =
+    (volatile guint8 *) data;
+
+  if (cursor == NULL)
+    return;
+
+  while (length > 0)
+    {
+      *cursor = 0;
+      cursor++;
+      length--;
+    }
+}
+
+
+static gboolean
+goodix5135_live_tls_test_requested (void)
+{
+  const gchar *value =
+    g_getenv (GOODIX5135_LIVE_TLS_TEST_ENV);
+
+  return g_strcmp0 (
+           value,
+           GOODIX5135_LIVE_TLS_TEST_VALUE) == 0;
+}
+
+
+static gboolean
+goodix5135_live_tls_load_psk (
+  guint8 *psk,
+  gsize   psk_size)
+{
+  const gchar *path;
+  gchar       *contents = NULL;
+
+  gsize file_length = 0;
+  gsize logical_length;
+  gsize index;
+
+  GError *error = NULL;
+
+  g_return_val_if_fail (
+    psk != NULL,
+    FALSE);
+
+  if (psk_size !=
+      GOODIX5135_PRIVATE_PSK_LENGTH)
+    return FALSE;
+
+  memset (
+    psk,
+    0,
+    psk_size);
+
+  path =
+    g_getenv (
+      GOODIX5135_LIVE_TLS_PSK_ENV);
+
+  if (path == NULL ||
+      *path == '\0')
+    return FALSE;
+
+  if (!g_file_get_contents (
+        path,
+        &contents,
+        &file_length,
+        &error))
+    {
+      g_clear_error (&error);
+      return FALSE;
+    }
+
+  logical_length =
+    file_length;
+
+  while (logical_length > 0 &&
+         (
+           contents[logical_length - 1] == '\n' ||
+           contents[logical_length - 1] == '\r'
+         ))
+    {
+      contents[logical_length - 1] = '\0';
+      logical_length--;
+    }
+
+  if (logical_length !=
+      GOODIX5135_PRIVATE_PSK_HEX_LENGTH)
+    goto fail;
+
+  for (index = 0;
+       index < GOODIX5135_PRIVATE_PSK_LENGTH;
+       index++)
+    {
+      gint high;
+      gint low;
+
+      high =
+        g_ascii_xdigit_value (
+          contents[index * 2]);
+
+      low =
+        g_ascii_xdigit_value (
+          contents[index * 2 + 1]);
+
+      if (high < 0 ||
+          low < 0)
+        goto fail;
+
+      psk[index] =
+        (guint8) (
+          (high << 4) |
+          low
+        );
+    }
+
+  goodix5135_live_tls_secure_clear (
+    contents,
+    file_length + 1);
+
+  g_free (contents);
+
+  return TRUE;
+
+fail:
+  goodix5135_live_tls_secure_clear (
+    psk,
+    psk_size);
+
+  goodix5135_live_tls_secure_clear (
+    contents,
+    file_length + 1);
+
+  g_free (contents);
+
+  return FALSE;
+}
+
+
+static gboolean
+goodix5135_start_live_tls_open_gate (
+  FpDevice *device)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (device);
+
+  guint8 psk[GOODIX5135_PRIVATE_PSK_LENGTH] = { 0 };
+
+  GError *error = NULL;
+
+  gboolean started;
+
+  if (!goodix5135_live_tls_test_requested ())
+    return FALSE;
+
+  if (!goodix5135_live_tls_load_psk (
+        psk,
+        sizeof (psk)))
+    {
+      goodix5135_live_tls_secure_clear (
+        psk,
+        sizeof (psk));
+
+      goodix5135_open_transaction_fail (
+        device,
+        "One-shot native TLS private input gate failed");
+
+      return TRUE;
+    }
+
+  fp_dbg (
+    "One-shot native TLS PSK input gate validated");
+
+  self->tls_runtime_open_gate =
+    TRUE;
+
+  started =
+    goodix5135_tls_runtime_start (
+      device,
+      psk,
+      sizeof (psk),
+      &error);
+
+  goodix5135_live_tls_secure_clear (
+    psk,
+    sizeof (psk));
+
+  if (!started)
+    {
+      self->tls_runtime_open_gate =
+        FALSE;
+
+      g_clear_error (&error);
+
+      goodix5135_open_transaction_fail (
+        device,
+        "Could not start one-shot native TLS runtime gate");
+
+      return TRUE;
+    }
+
+  g_clear_error (&error);
+
+  fp_dbg (
+    "One-shot native TLS runtime gate started");
+
+  return TRUE;
+}
+
+
 static void
 goodix5135_tls_runtime_set_error (
   GError      **error,
@@ -1554,6 +1777,9 @@ goodix5135_tls_runtime_reset (
       self->tls_session = NULL;
     }
 
+  self->tls_runtime_open_gate =
+    FALSE;
+
   goodix5135_tls_request_transaction_init (
     &self->tls_request_transaction);
 
@@ -1570,8 +1796,12 @@ goodix5135_tls_runtime_fail (
   FpiDeviceGoodix5135 *self =
     FPI_DEVICE_GOODIX5135 (device);
 
+  gboolean open_gate =
+    self->tls_runtime_open_gate;
+
   /*
-   * Never print TLS payloads, PSK material, or sensor frame bytes.
+   * Never print TLS payloads, PSK material, sensor frame bytes,
+   * or private input paths.
    */
   fp_warn (
     "Goodix TLS runtime bridge stopped: %s",
@@ -1579,6 +1809,13 @@ goodix5135_tls_runtime_fail (
 
   goodix5135_tls_runtime_reset (
     self);
+
+  if (open_gate)
+    {
+      goodix5135_open_transaction_fail (
+        device,
+        reason);
+    }
 }
 
 
@@ -1747,6 +1984,9 @@ goodix5135_tls_runtime_start_d4 (
       return;
     }
 
+  fp_dbg (
+    "Native TLS stage: submitting D4 confirmation");
+
   if (!goodix5135_async_submit (
         device,
         &self->io,
@@ -1801,12 +2041,11 @@ goodix5135_tls_runtime_start (
       return FALSE;
     }
 
-  if (!self->active ||
-      !self->io.running)
+  if (!self->io.running)
     {
       goodix5135_tls_runtime_set_error (
         error,
-        "Goodix TLS runtime requires an active I/O lifecycle");
+        "Goodix TLS runtime requires a running I/O lifecycle");
 
       return FALSE;
     }
@@ -1842,8 +2081,6 @@ goodix5135_tls_runtime_start (
     }
 
   if (command !=
-        GOODIX5135_TLS_COMMAND_REQUEST ||
-      command !=
         GOODIX5135_TLS_REQUEST_COMMAND ||
       action !=
         GOODIX5135_TLS_SESSION_ACTION_REQUEST_D0)
@@ -1893,6 +2130,9 @@ goodix5135_tls_runtime_start (
 
       return FALSE;
     }
+
+  fp_dbg (
+    "Native TLS stage: submitting D0 request");
 
   if (!goodix5135_async_submit (
         device,
@@ -2034,6 +2274,9 @@ goodix5135_tls_runtime_d0_ack_cb (
       return;
     }
 
+  fp_dbg (
+    "Native TLS stage: D0 ACK validated");
+
   if (!goodix5135_tls_runtime_submit_sensor_read (
         device))
     {
@@ -2157,6 +2400,9 @@ goodix5135_tls_runtime_sensor_frame_cb (
           return;
         }
 
+      fp_dbg (
+        "Native TLS stage: sensor TLS frame produced host response");
+
       if (!goodix5135_tls_runtime_submit_host_frame (
             device,
             host_frame))
@@ -2239,6 +2485,9 @@ goodix5135_tls_runtime_host_frame_out_cb (
 
       return;
     }
+
+  fp_dbg (
+    "Native TLS stage: host TLS frame sent");
 
   session_ok =
     goodix5135_tls_session_host_frame_sent (
@@ -2447,6 +2696,26 @@ goodix5135_tls_runtime_d4_ack_cb (
 
   fp_dbg (
     "Goodix native TLS runtime bridge reached READY");
+
+  if (self->tls_runtime_open_gate)
+    {
+      self->tls_runtime_open_gate =
+        FALSE;
+
+      goodix5135_io_stop (
+        &self->io);
+
+      g_assert (
+        goodix5135_io_can_finish_stop (
+          &self->io));
+
+      fp_dbg (
+        "One-shot native TLS OPEN gate completed");
+
+      fpi_image_device_open_complete (
+        FP_IMAGE_DEVICE (device),
+        NULL);
+    }
 }
 
 
@@ -4158,6 +4427,26 @@ goodix5135_otp_response_cb (
       return;
     }
 
+  /*
+   * Explicit one-shot native TLS research gate.
+   *
+   * It is inactive unless the exact runtime environment gate is supplied.
+   * The private PSK is read into volatile memory only and is immediately
+   * cleared after the in-process TLS session copies it.
+   */
+  if (goodix5135_live_tls_test_requested ())
+    {
+      if (!goodix5135_start_live_tls_open_gate (
+            device))
+        {
+          goodix5135_open_transaction_fail (
+            device,
+            "One-shot native TLS gate did not start");
+        }
+
+      return;
+    }
+
   goodix5135_io_stop (
     &self->io);
 
@@ -5830,6 +6119,7 @@ fpi_device_goodix5135_init (FpiDeviceGoodix5135 *self)
   goodix5135_io_init (&self->io);
 
   self->tls_session = NULL;
+  self->tls_runtime_open_gate = FALSE;
 
   goodix5135_tls_request_transaction_init (
     &self->tls_request_transaction);
