@@ -604,6 +604,296 @@ goodix5135_register_read_transaction_response_complete (
 
 
 gboolean
+goodix5135_build_sensor_reset_request (
+  guint8 *packet,
+  gsize   packet_size,
+  gsize  *logical_length)
+{
+  guint outer_sum;
+
+  if (packet == NULL ||
+      logical_length == NULL)
+    return FALSE;
+
+  if (packet_size <
+      GOODIX5135_USB_PACKET_LENGTH)
+    return FALSE;
+
+  memset (
+    packet,
+    0,
+    GOODIX5135_USB_PACKET_LENGTH);
+
+  /*
+   * reset(True, False, 20):
+   *
+   * flags:
+   *   bit0 = 1
+   *   bit1 = 0
+   *   bit2 = 1
+   *         ----
+   *         0x05
+   *
+   * delay = 20 = 0x14
+   */
+  packet[0] =
+    GOODIX5135_PACK_FLAGS_MESSAGE_PROTOCOL;
+
+  packet[1] = 0x06;
+  packet[2] = 0x00;
+
+  outer_sum =
+    (guint) packet[0] +
+    (guint) packet[1] +
+    (guint) packet[2];
+
+  packet[3] =
+    (guint8) (outer_sum & 0xffU);
+
+  packet[4] =
+    GOODIX5135_COMMAND_RESET;
+
+  packet[5] = 0x03;
+  packet[6] = 0x00;
+
+  packet[7] =
+    GOODIX5135_SENSOR_RESET_FLAGS;
+
+  packet[8] =
+    GOODIX5135_SENSOR_RESET_DELAY;
+
+  packet[9] =
+    goodix5135_checksum_aa (
+      packet + 4,
+      5);
+
+  *logical_length =
+    GOODIX5135_SENSOR_RESET_REQUEST_LENGTH;
+
+  return TRUE;
+}
+
+
+gboolean
+goodix5135_parse_sensor_reset_ack (
+  const guint8 *data,
+  gsize         data_length)
+{
+  const guint8 *payload;
+  gsize payload_length;
+
+  if (!goodix5135_parse_wrapped_protocol (
+        data,
+        data_length,
+        GOODIX5135_COMMAND_ACK,
+        &payload,
+        &payload_length))
+    return FALSE;
+
+  if (payload_length <
+      GOODIX5135_ACK_MIN_PAYLOAD_LENGTH)
+    return FALSE;
+
+  if (payload[0] !=
+      GOODIX5135_COMMAND_RESET)
+    return FALSE;
+
+  if ((payload[1] & 0x01U) == 0)
+    return FALSE;
+
+  return TRUE;
+}
+
+
+gboolean
+goodix5135_parse_sensor_reset_response (
+  const guint8 *data,
+  gsize         data_length,
+  guint16      *result_number)
+{
+  const guint8 *payload;
+  gsize payload_length;
+
+  if (result_number == NULL)
+    return FALSE;
+
+  *result_number = 0;
+
+  if (!goodix5135_parse_wrapped_protocol (
+        data,
+        data_length,
+        GOODIX5135_COMMAND_RESET,
+        &payload,
+        &payload_length))
+    return FALSE;
+
+  if (payload_length < 1)
+    return FALSE;
+
+  if (payload[0] != 0x01U)
+    return FALSE;
+
+  if (payload_length < 3)
+    return FALSE;
+
+  *result_number =
+    (guint16) payload[1] |
+    ((guint16) payload[2] << 8);
+
+  return TRUE;
+}
+
+
+static gboolean
+goodix5135_sensor_reset_transaction_fail (
+  Goodix5135SensorResetTransaction *transaction)
+{
+  if (transaction != NULL)
+    transaction->state =
+      GOODIX5135_SENSOR_RESET_TRANSACTION_FAILED;
+
+  return FALSE;
+}
+
+
+void
+goodix5135_sensor_reset_transaction_init (
+  Goodix5135SensorResetTransaction *transaction)
+{
+  g_return_if_fail (transaction != NULL);
+
+  transaction->state =
+    GOODIX5135_SENSOR_RESET_TRANSACTION_IDLE;
+}
+
+
+gboolean
+goodix5135_sensor_reset_transaction_begin (
+  Goodix5135SensorResetTransaction *transaction,
+  guint8                           *packet,
+  gsize                             packet_size,
+  gsize                            *logical_length)
+{
+  if (transaction == NULL)
+    return FALSE;
+
+  if (transaction->state !=
+      GOODIX5135_SENSOR_RESET_TRANSACTION_IDLE)
+    return goodix5135_sensor_reset_transaction_fail (
+      transaction);
+
+  if (!goodix5135_build_sensor_reset_request (
+        packet,
+        packet_size,
+        logical_length))
+    return goodix5135_sensor_reset_transaction_fail (
+      transaction);
+
+  transaction->state =
+    GOODIX5135_SENSOR_RESET_TRANSACTION_WAIT_OUT;
+
+  return TRUE;
+}
+
+
+gboolean
+goodix5135_sensor_reset_transaction_out_complete (
+  Goodix5135SensorResetTransaction *transaction,
+  gboolean                          transport_can_advance)
+{
+  if (transaction == NULL)
+    return FALSE;
+
+  if (transaction->state !=
+      GOODIX5135_SENSOR_RESET_TRANSACTION_WAIT_OUT)
+    return goodix5135_sensor_reset_transaction_fail (
+      transaction);
+
+  if (!transport_can_advance)
+    return goodix5135_sensor_reset_transaction_fail (
+      transaction);
+
+  transaction->state =
+    GOODIX5135_SENSOR_RESET_TRANSACTION_WAIT_ACK;
+
+  return TRUE;
+}
+
+
+gboolean
+goodix5135_sensor_reset_transaction_ack_complete (
+  Goodix5135SensorResetTransaction *transaction,
+  gboolean                          transport_can_advance,
+  const guint8                     *data,
+  gsize                             data_length)
+{
+  if (transaction == NULL)
+    return FALSE;
+
+  if (transaction->state !=
+      GOODIX5135_SENSOR_RESET_TRANSACTION_WAIT_ACK)
+    return goodix5135_sensor_reset_transaction_fail (
+      transaction);
+
+  if (!transport_can_advance)
+    return goodix5135_sensor_reset_transaction_fail (
+      transaction);
+
+  if (!goodix5135_parse_sensor_reset_ack (
+        data,
+        data_length))
+    return goodix5135_sensor_reset_transaction_fail (
+      transaction);
+
+  transaction->state =
+    GOODIX5135_SENSOR_RESET_TRANSACTION_WAIT_RESPONSE;
+
+  return TRUE;
+}
+
+
+gboolean
+goodix5135_sensor_reset_transaction_response_complete (
+  Goodix5135SensorResetTransaction *transaction,
+  gboolean                          transport_can_advance,
+  const guint8                     *data,
+  gsize                             data_length,
+  guint16                          *result_number)
+{
+  if (result_number != NULL)
+    *result_number = 0;
+
+  if (transaction == NULL)
+    return FALSE;
+
+  if (transaction->state !=
+      GOODIX5135_SENSOR_RESET_TRANSACTION_WAIT_RESPONSE)
+    return goodix5135_sensor_reset_transaction_fail (
+      transaction);
+
+  if (!transport_can_advance)
+    return goodix5135_sensor_reset_transaction_fail (
+      transaction);
+
+  if (result_number == NULL)
+    return goodix5135_sensor_reset_transaction_fail (
+      transaction);
+
+  if (!goodix5135_parse_sensor_reset_response (
+        data,
+        data_length,
+        result_number))
+    return goodix5135_sensor_reset_transaction_fail (
+      transaction);
+
+  transaction->state =
+    GOODIX5135_SENSOR_RESET_TRANSACTION_DONE;
+
+  return TRUE;
+}
+
+
+gboolean
 goodix5135_build_enable_chip_request (
   gboolean enable,
   guint8  *packet,

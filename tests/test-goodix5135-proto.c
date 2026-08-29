@@ -2789,6 +2789,369 @@ test_enable_chip_transaction_invalid_order (void)
 }
 
 
+
+static void
+test_sensor_reset_request_vector (void)
+{
+  guint8 packet[GOODIX5135_USB_PACKET_LENGTH];
+  gsize logical_length = 0;
+
+  static const guint8 expected[] = {
+    0xa0, 0x06, 0x00, 0xa6,
+    0xa2, 0x03, 0x00,
+    0x05, 0x14,
+    0xec,
+  };
+
+  g_assert_true (
+    goodix5135_build_sensor_reset_request (
+      packet,
+      sizeof (packet),
+      &logical_length));
+
+  g_assert_cmpuint (
+    logical_length,
+    ==,
+    GOODIX5135_SENSOR_RESET_REQUEST_LENGTH);
+
+  g_assert_cmpmem (
+    packet,
+    logical_length,
+    expected,
+    sizeof (expected));
+}
+
+
+static void
+test_sensor_reset_request_arguments (void)
+{
+  guint8 packet[GOODIX5135_USB_PACKET_LENGTH];
+  gsize logical_length = 0;
+
+  g_assert_false (
+    goodix5135_build_sensor_reset_request (
+      NULL,
+      sizeof (packet),
+      &logical_length));
+
+  g_assert_false (
+    goodix5135_build_sensor_reset_request (
+      packet,
+      GOODIX5135_USB_PACKET_LENGTH - 1,
+      &logical_length));
+
+  g_assert_false (
+    goodix5135_build_sensor_reset_request (
+      packet,
+      sizeof (packet),
+      NULL));
+}
+
+
+static void
+test_sensor_reset_ack (void)
+{
+  static const guint8 good_ack[GOODIX5135_USB_PACKET_LENGTH] = {
+    0xa0, 0x06, 0x00, 0xa6,
+    0xb0, 0x03, 0x00,
+    0xa2, 0x01,
+    0x54,
+  };
+
+  static const guint8 bad_ack[GOODIX5135_USB_PACKET_LENGTH] = {
+    0xa0, 0x06, 0x00, 0xa6,
+    0xb0, 0x03, 0x00,
+    0xa2, 0x00,
+    0x55,
+  };
+
+  g_assert_true (
+    goodix5135_parse_sensor_reset_ack (
+      good_ack,
+      sizeof (good_ack)));
+
+  g_assert_false (
+    goodix5135_parse_sensor_reset_ack (
+      bad_ack,
+      sizeof (bad_ack)));
+}
+
+
+static void
+test_sensor_reset_response_success (void)
+{
+  guint16 number = 0;
+
+  /*
+   * Synthetic successful response:
+   * success=1, number=2048 (0x0800).
+   */
+  static const guint8 response[GOODIX5135_USB_PACKET_LENGTH] = {
+    0xa0, 0x07, 0x00, 0xa7,
+    0xa2, 0x04, 0x00,
+    0x01, 0x00, 0x08,
+    0xfb,
+  };
+
+  g_assert_true (
+    goodix5135_parse_sensor_reset_response (
+      response,
+      sizeof (response),
+      &number));
+
+  g_assert_cmpuint (
+    number,
+    ==,
+    2048);
+}
+
+
+static void
+test_sensor_reset_response_negative (void)
+{
+  guint16 number = 123;
+
+  static const guint8 response[GOODIX5135_USB_PACKET_LENGTH] = {
+    0xa0, 0x05, 0x00, 0xa5,
+    0xa2, 0x02, 0x00,
+    0x00,
+    0x06,
+  };
+
+  g_assert_false (
+    goodix5135_parse_sensor_reset_response (
+      response,
+      sizeof (response),
+      &number));
+
+  g_assert_cmpuint (number, ==, 0);
+}
+
+
+static void
+test_sensor_reset_response_short (void)
+{
+  guint16 number = 123;
+
+  static const guint8 response[GOODIX5135_USB_PACKET_LENGTH] = {
+    0xa0, 0x05, 0x00, 0xa5,
+    0xa2, 0x02, 0x00,
+    0x01,
+    0x05,
+  };
+
+  g_assert_false (
+    goodix5135_parse_sensor_reset_response (
+      response,
+      sizeof (response),
+      &number));
+
+  g_assert_cmpuint (number, ==, 0);
+}
+
+
+static void
+test_sensor_reset_transaction_happy_path (void)
+{
+  Goodix5135SensorResetTransaction transaction;
+
+  guint8 packet[GOODIX5135_USB_PACKET_LENGTH];
+  gsize logical_length = 0;
+  guint16 number = 0;
+
+  static const guint8 ack[GOODIX5135_USB_PACKET_LENGTH] = {
+    0xa0, 0x06, 0x00, 0xa6,
+    0xb0, 0x03, 0x00,
+    0xa2, 0x01,
+    0x54,
+  };
+
+  static const guint8 response[GOODIX5135_USB_PACKET_LENGTH] = {
+    0xa0, 0x07, 0x00, 0xa7,
+    0xa2, 0x04, 0x00,
+    0x01, 0x00, 0x08,
+    0xfb,
+  };
+
+  goodix5135_sensor_reset_transaction_init (
+    &transaction);
+
+  g_assert_true (
+    goodix5135_sensor_reset_transaction_begin (
+      &transaction,
+      packet,
+      sizeof (packet),
+      &logical_length));
+
+  g_assert_true (
+    goodix5135_sensor_reset_transaction_out_complete (
+      &transaction,
+      TRUE));
+
+  g_assert_true (
+    goodix5135_sensor_reset_transaction_ack_complete (
+      &transaction,
+      TRUE,
+      ack,
+      sizeof (ack)));
+
+  g_assert_true (
+    goodix5135_sensor_reset_transaction_response_complete (
+      &transaction,
+      TRUE,
+      response,
+      sizeof (response),
+      &number));
+
+  g_assert_cmpint (
+    transaction.state,
+    ==,
+    GOODIX5135_SENSOR_RESET_TRANSACTION_DONE);
+
+  g_assert_cmpuint (
+    number,
+    ==,
+    2048);
+}
+
+
+static void
+test_sensor_reset_transaction_out_failure (void)
+{
+  Goodix5135SensorResetTransaction transaction;
+  guint8 packet[GOODIX5135_USB_PACKET_LENGTH];
+  gsize logical_length = 0;
+
+  goodix5135_sensor_reset_transaction_init (
+    &transaction);
+
+  g_assert_true (
+    goodix5135_sensor_reset_transaction_begin (
+      &transaction,
+      packet,
+      sizeof (packet),
+      &logical_length));
+
+  g_assert_false (
+    goodix5135_sensor_reset_transaction_out_complete (
+      &transaction,
+      FALSE));
+
+  g_assert_cmpint (
+    transaction.state,
+    ==,
+    GOODIX5135_SENSOR_RESET_TRANSACTION_FAILED);
+}
+
+
+static void
+test_sensor_reset_transaction_ack_failure (void)
+{
+  Goodix5135SensorResetTransaction transaction;
+  guint8 packet[GOODIX5135_USB_PACKET_LENGTH];
+  gsize logical_length = 0;
+
+  goodix5135_sensor_reset_transaction_init (
+    &transaction);
+
+  g_assert_true (
+    goodix5135_sensor_reset_transaction_begin (
+      &transaction,
+      packet,
+      sizeof (packet),
+      &logical_length));
+
+  g_assert_true (
+    goodix5135_sensor_reset_transaction_out_complete (
+      &transaction,
+      TRUE));
+
+  g_assert_false (
+    goodix5135_sensor_reset_transaction_ack_complete (
+      &transaction,
+      FALSE,
+      NULL,
+      0));
+
+  g_assert_cmpint (
+    transaction.state,
+    ==,
+    GOODIX5135_SENSOR_RESET_TRANSACTION_FAILED);
+}
+
+
+static void
+test_sensor_reset_transaction_response_failure (void)
+{
+  Goodix5135SensorResetTransaction transaction;
+  guint8 packet[GOODIX5135_USB_PACKET_LENGTH];
+  gsize logical_length = 0;
+  guint16 number = 0;
+
+  static const guint8 ack[GOODIX5135_USB_PACKET_LENGTH] = {
+    0xa0, 0x06, 0x00, 0xa6,
+    0xb0, 0x03, 0x00,
+    0xa2, 0x01,
+    0x54,
+  };
+
+  goodix5135_sensor_reset_transaction_init (
+    &transaction);
+
+  g_assert_true (
+    goodix5135_sensor_reset_transaction_begin (
+      &transaction,
+      packet,
+      sizeof (packet),
+      &logical_length));
+
+  g_assert_true (
+    goodix5135_sensor_reset_transaction_out_complete (
+      &transaction,
+      TRUE));
+
+  g_assert_true (
+    goodix5135_sensor_reset_transaction_ack_complete (
+      &transaction,
+      TRUE,
+      ack,
+      sizeof (ack)));
+
+  g_assert_false (
+    goodix5135_sensor_reset_transaction_response_complete (
+      &transaction,
+      FALSE,
+      NULL,
+      0,
+      &number));
+
+  g_assert_cmpint (
+    transaction.state,
+    ==,
+    GOODIX5135_SENSOR_RESET_TRANSACTION_FAILED);
+}
+
+
+static void
+test_sensor_reset_transaction_invalid_order (void)
+{
+  Goodix5135SensorResetTransaction transaction;
+
+  goodix5135_sensor_reset_transaction_init (
+    &transaction);
+
+  g_assert_false (
+    goodix5135_sensor_reset_transaction_out_complete (
+      &transaction,
+      TRUE));
+
+  g_assert_cmpint (
+    transaction.state,
+    ==,
+    GOODIX5135_SENSOR_RESET_TRANSACTION_FAILED);
+}
+
+
 int
 main (int argc, char **argv)
 {
@@ -3370,6 +3733,183 @@ main (int argc, char **argv)
 
 
                    test_enable_chip_transaction_invalid_order);
+
+
+
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/sensor-reset/request-vector",
+
+
+
+
+
+
+
+                   test_sensor_reset_request_vector);
+
+
+
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/sensor-reset/request-arguments",
+
+
+
+
+
+
+
+                   test_sensor_reset_request_arguments);
+
+
+
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/sensor-reset/ack",
+
+
+
+
+
+
+
+                   test_sensor_reset_ack);
+
+
+
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/sensor-reset/response-success",
+
+
+
+
+
+
+
+                   test_sensor_reset_response_success);
+
+
+
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/sensor-reset/response-negative",
+
+
+
+
+
+
+
+                   test_sensor_reset_response_negative);
+
+
+
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/sensor-reset/response-short",
+
+
+
+
+
+
+
+                   test_sensor_reset_response_short);
+
+
+
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/sensor-reset-transaction/happy-path",
+
+
+
+
+
+
+
+                   test_sensor_reset_transaction_happy_path);
+
+
+
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/sensor-reset-transaction/out-failure",
+
+
+
+
+
+
+
+                   test_sensor_reset_transaction_out_failure);
+
+
+
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/sensor-reset-transaction/ack-failure",
+
+
+
+
+
+
+
+                   test_sensor_reset_transaction_ack_failure);
+
+
+
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/sensor-reset-transaction/response-failure",
+
+
+
+
+
+
+
+                   test_sensor_reset_transaction_response_failure);
+
+
+
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/sensor-reset-transaction/invalid-order",
+
+
+
+
+
+
+
+                   test_sensor_reset_transaction_invalid_order);
+
 
 
 

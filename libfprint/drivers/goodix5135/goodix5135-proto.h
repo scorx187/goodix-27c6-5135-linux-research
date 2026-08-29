@@ -13,6 +13,7 @@
 #define GOODIX5135_COMMAND_NOP                  0x00U
 #define GOODIX5135_COMMAND_READ_SENSOR_REGISTER 0x82U
 #define GOODIX5135_COMMAND_ENABLE_CHIP          0x96U
+#define GOODIX5135_COMMAND_RESET                0xa2U
 #define GOODIX5135_COMMAND_FIRMWARE_VERSION     0xa8U
 #define GOODIX5135_COMMAND_QUERY_MCU_STATE      0xaeU
 #define GOODIX5135_COMMAND_ACK                  0xb0U
@@ -25,6 +26,21 @@
 #define GOODIX5135_MCU_STATE_REQUEST_LENGTH      9U
 #define GOODIX5135_D4_REQUEST_LENGTH             10U
 #define GOODIX5135_ENABLE_CHIP_REQUEST_LENGTH    10U
+#define GOODIX5135_SENSOR_RESET_REQUEST_LENGTH   10U
+
+/*
+ * Exact historical ChicagoHU reset gate:
+ *
+ * reset(True, False, 20)
+ *
+ * bit0 = reset sensor
+ * bit1 = soft reset MCU
+ * bit2 = reset sensor copy/related block
+ *
+ * TRUE/FALSE therefore produces flags 0x05.
+ */
+#define GOODIX5135_SENSOR_RESET_FLAGS            0x05U
+#define GOODIX5135_SENSOR_RESET_DELAY            20U
 
 #define GOODIX5135_IMAGE_COMMAND             0x20U
 #define GOODIX5135_PROTOCOL_TRAILER          0x88U
@@ -66,6 +82,21 @@ typedef struct
   Goodix5135RegisterReadTransactionState state;
   gsize                                  expected_length;
 } Goodix5135RegisterReadTransaction;
+
+typedef enum
+{
+  GOODIX5135_SENSOR_RESET_TRANSACTION_IDLE = 0,
+  GOODIX5135_SENSOR_RESET_TRANSACTION_WAIT_OUT,
+  GOODIX5135_SENSOR_RESET_TRANSACTION_WAIT_ACK,
+  GOODIX5135_SENSOR_RESET_TRANSACTION_WAIT_RESPONSE,
+  GOODIX5135_SENSOR_RESET_TRANSACTION_DONE,
+  GOODIX5135_SENSOR_RESET_TRANSACTION_FAILED,
+} Goodix5135SensorResetTransactionState;
+
+typedef struct
+{
+  Goodix5135SensorResetTransactionState state;
+} Goodix5135SensorResetTransaction;
 
 typedef enum
 {
@@ -274,6 +305,86 @@ gboolean goodix5135_register_read_transaction_response_complete (
   gsize                              data_length,
   const guint8                     **value,
   gsize                             *value_length);
+
+
+/*
+ * Build the exact historical sensor reset:
+ *
+ *   reset(True, False, 20)
+ *
+ * Payload:
+ *   05 14
+ *
+ * Exact logical frame:
+ *
+ *   a0 06 00 a6
+ *   a2 03 00
+ *   05 14
+ *   ec
+ *
+ * This helper performs no USB operation.
+ */
+gboolean goodix5135_build_sensor_reset_request (
+  guint8 *packet,
+  gsize   packet_size,
+  gsize  *logical_length);
+
+/*
+ * Parse the ACK specifically belonging to RESET 0xa2.
+ */
+gboolean goodix5135_parse_sensor_reset_ack (
+  const guint8 *data,
+  gsize         data_length);
+
+/*
+ * Parse the normal reset response.
+ *
+ * Expected payload:
+ *
+ *   byte 0: 0x01 on success
+ *   byte 1..2: little-endian result number
+ *
+ * No response bytes are persisted or logged.
+ */
+gboolean goodix5135_parse_sensor_reset_response (
+  const guint8 *data,
+  gsize         data_length,
+  guint16      *result_number);
+
+/*
+ * Host-only reset transaction:
+ *
+ * IDLE
+ *  -> WAIT_OUT
+ *  -> WAIT_ACK
+ *  -> WAIT_RESPONSE
+ *  -> DONE
+ */
+void goodix5135_sensor_reset_transaction_init (
+  Goodix5135SensorResetTransaction *transaction);
+
+gboolean goodix5135_sensor_reset_transaction_begin (
+  Goodix5135SensorResetTransaction *transaction,
+  guint8                           *packet,
+  gsize                             packet_size,
+  gsize                            *logical_length);
+
+gboolean goodix5135_sensor_reset_transaction_out_complete (
+  Goodix5135SensorResetTransaction *transaction,
+  gboolean                          transport_can_advance);
+
+gboolean goodix5135_sensor_reset_transaction_ack_complete (
+  Goodix5135SensorResetTransaction *transaction,
+  gboolean                          transport_can_advance,
+  const guint8                     *data,
+  gsize                             data_length);
+
+gboolean goodix5135_sensor_reset_transaction_response_complete (
+  Goodix5135SensorResetTransaction *transaction,
+  gboolean                          transport_can_advance,
+  const guint8                     *data,
+  gsize                             data_length,
+  guint16                          *result_number);
 
 
 /*
