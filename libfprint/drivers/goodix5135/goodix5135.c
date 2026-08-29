@@ -3,9 +3,11 @@
  *
  * Host-side libfprint lifecycle scaffold.
  *
- * IMPORTANT:
- * This revision does not send any Goodix protocol command.
- * No FpiUsbTransfer is submitted by this driver yet.
+ * Runtime bring-up remains deliberately bounded:
+ * OPEN performs only read-only Goodix transactions.
+ *
+ * No reset, activation/configuration command, TLS session,
+ * register write, or biometric capture is performed here.
  */
 
 #define FP_COMPONENT "goodix5135"
@@ -30,6 +32,7 @@ struct _FpiDeviceGoodix5135
   Goodix5135IoLifecycle         io;
   Goodix5135QueueCleanup        queue_cleanup;
   Goodix5135FirmwareTransaction firmware_transaction;
+  Goodix5135RegisterReadTransaction register_read_transaction;
 };
 
 G_DECLARE_FINAL_TYPE (FpiDeviceGoodix5135,
@@ -76,6 +79,15 @@ static const FpIdEntry goodix5135_id_table[] = {
 #define GOODIX5135_QUEUE_CLEANUP_TIMEOUT_MS 100U
 #define GOODIX5135_QUEUE_CLEANUP_MAX_PACKETS 8U
 
+/*
+ * First runtime register proof.
+ *
+ * 0x0220 is read-only here. Its returned bytes are validated for framing
+ * and minimum length only; they are never logged, copied, or persisted.
+ */
+#define GOODIX5135_REGISTER_PROBE_ADDRESS 0x0220U
+#define GOODIX5135_REGISTER_PROBE_LENGTH  2U
+
 static void goodix5135_queue_cleanup_cb (
   FpDevice                       *device,
   FpiUsbTransfer                 *transfer,
@@ -96,6 +108,30 @@ static void goodix5135_firmware_response_cb (
   Goodix5135RequestCompletion     completion,
   GError                         *error,
   gpointer                        user_data);
+
+static void goodix5135_register_out_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data);
+
+static void goodix5135_register_ack_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data);
+
+static void goodix5135_register_response_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data);
+
+static void goodix5135_start_register_read_transaction (
+  FpDevice *device);
 
 static void
 goodix5135_open_transaction_fail (FpDevice    *device,
@@ -405,6 +441,223 @@ goodix5135_firmware_response_cb (
   firmware = NULL;
   firmware_length = 0;
 
+  fp_dbg ("Firmware response validated; starting read-only register probe");
+
+  goodix5135_start_register_read_transaction (
+    device);
+}
+
+static void
+goodix5135_register_out_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (device);
+  gboolean transport_can_advance;
+
+  (void) user_data;
+
+  transport_can_advance =
+    goodix5135_async_result_can_advance (
+      completion,
+      error);
+
+  if (transport_can_advance &&
+      (transfer == NULL ||
+       transfer->actual_length !=
+         GOODIX5135_USB_PACKET_LENGTH))
+    transport_can_advance = FALSE;
+
+  g_clear_error (&error);
+
+  if (!goodix5135_register_read_transaction_out_complete (
+        &self->register_read_transaction,
+        transport_can_advance))
+    {
+      goodix5135_open_transaction_fail (
+        device,
+        "Goodix read-only register request transport failed");
+      return;
+    }
+
+  if (!goodix5135_async_submit (
+        device,
+        &self->io,
+        GOODIX5135_REQUEST_BULK_IN,
+        GOODIX5135_USB_PACKET_LENGTH,
+        GOODIX5135_FIRMWARE_IO_TIMEOUT_MS,
+        NULL,
+        0,
+        goodix5135_register_ack_cb,
+        NULL))
+    {
+      goodix5135_register_read_transaction_ack_complete (
+        &self->register_read_transaction,
+        FALSE,
+        NULL,
+        0);
+
+      goodix5135_open_transaction_fail (
+        device,
+        "Could not submit Goodix register-read ACK receive");
+    }
+}
+
+
+static void
+goodix5135_register_ack_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (device);
+  gboolean transport_can_advance;
+  gboolean protocol_ok;
+
+  (void) user_data;
+
+  transport_can_advance =
+    goodix5135_in_transfer_can_parse (
+      transfer,
+      completion,
+      error);
+
+  if (transport_can_advance)
+    {
+      protocol_ok =
+        goodix5135_register_read_transaction_ack_complete (
+          &self->register_read_transaction,
+          TRUE,
+          transfer->buffer,
+          (gsize) transfer->actual_length);
+    }
+  else
+    {
+      protocol_ok =
+        goodix5135_register_read_transaction_ack_complete (
+          &self->register_read_transaction,
+          FALSE,
+          NULL,
+          0);
+    }
+
+  g_clear_error (&error);
+
+  if (!protocol_ok)
+    {
+      goodix5135_open_transaction_fail (
+        device,
+        "Goodix register-read ACK was not valid");
+      return;
+    }
+
+  if (!goodix5135_async_submit (
+        device,
+        &self->io,
+        GOODIX5135_REQUEST_BULK_IN,
+        GOODIX5135_USB_PACKET_LENGTH,
+        GOODIX5135_FIRMWARE_IO_TIMEOUT_MS,
+        NULL,
+        0,
+        goodix5135_register_response_cb,
+        NULL))
+    {
+      const guint8 *unused_value = NULL;
+      gsize unused_length = 0;
+
+      goodix5135_register_read_transaction_response_complete (
+        &self->register_read_transaction,
+        FALSE,
+        NULL,
+        0,
+        &unused_value,
+        &unused_length);
+
+      goodix5135_open_transaction_fail (
+        device,
+        "Could not submit Goodix register-read response receive");
+    }
+}
+
+
+static void
+goodix5135_register_response_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (device);
+  FpImageDevice *dev =
+    FP_IMAGE_DEVICE (device);
+  gboolean transport_can_advance;
+  gboolean protocol_ok;
+  const guint8 *value = NULL;
+  gsize value_length = 0;
+
+  (void) user_data;
+
+  transport_can_advance =
+    goodix5135_in_transfer_can_parse (
+      transfer,
+      completion,
+      error);
+
+  if (transport_can_advance)
+    {
+      protocol_ok =
+        goodix5135_register_read_transaction_response_complete (
+          &self->register_read_transaction,
+          TRUE,
+          transfer->buffer,
+          (gsize) transfer->actual_length,
+          &value,
+          &value_length);
+    }
+  else
+    {
+      protocol_ok =
+        goodix5135_register_read_transaction_response_complete (
+          &self->register_read_transaction,
+          FALSE,
+          NULL,
+          0,
+          &value,
+          &value_length);
+    }
+
+  g_clear_error (&error);
+
+  if (!protocol_ok ||
+      self->register_read_transaction.state !=
+        GOODIX5135_REGISTER_READ_TRANSACTION_DONE ||
+      value == NULL ||
+      value_length < GOODIX5135_REGISTER_PROBE_LENGTH)
+    {
+      goodix5135_open_transaction_fail (
+        device,
+        "Goodix read-only register response validation failed");
+      return;
+    }
+
+  /*
+   * Do not print or retain register bytes.
+   * Successful framing/length validation is sufficient for this gate.
+   */
+  value = NULL;
+  value_length = 0;
+
+  fp_dbg ("Read-only register probe 0x0220 validated");
+
   goodix5135_io_stop (&self->io);
 
   g_assert (
@@ -415,6 +668,70 @@ goodix5135_firmware_response_cb (
     dev,
     NULL);
 }
+
+
+static void
+goodix5135_start_register_read_transaction (
+  FpDevice *device)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (device);
+  guint8 packet[GOODIX5135_USB_PACKET_LENGTH];
+  gsize logical_length = 0;
+
+  goodix5135_register_read_transaction_init (
+    &self->register_read_transaction);
+
+  if (!goodix5135_register_read_transaction_begin (
+        &self->register_read_transaction,
+        GOODIX5135_REGISTER_PROBE_ADDRESS,
+        GOODIX5135_REGISTER_PROBE_LENGTH,
+        packet,
+        sizeof (packet),
+        &logical_length))
+    {
+      goodix5135_open_transaction_fail (
+        device,
+        "Could not build Goodix read-only register request");
+      return;
+    }
+
+  if (logical_length !=
+      GOODIX5135_REGISTER_READ_REQUEST_LENGTH)
+    {
+      goodix5135_register_read_transaction_out_complete (
+        &self->register_read_transaction,
+        FALSE);
+
+      goodix5135_open_transaction_fail (
+        device,
+        "Unexpected Goodix register-read request length");
+      return;
+    }
+
+  fp_dbg ("Submitting read-only register probe 0x0220");
+
+  if (!goodix5135_async_submit (
+        device,
+        &self->io,
+        GOODIX5135_REQUEST_BULK_OUT,
+        GOODIX5135_USB_PACKET_LENGTH,
+        GOODIX5135_FIRMWARE_IO_TIMEOUT_MS,
+        packet,
+        sizeof (packet),
+        goodix5135_register_out_cb,
+        NULL))
+    {
+      goodix5135_register_read_transaction_out_complete (
+        &self->register_read_transaction,
+        FALSE);
+
+      goodix5135_open_transaction_fail (
+        device,
+        "Could not submit Goodix read-only register request");
+    }
+}
+
 
 static void
 goodix5135_start_firmware_version_transaction (
@@ -817,6 +1134,9 @@ fpi_device_goodix5135_init (FpiDeviceGoodix5135 *self)
 
   goodix5135_firmware_transaction_init (
     &self->firmware_transaction);
+
+  goodix5135_register_read_transaction_init (
+    &self->register_read_transaction);
 }
 
 static void
