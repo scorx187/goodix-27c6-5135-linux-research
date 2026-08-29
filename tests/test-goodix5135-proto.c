@@ -287,14 +287,35 @@ test_firmware_ack_success_padded (void)
 }
 
 static void
-test_firmware_ack_negative (void)
+test_firmware_ack_bit1_clear (void)
 {
   /*
-   * a8 01 is structurally valid but success bit 1 is clear.
+   * Reference-compatible ACK:
+   *
+   * bit 0 is set, so the ACK is structurally valid.
+   * bit 1 is clear, but the reference firmware_version() path ignores
+   * the boolean returned for that bit.
    */
   static const guint8 ack[] = {
     0xa0, 0x06, 0x00, 0xa6,
     0xb0, 0x03, 0x00, 0xa8, 0x01, 0x4e,
+  };
+
+  g_assert_true (
+    goodix5135_parse_firmware_version_ack (
+      ack,
+      sizeof (ack)));
+}
+
+static void
+test_firmware_ack_negative (void)
+{
+  /*
+   * bit 0 is clear, so decode_ack() semantics classify this ACK as invalid.
+   */
+  static const guint8 ack[] = {
+    0xa0, 0x06, 0x00, 0xa6,
+    0xb0, 0x03, 0x00, 0xa8, 0x00, 0x4f,
   };
 
   g_assert_false (
@@ -578,7 +599,7 @@ static const guint8 firmware_success_ack[] = {
 
 static const guint8 firmware_negative_ack[] = {
   0xa0, 0x06, 0x00, 0xa6,
-  0xb0, 0x03, 0x00, 0xa8, 0x01, 0x4e,
+  0xb0, 0x03, 0x00, 0xa8, 0x00, 0x4f,
 };
 
 static const guint8 firmware_valid_response[] = {
@@ -961,6 +982,7 @@ main (int argc, char **argv)
   g_test_add_func ("/goodix5135/proto/firmware-ack/success-padded",
                    test_firmware_ack_success_padded);
 
+  g_test_add_func ("/goodix5135/proto/firmware-ack/bit1-clear", test_firmware_ack_bit1_clear);
   g_test_add_func ("/goodix5135/proto/firmware-ack/negative",
                    test_firmware_ack_negative);
 

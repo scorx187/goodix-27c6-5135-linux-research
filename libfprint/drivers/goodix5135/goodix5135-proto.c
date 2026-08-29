@@ -220,16 +220,19 @@ goodix5135_parse_firmware_version_ack (
    * Reference semantics:
    *
    * bit 0 = ACK structure valid
-   * bit 1 = operation success
+   * bit 1 = auxiliary boolean status
    *
-   * Therefore:
-   *   0x01 = valid negative ACK
-   *   0x03 = valid successful ACK
+   * The reference check_ack() returns bit 1 to its caller, but all known
+   * command call sites (including firmware_version()) ignore that return
+   * value.  They require only:
+   *
+   *   - valid ACK framing/checksum
+   *   - matching acknowledged command
+   *   - bit 0 set
+   *
+   * Therefore both 0x01 and 0x03 are valid ACK status values here.
    */
   if ((status & 0x01U) == 0)
-    return FALSE;
-
-  if ((status & 0x02U) == 0)
     return FALSE;
 
   return TRUE;
