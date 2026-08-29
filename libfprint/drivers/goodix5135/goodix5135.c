@@ -3377,6 +3377,105 @@ goodix5135_stage_current_config_packet (
   return TRUE;
 }
 
+/*
+ * Advance the prepared CFG70 transaction after exactly one staged
+ * 64-byte OUT packet has completed.
+ *
+ * This helper performs no USB I/O.
+ */
+static gboolean G_GNUC_UNUSED
+goodix5135_complete_config_out_packet (
+  FpiDeviceGoodix5135 *self,
+  gboolean             transport_ok)
+{
+  g_assert (self != NULL);
+
+  if (!self->config_prepared ||
+      !self->config_transport_armed ||
+      self->config_upload_transaction.state !=
+        GOODIX5135_CONFIG_UPLOAD_TRANSACTION_WAIT_OUT)
+    return FALSE;
+
+  return
+    goodix5135_config_upload_transaction_out_complete (
+      &self->config_upload_transaction,
+      transport_ok);
+}
+
+
+/*
+ * Advance the CFG70 transaction after the command acknowledgement has
+ * been received.
+ *
+ * The response bytes are parsed by the protocol layer.  This helper
+ * performs no USB I/O.
+ */
+static gboolean G_GNUC_UNUSED
+goodix5135_complete_config_ack (
+  FpiDeviceGoodix5135 *self,
+  gboolean             transport_ok,
+  const guint8        *response,
+  gsize                response_length)
+{
+  g_assert (self != NULL);
+
+  if (!self->config_prepared ||
+      !self->config_transport_armed ||
+      self->config_upload_transaction.state !=
+        GOODIX5135_CONFIG_UPLOAD_TRANSACTION_WAIT_ACK)
+    return FALSE;
+
+  return
+    goodix5135_config_upload_transaction_ack_complete (
+      &self->config_upload_transaction,
+      transport_ok,
+      response,
+      response_length);
+}
+
+
+/*
+ * Complete the CFG70 protocol transaction after the final response.
+ *
+ * This helper only advances protocol state.  Lifecycle cleanup and
+ * open completion remain the responsibility of the future live
+ * transport caller.
+ *
+ * This helper performs no USB I/O.
+ */
+static gboolean G_GNUC_UNUSED
+goodix5135_complete_config_response (
+  FpiDeviceGoodix5135 *self,
+  gboolean             transport_ok,
+  const guint8        *response,
+  gsize                response_length)
+{
+  gboolean ok;
+
+  g_assert (self != NULL);
+
+  if (!self->config_prepared ||
+      !self->config_transport_armed ||
+      self->config_upload_transaction.state !=
+        GOODIX5135_CONFIG_UPLOAD_TRANSACTION_WAIT_RESPONSE)
+    return FALSE;
+
+  ok =
+    goodix5135_config_upload_transaction_response_complete (
+      &self->config_upload_transaction,
+      transport_ok,
+      response,
+      response_length);
+
+  if (!ok)
+    return FALSE;
+
+  return
+    self->config_upload_transaction.state ==
+      GOODIX5135_CONFIG_UPLOAD_TRANSACTION_DONE;
+}
+
+
 
 
 static void
