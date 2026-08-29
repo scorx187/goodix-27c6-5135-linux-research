@@ -36,6 +36,16 @@ struct _FpiDeviceGoodix5135
   Goodix5135RegisterReadTransaction register_read_transaction;
   Goodix5135McuStateTransaction     mcu_state_transaction;
   Goodix5135NopTransaction          nop_transaction;
+
+  /*
+   * Guarded volatile activation state.
+   *
+   * No PSK/config/template/biometric material is stored here.
+   */
+  Goodix5135TlsEstablishedTransaction d4_transaction;
+  Goodix5135EnableChipTransaction      enable_chip_transaction;
+  Goodix5135SensorResetTransaction     sensor_reset_transaction;
+  Goodix5135ActivationSequence         activation_sequence;
 };
 
 G_DECLARE_FINAL_TYPE (FpiDeviceGoodix5135,
@@ -102,6 +112,19 @@ static const FpIdEntry goodix5135_id_table[] = {
  * NOP ACK. Only an actual USB timed-out error is treated as success.
  */
 #define GOODIX5135_NOP_ACK_TIMEOUT_MS 100U
+
+/*
+ * Final activation identity gate.
+ *
+ * READ_SENSOR_REGISTER only:
+ *   address 0x0000
+ *   length  4
+ *
+ * Expected logical chip bytes are checked by the host-only
+ * activation controller and are never persisted.
+ */
+#define GOODIX5135_ACTIVATION_CHIP_ID_ADDRESS 0x0000U
+#define GOODIX5135_ACTIVATION_CHIP_ID_LENGTH  GOODIX5135_CHIP_ID_LENGTH
 
 static void goodix5135_queue_cleanup_cb (
   FpDevice                       *device,
@@ -187,6 +210,115 @@ static void goodix5135_nop_reply_cb (
   gpointer                        user_data);
 
 static void goodix5135_start_nop_transaction (
+  FpDevice *device);
+
+static void goodix5135_activation_continue_after_nop (
+  FpDevice *device);
+
+static void goodix5135_activation_d4_out_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data);
+
+static void goodix5135_activation_d4_ack_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data);
+
+static void goodix5135_start_activation_d4 (
+  FpDevice *device);
+
+static void goodix5135_activation_enable_out_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data);
+
+static void goodix5135_activation_enable_ack_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data);
+
+static void goodix5135_start_activation_enable (
+  FpDevice *device);
+
+static void goodix5135_activation_firmware_out_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data);
+
+static void goodix5135_activation_firmware_ack_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data);
+
+static void goodix5135_activation_firmware_response_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data);
+
+static void goodix5135_start_activation_firmware (
+  FpDevice *device);
+
+static void goodix5135_activation_reset_out_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data);
+
+static void goodix5135_activation_reset_ack_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data);
+
+static void goodix5135_activation_reset_response_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data);
+
+static void goodix5135_start_activation_reset (
+  FpDevice *device);
+
+static void goodix5135_activation_chip_id_out_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data);
+
+static void goodix5135_activation_chip_id_ack_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data);
+
+static void goodix5135_activation_chip_id_response_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data);
+
+static void goodix5135_start_activation_chip_id_read (
   FpDevice *device);
 
 static void
@@ -1009,8 +1141,6 @@ goodix5135_nop_reply_cb (
 {
   FpiDeviceGoodix5135 *self =
     FPI_DEVICE_GOODIX5135 (device);
-  FpImageDevice *dev =
-    FP_IMAGE_DEVICE (device);
   Goodix5135NopReplyResult result;
   gboolean protocol_ok;
   gboolean received_ok;
@@ -1107,7 +1237,1500 @@ goodix5135_nop_reply_cb (
       return;
     }
 
-  goodix5135_io_stop (&self->io);
+  /*
+   * The first completed NOP is the final read-only OPEN gate.
+   * Later completed NOPs are the three ordered activation gates.
+   */
+  goodix5135_activation_continue_after_nop (
+    device);
+}
+
+
+static void
+goodix5135_activation_continue_after_nop (
+  FpDevice *device)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (device);
+
+  /*
+   * activation_sequence remains IDLE throughout all previous
+   * read-only OPEN gates.
+   *
+   * Therefore the first successful bounded NOP starts the
+   * guarded state-changing activation sequence but does not
+   * itself count as NOP #1.
+   */
+  if (self->activation_sequence.state ==
+      GOODIX5135_ACTIVATION_IDLE)
+    {
+      if (!goodix5135_activation_sequence_begin (
+            &self->activation_sequence))
+        {
+          goodix5135_open_transaction_fail (
+            device,
+            "Could not begin Goodix activation sequence");
+          return;
+        }
+
+      if (self->activation_sequence.state !=
+          GOODIX5135_ACTIVATION_WAIT_NOP1)
+        {
+          goodix5135_open_transaction_fail (
+            device,
+            "Goodix activation sequence did not enter NOP1");
+          return;
+        }
+
+      fp_dbg (
+        "Read-only OPEN gates validated; starting activation NOP #1");
+
+      goodix5135_start_nop_transaction (
+        device);
+
+      return;
+    }
+
+  /*
+   * Every subsequent successful bounded NOP must correspond
+   * exactly to NOP1, NOP2, or NOP3 in the host controller.
+   */
+  if (!goodix5135_activation_sequence_nop_complete (
+        &self->activation_sequence,
+        TRUE))
+    {
+      goodix5135_open_transaction_fail (
+        device,
+        "Goodix activation NOP occurred out of order");
+      return;
+    }
+
+  switch (self->activation_sequence.state)
+    {
+    case GOODIX5135_ACTIVATION_WAIT_D4:
+      fp_dbg (
+        "Activation NOP #1 validated; starting 0xD4 signal");
+
+      goodix5135_start_activation_d4 (
+        device);
+      return;
+
+    case GOODIX5135_ACTIVATION_WAIT_ENABLE_CHIP:
+      fp_dbg (
+        "Activation NOP #2 validated; starting ENABLE_CHIP true");
+
+      goodix5135_start_activation_enable (
+        device);
+      return;
+
+    case GOODIX5135_ACTIVATION_WAIT_FIRMWARE:
+      fp_dbg (
+        "Activation NOP #3 validated; starting firmware gate");
+
+      goodix5135_start_activation_firmware (
+        device);
+      return;
+
+    case GOODIX5135_ACTIVATION_IDLE:
+    case GOODIX5135_ACTIVATION_WAIT_NOP1:
+    case GOODIX5135_ACTIVATION_WAIT_NOP2:
+    case GOODIX5135_ACTIVATION_WAIT_NOP3:
+    case GOODIX5135_ACTIVATION_WAIT_RESET:
+    case GOODIX5135_ACTIVATION_WAIT_CHIP_ID:
+    case GOODIX5135_ACTIVATION_DONE:
+    case GOODIX5135_ACTIVATION_FAILED:
+      goodix5135_open_transaction_fail (
+        device,
+        "Goodix activation NOP advanced to an invalid state");
+      return;
+    }
+}
+
+
+static void
+goodix5135_activation_d4_out_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (device);
+
+  gboolean transport_can_advance;
+
+  (void) user_data;
+
+  transport_can_advance =
+    goodix5135_async_result_can_advance (
+      completion,
+      error);
+
+  if (transport_can_advance &&
+      (transfer == NULL ||
+       transfer->actual_length !=
+         GOODIX5135_USB_PACKET_LENGTH))
+    transport_can_advance = FALSE;
+
+  g_clear_error (&error);
+
+  if (!goodix5135_d4_transaction_out_complete (
+        &self->d4_transaction,
+        transport_can_advance))
+    {
+      goodix5135_activation_sequence_d4_complete (
+        &self->activation_sequence,
+        FALSE);
+
+      goodix5135_open_transaction_fail (
+        device,
+        "Goodix 0xD4 OUT transport failed");
+      return;
+    }
+
+  if (!goodix5135_async_submit (
+        device,
+        &self->io,
+        GOODIX5135_REQUEST_BULK_IN,
+        GOODIX5135_USB_PACKET_LENGTH,
+        GOODIX5135_FIRMWARE_IO_TIMEOUT_MS,
+        NULL,
+        0,
+        goodix5135_activation_d4_ack_cb,
+        NULL))
+    {
+      goodix5135_d4_transaction_ack_complete (
+        &self->d4_transaction,
+        FALSE,
+        NULL,
+        0);
+
+      goodix5135_activation_sequence_d4_complete (
+        &self->activation_sequence,
+        FALSE);
+
+      goodix5135_open_transaction_fail (
+        device,
+        "Could not submit Goodix 0xD4 ACK receive");
+    }
+}
+
+
+static void
+goodix5135_activation_d4_ack_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (device);
+
+  gboolean transport_can_advance;
+  gboolean protocol_ok;
+
+  (void) user_data;
+
+  transport_can_advance =
+    goodix5135_in_transfer_can_parse (
+      transfer,
+      completion,
+      error);
+
+  protocol_ok =
+    goodix5135_d4_transaction_ack_complete (
+      &self->d4_transaction,
+      transport_can_advance,
+      transport_can_advance
+        ? transfer->buffer
+        : NULL,
+      transport_can_advance
+        ? (gsize) transfer->actual_length
+        : 0);
+
+  g_clear_error (&error);
+
+  if (!protocol_ok ||
+      self->d4_transaction.state !=
+        GOODIX5135_D4_TRANSACTION_DONE)
+    {
+      goodix5135_activation_sequence_d4_complete (
+        &self->activation_sequence,
+        FALSE);
+
+      goodix5135_open_transaction_fail (
+        device,
+        transport_can_advance
+          ? "Goodix 0xD4 returned invalid ACK"
+          : "Goodix 0xD4 ACK transport failed");
+      return;
+    }
+
+  if (!goodix5135_activation_sequence_d4_complete (
+        &self->activation_sequence,
+        TRUE))
+    {
+      goodix5135_open_transaction_fail (
+        device,
+        "Goodix 0xD4 completed out of activation order");
+      return;
+    }
+
+  if (self->activation_sequence.state !=
+      GOODIX5135_ACTIVATION_WAIT_NOP2)
+    {
+      goodix5135_open_transaction_fail (
+        device,
+        "Goodix activation did not enter NOP2");
+      return;
+    }
+
+  fp_dbg (
+    "0xD4 ACK validated; starting activation NOP #2");
+
+  goodix5135_start_nop_transaction (
+    device);
+}
+
+
+static void
+goodix5135_start_activation_d4 (
+  FpDevice *device)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (device);
+
+  guint8 packet[GOODIX5135_USB_PACKET_LENGTH];
+  gsize logical_length = 0;
+
+  if (self->activation_sequence.state !=
+      GOODIX5135_ACTIVATION_WAIT_D4)
+    {
+      goodix5135_open_transaction_fail (
+        device,
+        "Attempted Goodix 0xD4 outside activation D4 gate");
+      return;
+    }
+
+  goodix5135_d4_transaction_init (
+    &self->d4_transaction);
+
+  if (!goodix5135_d4_transaction_begin (
+        &self->d4_transaction,
+        packet,
+        sizeof (packet),
+        &logical_length))
+    {
+      goodix5135_activation_sequence_d4_complete (
+        &self->activation_sequence,
+        FALSE);
+
+      goodix5135_open_transaction_fail (
+        device,
+        "Could not build Goodix 0xD4 request");
+      return;
+    }
+
+  if (logical_length !=
+      GOODIX5135_D4_REQUEST_LENGTH)
+    {
+      goodix5135_d4_transaction_out_complete (
+        &self->d4_transaction,
+        FALSE);
+
+      goodix5135_activation_sequence_d4_complete (
+        &self->activation_sequence,
+        FALSE);
+
+      goodix5135_open_transaction_fail (
+        device,
+        "Unexpected Goodix 0xD4 request length");
+      return;
+    }
+
+  fp_dbg ("Submitting guarded Goodix 0xD4 signal");
+
+  if (!goodix5135_async_submit (
+        device,
+        &self->io,
+        GOODIX5135_REQUEST_BULK_OUT,
+        GOODIX5135_USB_PACKET_LENGTH,
+        GOODIX5135_FIRMWARE_IO_TIMEOUT_MS,
+        packet,
+        sizeof (packet),
+        goodix5135_activation_d4_out_cb,
+        NULL))
+    {
+      goodix5135_d4_transaction_out_complete (
+        &self->d4_transaction,
+        FALSE);
+
+      goodix5135_activation_sequence_d4_complete (
+        &self->activation_sequence,
+        FALSE);
+
+      goodix5135_open_transaction_fail (
+        device,
+        "Could not submit Goodix 0xD4 request");
+    }
+}
+
+
+static void
+goodix5135_activation_enable_out_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (device);
+
+  gboolean transport_can_advance;
+
+  (void) user_data;
+
+  transport_can_advance =
+    goodix5135_async_result_can_advance (
+      completion,
+      error);
+
+  if (transport_can_advance &&
+      (transfer == NULL ||
+       transfer->actual_length !=
+         GOODIX5135_USB_PACKET_LENGTH))
+    transport_can_advance = FALSE;
+
+  g_clear_error (&error);
+
+  if (!goodix5135_enable_chip_transaction_out_complete (
+        &self->enable_chip_transaction,
+        transport_can_advance))
+    {
+      goodix5135_activation_sequence_enable_chip_complete (
+        &self->activation_sequence,
+        FALSE);
+
+      goodix5135_open_transaction_fail (
+        device,
+        "Goodix ENABLE_CHIP OUT transport failed");
+      return;
+    }
+
+  if (!goodix5135_async_submit (
+        device,
+        &self->io,
+        GOODIX5135_REQUEST_BULK_IN,
+        GOODIX5135_USB_PACKET_LENGTH,
+        GOODIX5135_FIRMWARE_IO_TIMEOUT_MS,
+        NULL,
+        0,
+        goodix5135_activation_enable_ack_cb,
+        NULL))
+    {
+      goodix5135_enable_chip_transaction_ack_complete (
+        &self->enable_chip_transaction,
+        FALSE,
+        NULL,
+        0);
+
+      goodix5135_activation_sequence_enable_chip_complete (
+        &self->activation_sequence,
+        FALSE);
+
+      goodix5135_open_transaction_fail (
+        device,
+        "Could not submit Goodix ENABLE_CHIP ACK receive");
+    }
+}
+
+
+static void
+goodix5135_activation_enable_ack_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (device);
+
+  gboolean transport_can_advance;
+  gboolean protocol_ok;
+
+  (void) user_data;
+
+  transport_can_advance =
+    goodix5135_in_transfer_can_parse (
+      transfer,
+      completion,
+      error);
+
+  protocol_ok =
+    goodix5135_enable_chip_transaction_ack_complete (
+      &self->enable_chip_transaction,
+      transport_can_advance,
+      transport_can_advance
+        ? transfer->buffer
+        : NULL,
+      transport_can_advance
+        ? (gsize) transfer->actual_length
+        : 0);
+
+  g_clear_error (&error);
+
+  if (!protocol_ok ||
+      self->enable_chip_transaction.state !=
+        GOODIX5135_ENABLE_CHIP_TRANSACTION_DONE)
+    {
+      goodix5135_activation_sequence_enable_chip_complete (
+        &self->activation_sequence,
+        FALSE);
+
+      goodix5135_open_transaction_fail (
+        device,
+        transport_can_advance
+          ? "Goodix ENABLE_CHIP returned invalid ACK"
+          : "Goodix ENABLE_CHIP ACK transport failed");
+      return;
+    }
+
+  if (!goodix5135_activation_sequence_enable_chip_complete (
+        &self->activation_sequence,
+        TRUE))
+    {
+      goodix5135_open_transaction_fail (
+        device,
+        "Goodix ENABLE_CHIP completed out of activation order");
+      return;
+    }
+
+  if (self->activation_sequence.state !=
+      GOODIX5135_ACTIVATION_WAIT_NOP3)
+    {
+      goodix5135_open_transaction_fail (
+        device,
+        "Goodix activation did not enter NOP3");
+      return;
+    }
+
+  fp_dbg (
+    "ENABLE_CHIP true ACK validated; starting activation NOP #3");
+
+  goodix5135_start_nop_transaction (
+    device);
+}
+
+
+static void
+goodix5135_start_activation_enable (
+  FpDevice *device)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (device);
+
+  guint8 packet[GOODIX5135_USB_PACKET_LENGTH];
+  gsize logical_length = 0;
+
+  if (self->activation_sequence.state !=
+      GOODIX5135_ACTIVATION_WAIT_ENABLE_CHIP)
+    {
+      goodix5135_open_transaction_fail (
+        device,
+        "Attempted ENABLE_CHIP outside activation gate");
+      return;
+    }
+
+  goodix5135_enable_chip_transaction_init (
+    &self->enable_chip_transaction);
+
+  if (!goodix5135_enable_chip_transaction_begin (
+        &self->enable_chip_transaction,
+        TRUE,
+        packet,
+        sizeof (packet),
+        &logical_length))
+    {
+      goodix5135_activation_sequence_enable_chip_complete (
+        &self->activation_sequence,
+        FALSE);
+
+      goodix5135_open_transaction_fail (
+        device,
+        "Could not build Goodix ENABLE_CHIP true request");
+      return;
+    }
+
+  if (logical_length !=
+      GOODIX5135_ENABLE_CHIP_REQUEST_LENGTH)
+    {
+      goodix5135_enable_chip_transaction_out_complete (
+        &self->enable_chip_transaction,
+        FALSE);
+
+      goodix5135_activation_sequence_enable_chip_complete (
+        &self->activation_sequence,
+        FALSE);
+
+      goodix5135_open_transaction_fail (
+        device,
+        "Unexpected Goodix ENABLE_CHIP request length");
+      return;
+    }
+
+  fp_dbg ("Submitting guarded Goodix ENABLE_CHIP true");
+
+  if (!goodix5135_async_submit (
+        device,
+        &self->io,
+        GOODIX5135_REQUEST_BULK_OUT,
+        GOODIX5135_USB_PACKET_LENGTH,
+        GOODIX5135_FIRMWARE_IO_TIMEOUT_MS,
+        packet,
+        sizeof (packet),
+        goodix5135_activation_enable_out_cb,
+        NULL))
+    {
+      goodix5135_enable_chip_transaction_out_complete (
+        &self->enable_chip_transaction,
+        FALSE);
+
+      goodix5135_activation_sequence_enable_chip_complete (
+        &self->activation_sequence,
+        FALSE);
+
+      goodix5135_open_transaction_fail (
+        device,
+        "Could not submit Goodix ENABLE_CHIP request");
+    }
+}
+
+
+static void
+goodix5135_activation_firmware_out_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (device);
+
+  gboolean transport_can_advance;
+
+  (void) user_data;
+
+  transport_can_advance =
+    goodix5135_async_result_can_advance (
+      completion,
+      error);
+
+  if (transport_can_advance &&
+      (transfer == NULL ||
+       transfer->actual_length !=
+         GOODIX5135_USB_PACKET_LENGTH))
+    transport_can_advance = FALSE;
+
+  g_clear_error (&error);
+
+  if (!goodix5135_firmware_transaction_out_complete (
+        &self->firmware_transaction,
+        transport_can_advance))
+    {
+      goodix5135_activation_sequence_firmware_complete (
+        &self->activation_sequence,
+        FALSE);
+
+      goodix5135_open_transaction_fail (
+        device,
+        "Activation firmware request transport failed");
+      return;
+    }
+
+  if (!goodix5135_async_submit (
+        device,
+        &self->io,
+        GOODIX5135_REQUEST_BULK_IN,
+        GOODIX5135_USB_PACKET_LENGTH,
+        GOODIX5135_FIRMWARE_IO_TIMEOUT_MS,
+        NULL,
+        0,
+        goodix5135_activation_firmware_ack_cb,
+        NULL))
+    {
+      goodix5135_firmware_transaction_ack_complete (
+        &self->firmware_transaction,
+        FALSE,
+        NULL,
+        0);
+
+      goodix5135_activation_sequence_firmware_complete (
+        &self->activation_sequence,
+        FALSE);
+
+      goodix5135_open_transaction_fail (
+        device,
+        "Could not submit activation firmware ACK receive");
+    }
+}
+
+
+static void
+goodix5135_activation_firmware_ack_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (device);
+
+  gboolean transport_can_advance;
+  gboolean protocol_ok;
+
+  (void) user_data;
+
+  transport_can_advance =
+    goodix5135_in_transfer_can_parse (
+      transfer,
+      completion,
+      error);
+
+  protocol_ok =
+    goodix5135_firmware_transaction_ack_complete (
+      &self->firmware_transaction,
+      transport_can_advance,
+      transport_can_advance
+        ? transfer->buffer
+        : NULL,
+      transport_can_advance
+        ? (gsize) transfer->actual_length
+        : 0);
+
+  g_clear_error (&error);
+
+  if (!protocol_ok)
+    {
+      goodix5135_activation_sequence_firmware_complete (
+        &self->activation_sequence,
+        FALSE);
+
+      goodix5135_open_transaction_fail (
+        device,
+        transport_can_advance
+          ? "Activation firmware returned invalid ACK"
+          : "Activation firmware ACK transport failed");
+      return;
+    }
+
+  if (!goodix5135_async_submit (
+        device,
+        &self->io,
+        GOODIX5135_REQUEST_BULK_IN,
+        GOODIX5135_USB_PACKET_LENGTH,
+        GOODIX5135_FIRMWARE_IO_TIMEOUT_MS,
+        NULL,
+        0,
+        goodix5135_activation_firmware_response_cb,
+        NULL))
+    {
+      const guint8 *firmware = NULL;
+      gsize firmware_length = 0;
+
+      goodix5135_firmware_transaction_response_complete (
+        &self->firmware_transaction,
+        FALSE,
+        NULL,
+        0,
+        &firmware,
+        &firmware_length);
+
+      goodix5135_activation_sequence_firmware_complete (
+        &self->activation_sequence,
+        FALSE);
+
+      goodix5135_open_transaction_fail (
+        device,
+        "Could not submit activation firmware response receive");
+    }
+}
+
+
+static void
+goodix5135_activation_firmware_response_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (device);
+
+  gboolean transport_can_advance;
+  gboolean protocol_ok;
+
+  const guint8 *firmware = NULL;
+  gsize firmware_length = 0;
+
+  (void) user_data;
+
+  transport_can_advance =
+    goodix5135_in_transfer_can_parse (
+      transfer,
+      completion,
+      error);
+
+  protocol_ok =
+    goodix5135_firmware_transaction_response_complete (
+      &self->firmware_transaction,
+      transport_can_advance,
+      transport_can_advance
+        ? transfer->buffer
+        : NULL,
+      transport_can_advance
+        ? (gsize) transfer->actual_length
+        : 0,
+      &firmware,
+      &firmware_length);
+
+  g_clear_error (&error);
+
+  /*
+   * Borrowed response view is intentionally not logged or copied.
+   */
+  firmware = NULL;
+  firmware_length = 0;
+
+  if (!protocol_ok ||
+      self->firmware_transaction.state !=
+        GOODIX5135_FIRMWARE_TRANSACTION_DONE)
+    {
+      goodix5135_activation_sequence_firmware_complete (
+        &self->activation_sequence,
+        FALSE);
+
+      goodix5135_open_transaction_fail (
+        device,
+        transport_can_advance
+          ? "Activation firmware response was invalid"
+          : "Activation firmware response transport failed");
+      return;
+    }
+
+  if (!goodix5135_activation_sequence_firmware_complete (
+        &self->activation_sequence,
+        TRUE))
+    {
+      goodix5135_open_transaction_fail (
+        device,
+        "Activation firmware completed out of order");
+      return;
+    }
+
+  if (self->activation_sequence.state !=
+      GOODIX5135_ACTIVATION_WAIT_RESET)
+    {
+      goodix5135_open_transaction_fail (
+        device,
+        "Goodix activation did not enter RESET gate");
+      return;
+    }
+
+  fp_dbg (
+    "Activation firmware validated; starting bounded sensor reset");
+
+  goodix5135_start_activation_reset (
+    device);
+}
+
+
+static void
+goodix5135_start_activation_firmware (
+  FpDevice *device)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (device);
+
+  guint8 packet[GOODIX5135_USB_PACKET_LENGTH];
+  gsize logical_length = 0;
+
+  if (self->activation_sequence.state !=
+      GOODIX5135_ACTIVATION_WAIT_FIRMWARE)
+    {
+      goodix5135_open_transaction_fail (
+        device,
+        "Attempted activation firmware outside firmware gate");
+      return;
+    }
+
+  goodix5135_firmware_transaction_init (
+    &self->firmware_transaction);
+
+  if (!goodix5135_firmware_transaction_begin (
+        &self->firmware_transaction,
+        packet,
+        sizeof (packet),
+        &logical_length))
+    {
+      goodix5135_activation_sequence_firmware_complete (
+        &self->activation_sequence,
+        FALSE);
+
+      goodix5135_open_transaction_fail (
+        device,
+        "Could not build activation firmware request");
+      return;
+    }
+
+  if (logical_length !=
+      GOODIX5135_FIRMWARE_REQUEST_LENGTH)
+    {
+      goodix5135_firmware_transaction_out_complete (
+        &self->firmware_transaction,
+        FALSE);
+
+      goodix5135_activation_sequence_firmware_complete (
+        &self->activation_sequence,
+        FALSE);
+
+      goodix5135_open_transaction_fail (
+        device,
+        "Unexpected activation firmware request length");
+      return;
+    }
+
+  fp_dbg (
+    "Submitting activation firmware-version gate");
+
+  if (!goodix5135_async_submit (
+        device,
+        &self->io,
+        GOODIX5135_REQUEST_BULK_OUT,
+        GOODIX5135_USB_PACKET_LENGTH,
+        GOODIX5135_FIRMWARE_IO_TIMEOUT_MS,
+        packet,
+        sizeof (packet),
+        goodix5135_activation_firmware_out_cb,
+        NULL))
+    {
+      goodix5135_firmware_transaction_out_complete (
+        &self->firmware_transaction,
+        FALSE);
+
+      goodix5135_activation_sequence_firmware_complete (
+        &self->activation_sequence,
+        FALSE);
+
+      goodix5135_open_transaction_fail (
+        device,
+        "Could not submit activation firmware request");
+    }
+}
+
+
+static void
+goodix5135_activation_reset_out_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (device);
+
+  gboolean transport_can_advance;
+
+  (void) user_data;
+
+  transport_can_advance =
+    goodix5135_async_result_can_advance (
+      completion,
+      error);
+
+  if (transport_can_advance &&
+      (transfer == NULL ||
+       transfer->actual_length !=
+         GOODIX5135_USB_PACKET_LENGTH))
+    transport_can_advance = FALSE;
+
+  g_clear_error (&error);
+
+  if (!goodix5135_sensor_reset_transaction_out_complete (
+        &self->sensor_reset_transaction,
+        transport_can_advance))
+    {
+      goodix5135_activation_sequence_reset_complete (
+        &self->activation_sequence,
+        FALSE);
+
+      goodix5135_open_transaction_fail (
+        device,
+        "Goodix sensor reset OUT transport failed");
+      return;
+    }
+
+  if (!goodix5135_async_submit (
+        device,
+        &self->io,
+        GOODIX5135_REQUEST_BULK_IN,
+        GOODIX5135_USB_PACKET_LENGTH,
+        GOODIX5135_FIRMWARE_IO_TIMEOUT_MS,
+        NULL,
+        0,
+        goodix5135_activation_reset_ack_cb,
+        NULL))
+    {
+      goodix5135_sensor_reset_transaction_ack_complete (
+        &self->sensor_reset_transaction,
+        FALSE,
+        NULL,
+        0);
+
+      goodix5135_activation_sequence_reset_complete (
+        &self->activation_sequence,
+        FALSE);
+
+      goodix5135_open_transaction_fail (
+        device,
+        "Could not submit Goodix sensor-reset ACK receive");
+    }
+}
+
+
+static void
+goodix5135_activation_reset_ack_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (device);
+
+  gboolean transport_can_advance;
+  gboolean protocol_ok;
+
+  (void) user_data;
+
+  transport_can_advance =
+    goodix5135_in_transfer_can_parse (
+      transfer,
+      completion,
+      error);
+
+  protocol_ok =
+    goodix5135_sensor_reset_transaction_ack_complete (
+      &self->sensor_reset_transaction,
+      transport_can_advance,
+      transport_can_advance
+        ? transfer->buffer
+        : NULL,
+      transport_can_advance
+        ? (gsize) transfer->actual_length
+        : 0);
+
+  g_clear_error (&error);
+
+  if (!protocol_ok)
+    {
+      goodix5135_activation_sequence_reset_complete (
+        &self->activation_sequence,
+        FALSE);
+
+      goodix5135_open_transaction_fail (
+        device,
+        transport_can_advance
+          ? "Goodix sensor reset returned invalid ACK"
+          : "Goodix sensor reset ACK transport failed");
+      return;
+    }
+
+  if (!goodix5135_async_submit (
+        device,
+        &self->io,
+        GOODIX5135_REQUEST_BULK_IN,
+        GOODIX5135_USB_PACKET_LENGTH,
+        GOODIX5135_FIRMWARE_IO_TIMEOUT_MS,
+        NULL,
+        0,
+        goodix5135_activation_reset_response_cb,
+        NULL))
+    {
+      guint16 reset_result = 0;
+
+      goodix5135_sensor_reset_transaction_response_complete (
+        &self->sensor_reset_transaction,
+        FALSE,
+        NULL,
+        0,
+        &reset_result);
+
+      goodix5135_activation_sequence_reset_complete (
+        &self->activation_sequence,
+        FALSE);
+
+      goodix5135_open_transaction_fail (
+        device,
+        "Could not submit Goodix sensor-reset response receive");
+    }
+}
+
+
+static void
+goodix5135_activation_reset_response_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (device);
+
+  gboolean transport_can_advance;
+  gboolean protocol_ok;
+
+  guint16 reset_result = 0;
+
+  (void) user_data;
+
+  transport_can_advance =
+    goodix5135_in_transfer_can_parse (
+      transfer,
+      completion,
+      error);
+
+  protocol_ok =
+    goodix5135_sensor_reset_transaction_response_complete (
+      &self->sensor_reset_transaction,
+      transport_can_advance,
+      transport_can_advance
+        ? transfer->buffer
+        : NULL,
+      transport_can_advance
+        ? (gsize) transfer->actual_length
+        : 0,
+      &reset_result);
+
+  g_clear_error (&error);
+
+  /*
+   * reset_result is validated by the protocol layer but is not
+   * persisted or logged.
+   */
+  (void) reset_result;
+
+  if (!protocol_ok ||
+      self->sensor_reset_transaction.state !=
+        GOODIX5135_SENSOR_RESET_TRANSACTION_DONE)
+    {
+      goodix5135_activation_sequence_reset_complete (
+        &self->activation_sequence,
+        FALSE);
+
+      goodix5135_open_transaction_fail (
+        device,
+        transport_can_advance
+          ? "Goodix sensor reset response was invalid"
+          : "Goodix sensor reset response transport failed");
+      return;
+    }
+
+  if (!goodix5135_activation_sequence_reset_complete (
+        &self->activation_sequence,
+        TRUE))
+    {
+      goodix5135_open_transaction_fail (
+        device,
+        "Goodix sensor reset completed out of activation order");
+      return;
+    }
+
+  if (self->activation_sequence.state !=
+      GOODIX5135_ACTIVATION_WAIT_CHIP_ID)
+    {
+      goodix5135_open_transaction_fail (
+        device,
+        "Goodix activation did not enter chip-ID gate");
+      return;
+    }
+
+  fp_dbg (
+    "Sensor reset validated; starting read-only chip-ID gate");
+
+  goodix5135_start_activation_chip_id_read (
+    device);
+}
+
+
+static void
+goodix5135_start_activation_reset (
+  FpDevice *device)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (device);
+
+  guint8 packet[GOODIX5135_USB_PACKET_LENGTH];
+  gsize logical_length = 0;
+
+  if (self->activation_sequence.state !=
+      GOODIX5135_ACTIVATION_WAIT_RESET)
+    {
+      goodix5135_open_transaction_fail (
+        device,
+        "Attempted sensor reset outside activation RESET gate");
+      return;
+    }
+
+  goodix5135_sensor_reset_transaction_init (
+    &self->sensor_reset_transaction);
+
+  if (!goodix5135_sensor_reset_transaction_begin (
+        &self->sensor_reset_transaction,
+        packet,
+        sizeof (packet),
+        &logical_length))
+    {
+      goodix5135_activation_sequence_reset_complete (
+        &self->activation_sequence,
+        FALSE);
+
+      goodix5135_open_transaction_fail (
+        device,
+        "Could not build bounded Goodix sensor-reset request");
+      return;
+    }
+
+  if (logical_length !=
+      GOODIX5135_SENSOR_RESET_REQUEST_LENGTH)
+    {
+      goodix5135_sensor_reset_transaction_out_complete (
+        &self->sensor_reset_transaction,
+        FALSE);
+
+      goodix5135_activation_sequence_reset_complete (
+        &self->activation_sequence,
+        FALSE);
+
+      goodix5135_open_transaction_fail (
+        device,
+        "Unexpected Goodix sensor-reset request length");
+      return;
+    }
+
+  fp_dbg (
+    "Submitting bounded Goodix reset(True, False, 20)");
+
+  if (!goodix5135_async_submit (
+        device,
+        &self->io,
+        GOODIX5135_REQUEST_BULK_OUT,
+        GOODIX5135_USB_PACKET_LENGTH,
+        GOODIX5135_FIRMWARE_IO_TIMEOUT_MS,
+        packet,
+        sizeof (packet),
+        goodix5135_activation_reset_out_cb,
+        NULL))
+    {
+      goodix5135_sensor_reset_transaction_out_complete (
+        &self->sensor_reset_transaction,
+        FALSE);
+
+      goodix5135_activation_sequence_reset_complete (
+        &self->activation_sequence,
+        FALSE);
+
+      goodix5135_open_transaction_fail (
+        device,
+        "Could not submit Goodix sensor-reset request");
+    }
+}
+
+
+static void
+goodix5135_activation_chip_id_out_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (device);
+
+  gboolean transport_can_advance;
+
+  (void) user_data;
+
+  transport_can_advance =
+    goodix5135_async_result_can_advance (
+      completion,
+      error);
+
+  if (transport_can_advance &&
+      (transfer == NULL ||
+       transfer->actual_length !=
+         GOODIX5135_USB_PACKET_LENGTH))
+    transport_can_advance = FALSE;
+
+  g_clear_error (&error);
+
+  if (!goodix5135_register_read_transaction_out_complete (
+        &self->register_read_transaction,
+        transport_can_advance))
+    {
+      goodix5135_activation_sequence_chip_id_complete (
+        &self->activation_sequence,
+        FALSE,
+        NULL,
+        0);
+
+      goodix5135_open_transaction_fail (
+        device,
+        "Activation chip-ID read OUT transport failed");
+      return;
+    }
+
+  if (!goodix5135_async_submit (
+        device,
+        &self->io,
+        GOODIX5135_REQUEST_BULK_IN,
+        GOODIX5135_USB_PACKET_LENGTH,
+        GOODIX5135_FIRMWARE_IO_TIMEOUT_MS,
+        NULL,
+        0,
+        goodix5135_activation_chip_id_ack_cb,
+        NULL))
+    {
+      goodix5135_register_read_transaction_ack_complete (
+        &self->register_read_transaction,
+        FALSE,
+        NULL,
+        0);
+
+      goodix5135_activation_sequence_chip_id_complete (
+        &self->activation_sequence,
+        FALSE,
+        NULL,
+        0);
+
+      goodix5135_open_transaction_fail (
+        device,
+        "Could not submit activation chip-ID ACK receive");
+    }
+}
+
+
+static void
+goodix5135_activation_chip_id_ack_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (device);
+
+  gboolean transport_can_advance;
+  gboolean protocol_ok;
+
+  (void) user_data;
+
+  transport_can_advance =
+    goodix5135_in_transfer_can_parse (
+      transfer,
+      completion,
+      error);
+
+  protocol_ok =
+    goodix5135_register_read_transaction_ack_complete (
+      &self->register_read_transaction,
+      transport_can_advance,
+      transport_can_advance
+        ? transfer->buffer
+        : NULL,
+      transport_can_advance
+        ? (gsize) transfer->actual_length
+        : 0);
+
+  g_clear_error (&error);
+
+  if (!protocol_ok)
+    {
+      goodix5135_activation_sequence_chip_id_complete (
+        &self->activation_sequence,
+        FALSE,
+        NULL,
+        0);
+
+      goodix5135_open_transaction_fail (
+        device,
+        transport_can_advance
+          ? "Activation chip-ID read returned invalid ACK"
+          : "Activation chip-ID ACK transport failed");
+      return;
+    }
+
+  if (!goodix5135_async_submit (
+        device,
+        &self->io,
+        GOODIX5135_REQUEST_BULK_IN,
+        GOODIX5135_USB_PACKET_LENGTH,
+        GOODIX5135_FIRMWARE_IO_TIMEOUT_MS,
+        NULL,
+        0,
+        goodix5135_activation_chip_id_response_cb,
+        NULL))
+    {
+      const guint8 *value = NULL;
+      gsize value_length = 0;
+
+      goodix5135_register_read_transaction_response_complete (
+        &self->register_read_transaction,
+        FALSE,
+        NULL,
+        0,
+        &value,
+        &value_length);
+
+      goodix5135_activation_sequence_chip_id_complete (
+        &self->activation_sequence,
+        FALSE,
+        NULL,
+        0);
+
+      goodix5135_open_transaction_fail (
+        device,
+        "Could not submit activation chip-ID response receive");
+    }
+}
+
+
+static void
+goodix5135_activation_chip_id_response_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (device);
+
+  FpImageDevice *dev =
+    FP_IMAGE_DEVICE (device);
+
+  gboolean transport_can_advance;
+  gboolean protocol_ok;
+
+  const guint8 *value = NULL;
+  gsize value_length = 0;
+
+  (void) user_data;
+
+  transport_can_advance =
+    goodix5135_in_transfer_can_parse (
+      transfer,
+      completion,
+      error);
+
+  protocol_ok =
+    goodix5135_register_read_transaction_response_complete (
+      &self->register_read_transaction,
+      transport_can_advance,
+      transport_can_advance
+        ? transfer->buffer
+        : NULL,
+      transport_can_advance
+        ? (gsize) transfer->actual_length
+        : 0,
+      &value,
+      &value_length);
+
+  g_clear_error (&error);
+
+  if (!protocol_ok ||
+      self->register_read_transaction.state !=
+        GOODIX5135_REGISTER_READ_TRANSACTION_DONE)
+    {
+      goodix5135_activation_sequence_chip_id_complete (
+        &self->activation_sequence,
+        FALSE,
+        NULL,
+        0);
+
+      goodix5135_open_transaction_fail (
+        device,
+        transport_can_advance
+          ? "Activation chip-ID response was invalid"
+          : "Activation chip-ID response transport failed");
+      return;
+    }
+
+  if (value == NULL ||
+      value_length !=
+        GOODIX5135_ACTIVATION_CHIP_ID_LENGTH)
+    {
+      goodix5135_activation_sequence_chip_id_complete (
+        &self->activation_sequence,
+        FALSE,
+        NULL,
+        0);
+
+      goodix5135_open_transaction_fail (
+        device,
+        "Activation chip-ID response length mismatch");
+      return;
+    }
+
+  /*
+   * The controller compares the borrowed 4-byte logical identity
+   * against a2 04 25 00.
+   *
+   * The bytes are not logged, copied, persisted, or exported.
+   */
+  if (!goodix5135_activation_sequence_chip_id_complete (
+        &self->activation_sequence,
+        TRUE,
+        value,
+        value_length))
+    {
+      value = NULL;
+      value_length = 0;
+
+      goodix5135_open_transaction_fail (
+        device,
+        "Activation chip-ID did not match ChicagoHU 0x2504");
+      return;
+    }
+
+  value = NULL;
+  value_length = 0;
+
+  if (self->activation_sequence.state !=
+      GOODIX5135_ACTIVATION_DONE)
+    {
+      goodix5135_open_transaction_fail (
+        device,
+        "Goodix activation sequence did not reach DONE");
+      return;
+    }
+
+  fp_dbg (
+    "Guarded Goodix activation sequence validated");
+
+  goodix5135_io_stop (
+    &self->io);
 
   g_assert (
     goodix5135_io_can_finish_stop (
@@ -1116,6 +2739,98 @@ goodix5135_nop_reply_cb (
   fpi_image_device_open_complete (
     dev,
     NULL);
+}
+
+
+static void
+goodix5135_start_activation_chip_id_read (
+  FpDevice *device)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (device);
+
+  guint8 packet[GOODIX5135_USB_PACKET_LENGTH];
+  gsize logical_length = 0;
+
+  if (self->activation_sequence.state !=
+      GOODIX5135_ACTIVATION_WAIT_CHIP_ID)
+    {
+      goodix5135_open_transaction_fail (
+        device,
+        "Attempted chip-ID read outside activation identity gate");
+      return;
+    }
+
+  goodix5135_register_read_transaction_init (
+    &self->register_read_transaction);
+
+  if (!goodix5135_register_read_transaction_begin (
+        &self->register_read_transaction,
+        GOODIX5135_ACTIVATION_CHIP_ID_ADDRESS,
+        GOODIX5135_ACTIVATION_CHIP_ID_LENGTH,
+        packet,
+        sizeof (packet),
+        &logical_length))
+    {
+      goodix5135_activation_sequence_chip_id_complete (
+        &self->activation_sequence,
+        FALSE,
+        NULL,
+        0);
+
+      goodix5135_open_transaction_fail (
+        device,
+        "Could not build activation chip-ID read request");
+      return;
+    }
+
+  if (logical_length !=
+      GOODIX5135_REGISTER_READ_REQUEST_LENGTH)
+    {
+      goodix5135_register_read_transaction_out_complete (
+        &self->register_read_transaction,
+        FALSE);
+
+      goodix5135_activation_sequence_chip_id_complete (
+        &self->activation_sequence,
+        FALSE,
+        NULL,
+        0);
+
+      goodix5135_open_transaction_fail (
+        device,
+        "Unexpected activation chip-ID request length");
+      return;
+    }
+
+  fp_dbg (
+    "Submitting read-only activation chip-ID gate 0x0000");
+
+  if (!goodix5135_async_submit (
+        device,
+        &self->io,
+        GOODIX5135_REQUEST_BULK_OUT,
+        GOODIX5135_USB_PACKET_LENGTH,
+        GOODIX5135_FIRMWARE_IO_TIMEOUT_MS,
+        packet,
+        sizeof (packet),
+        goodix5135_activation_chip_id_out_cb,
+        NULL))
+    {
+      goodix5135_register_read_transaction_out_complete (
+        &self->register_read_transaction,
+        FALSE);
+
+      goodix5135_activation_sequence_chip_id_complete (
+        &self->activation_sequence,
+        FALSE,
+        NULL,
+        0);
+
+      goodix5135_open_transaction_fail (
+        device,
+        "Could not submit activation chip-ID request");
+    }
 }
 
 
@@ -1715,6 +3430,18 @@ fpi_device_goodix5135_init (FpiDeviceGoodix5135 *self)
 
   goodix5135_nop_transaction_init (
     &self->nop_transaction);
+
+  goodix5135_d4_transaction_init (
+    &self->d4_transaction);
+
+  goodix5135_enable_chip_transaction_init (
+    &self->enable_chip_transaction);
+
+  goodix5135_sensor_reset_transaction_init (
+    &self->sensor_reset_transaction);
+
+  goodix5135_activation_sequence_init (
+    &self->activation_sequence);
 }
 
 static void
