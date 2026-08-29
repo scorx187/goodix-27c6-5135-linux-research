@@ -390,6 +390,14 @@ static void
 goodix5135_config_runtime_state_reset (
   FpiDeviceGoodix5135 *self);
 
+
+static gboolean
+goodix5135_live_config_test_requested (void);
+
+static gboolean
+goodix5135_start_live_config_upload_test (
+  FpDevice *device);
+
 static void
 goodix5135_open_transaction_fail (FpDevice    *device,
                                   const gchar *message)
@@ -3113,6 +3121,23 @@ goodix5135_otp_response_cb (
     "Read-only OTP calibration gate validated; "
     "raw OTP discarded");
 
+  /*
+   * Normal OPEN remains read-only.  Only the exact research gate below
+   * may continue into the one-shot CFG70 live transport.
+   */
+  if (goodix5135_live_config_test_requested ())
+    {
+      if (!goodix5135_start_live_config_upload_test (
+            device))
+        {
+          goodix5135_open_transaction_fail (
+            device,
+            "One-shot Goodix CFG70 structural gate failed");
+        }
+
+      return;
+    }
+
   goodix5135_io_stop (
     &self->io);
 
@@ -3474,6 +3499,525 @@ goodix5135_complete_config_response (
     self->config_upload_transaction.state ==
       GOODIX5135_CONFIG_UPLOAD_TRANSACTION_DONE;
 }
+
+/*
+ * Research-only, one-shot live CFG70 gate.
+ *
+ * The normal OPEN path remains unchanged unless the exact environment
+ * gate is explicitly supplied by the controlled test harness.
+ *
+ * No private template path or private bytes are compiled into the
+ * driver.
+ */
+static gboolean goodix5135_live_cfg70_consumed = FALSE;
+
+
+static void
+goodix5135_live_config_out_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data);
+
+static void
+goodix5135_live_config_ack_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data);
+
+static void
+goodix5135_live_config_response_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data);
+
+
+static gboolean
+goodix5135_live_config_test_requested (void)
+{
+  return
+    g_strcmp0 (
+      g_getenv ("GOODIX5135_LIVE_CFG70_TEST"),
+      "VALIDATED_OTP_CFG70_ONE_SHOT") == 0;
+}
+
+
+/*
+ * Require the exact byte-position delta already proven for this unit
+ * against the private Windows runtime CFG70 during the earlier
+ * research gate.
+ *
+ * Values themselves are never logged or exposed.
+ */
+static gboolean
+goodix5135_live_runtime_shape_valid (
+  FpiDeviceGoodix5135 *self,
+  const guint8        *template_data,
+  gsize                template_length)
+{
+  static const guint expected_offsets[] =
+    {
+      0x73,
+      0x77,
+      0x78,
+      0x7b,
+      0x7f,
+      0x83,
+      0xb0,
+      0xde,
+      0xdf,
+    };
+
+  guint differences[GOODIX5135_CONFIG_LENGTH] = { 0 };
+  gsize difference_count = 0;
+
+  g_assert (self != NULL);
+
+  if (template_data == NULL ||
+      template_length != GOODIX5135_CONFIG_LENGTH ||
+      !self->config_prepared ||
+      self->config_logical_length !=
+        GOODIX5135_CONFIG_LOGICAL_LENGTH ||
+      self->config_transport_length !=
+        GOODIX5135_CONFIG_TRANSFER_LENGTH ||
+      self->config_upload_transaction.state !=
+        GOODIX5135_CONFIG_UPLOAD_TRANSACTION_WAIT_OUT ||
+      self->config_upload_transaction.packets_completed != 0)
+    return FALSE;
+
+  for (gsize i = 0;
+       i < GOODIX5135_CONFIG_LENGTH;
+       i++)
+    {
+      if (self->config_runtime[i] !=
+          template_data[i])
+        {
+          if (difference_count >=
+              G_N_ELEMENTS (expected_offsets))
+            return FALSE;
+
+          differences[difference_count++] =
+            (guint) i;
+        }
+    }
+
+  if (difference_count !=
+      G_N_ELEMENTS (expected_offsets))
+    return FALSE;
+
+  for (gsize i = 0;
+       i < G_N_ELEMENTS (expected_offsets);
+       i++)
+    {
+      if (differences[i] !=
+          expected_offsets[i])
+        return FALSE;
+    }
+
+  return TRUE;
+}
+
+
+static gboolean
+goodix5135_submit_live_config_packet (
+  FpDevice *device)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (device);
+
+  guint8 packet[GOODIX5135_USB_PACKET_LENGTH] = { 0 };
+  gboolean staged;
+  gboolean submitted;
+
+  staged =
+    goodix5135_stage_current_config_packet (
+      self,
+      packet,
+      sizeof (packet));
+
+  if (!staged)
+    {
+      goodix5135_secure_zero (
+        packet,
+        sizeof (packet));
+
+      return FALSE;
+    }
+
+  submitted =
+    goodix5135_async_submit (
+      device,
+      &self->io,
+      GOODIX5135_REQUEST_BULK_OUT,
+      GOODIX5135_USB_PACKET_LENGTH,
+      GOODIX5135_FIRMWARE_IO_TIMEOUT_MS,
+      packet,
+      sizeof (packet),
+      goodix5135_live_config_out_cb,
+      NULL);
+
+  goodix5135_secure_zero (
+    packet,
+    sizeof (packet));
+
+  return submitted;
+}
+
+
+static gboolean
+goodix5135_submit_live_config_ack_read (
+  FpDevice *device)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (device);
+
+  return
+    goodix5135_async_submit (
+      device,
+      &self->io,
+      GOODIX5135_REQUEST_BULK_IN,
+      GOODIX5135_USB_PACKET_LENGTH,
+      GOODIX5135_FIRMWARE_IO_TIMEOUT_MS,
+      NULL,
+      0,
+      goodix5135_live_config_ack_cb,
+      NULL);
+}
+
+
+static gboolean
+goodix5135_submit_live_config_response_read (
+  FpDevice *device)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (device);
+
+  return
+    goodix5135_async_submit (
+      device,
+      &self->io,
+      GOODIX5135_REQUEST_BULK_IN,
+      GOODIX5135_USB_PACKET_LENGTH,
+      GOODIX5135_FIRMWARE_IO_TIMEOUT_MS,
+      NULL,
+      0,
+      goodix5135_live_config_response_cb,
+      NULL);
+}
+
+
+static gboolean
+goodix5135_start_live_config_upload_test (
+  FpDevice *device)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (device);
+
+  const gchar *template_path;
+
+  gchar *template_data = NULL;
+  gsize template_length = 0;
+
+  gboolean ok = FALSE;
+
+  if (!goodix5135_live_config_test_requested ())
+    return FALSE;
+
+  if (goodix5135_live_cfg70_consumed)
+    return FALSE;
+
+  /*
+   * Consume the process gate before preparation or USB submission.
+   * There is no automatic second attempt.
+   */
+  goodix5135_live_cfg70_consumed =
+    TRUE;
+
+  template_path =
+    g_getenv ("GOODIX5135_CFG70_TEMPLATE_FILE");
+
+  if (template_path == NULL)
+    goto out;
+
+  if (!g_file_get_contents (
+        template_path,
+        &template_data,
+        &template_length,
+        NULL))
+    goto out;
+
+  if (template_length !=
+      GOODIX5135_CONFIG_LENGTH)
+    goto out;
+
+  if (!goodix5135_prepare_runtime_config_from_template (
+        self,
+        (const guint8 *) template_data,
+        template_length))
+    goto out;
+
+  /*
+   * This gate checks the exact structural delta previously observed in
+   * the byte-for-byte Windows comparison.  No private values are
+   * printed or retained.
+   */
+  if (!goodix5135_live_runtime_shape_valid (
+        self,
+        (const guint8 *) template_data,
+        template_length))
+    goto out;
+
+  if (!goodix5135_arm_config_upload_transport (
+        self))
+    goto out;
+
+  /*
+   * Remove live-test environment authorization before the first OUT
+   * submission.
+   */
+  g_unsetenv ("GOODIX5135_LIVE_CFG70_TEST");
+  g_unsetenv ("GOODIX5135_CFG70_TEMPLATE_FILE");
+
+  ok =
+    goodix5135_submit_live_config_packet (
+      device);
+
+out:
+  if (template_data != NULL)
+    {
+      goodix5135_secure_zero (
+        template_data,
+        template_length);
+
+      g_free (template_data);
+    }
+
+  if (!ok)
+    {
+      g_unsetenv ("GOODIX5135_LIVE_CFG70_TEST");
+      g_unsetenv ("GOODIX5135_CFG70_TEMPLATE_FILE");
+    }
+
+  return ok;
+}
+
+
+static void
+goodix5135_live_config_out_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (device);
+
+  gboolean transport_ok;
+
+  (void) completion;
+  (void) user_data;
+
+  transport_ok =
+    transfer != NULL &&
+    error == NULL &&
+    transfer->actual_length ==
+      GOODIX5135_USB_PACKET_LENGTH;
+
+  if (transfer != NULL &&
+      transfer->buffer != NULL)
+    {
+      goodix5135_secure_zero (
+        transfer->buffer,
+        GOODIX5135_USB_PACKET_LENGTH);
+    }
+
+  g_clear_error (&error);
+
+  if (!goodix5135_complete_config_out_packet (
+        self,
+        transport_ok))
+    {
+      goodix5135_open_transaction_fail (
+        device,
+        "Goodix CFG70 OUT completion failed");
+      return;
+    }
+
+  if (self->config_upload_transaction.state ==
+      GOODIX5135_CONFIG_UPLOAD_TRANSACTION_WAIT_OUT)
+    {
+      if (!goodix5135_submit_live_config_packet (
+            device))
+        {
+          goodix5135_open_transaction_fail (
+            device,
+            "Could not submit next Goodix CFG70 packet");
+        }
+
+      return;
+    }
+
+  if (self->config_upload_transaction.state !=
+      GOODIX5135_CONFIG_UPLOAD_TRANSACTION_WAIT_ACK)
+    {
+      goodix5135_open_transaction_fail (
+        device,
+        "Unexpected Goodix CFG70 state after OUT packets");
+      return;
+    }
+
+  if (!goodix5135_submit_live_config_ack_read (
+        device))
+    {
+      goodix5135_open_transaction_fail (
+        device,
+        "Could not submit Goodix CFG70 ACK read");
+    }
+}
+
+
+static void
+goodix5135_live_config_ack_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (device);
+
+  gboolean transport_ok;
+  gboolean protocol_ok;
+
+  (void) user_data;
+
+  transport_ok =
+    goodix5135_in_transfer_can_parse (
+      transfer,
+      completion,
+      error);
+
+  protocol_ok =
+    goodix5135_complete_config_ack (
+      self,
+      transport_ok,
+      transport_ok && transfer != NULL
+        ? transfer->buffer
+        : NULL,
+      transport_ok && transfer != NULL
+        ? (gsize) transfer->actual_length
+        : 0);
+
+  if (transfer != NULL &&
+      transfer->buffer != NULL &&
+      transfer->actual_length > 0)
+    {
+      goodix5135_secure_zero (
+        transfer->buffer,
+        (gsize) transfer->actual_length);
+    }
+
+  g_clear_error (&error);
+
+  if (!protocol_ok ||
+      self->config_upload_transaction.state !=
+        GOODIX5135_CONFIG_UPLOAD_TRANSACTION_WAIT_RESPONSE)
+    {
+      goodix5135_open_transaction_fail (
+        device,
+        "Goodix CFG70 ACK validation failed");
+      return;
+    }
+
+  if (!goodix5135_submit_live_config_response_read (
+        device))
+    {
+      goodix5135_open_transaction_fail (
+        device,
+        "Could not submit Goodix CFG70 response read");
+    }
+}
+
+
+static void
+goodix5135_live_config_response_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (device);
+
+  FpImageDevice *dev =
+    FP_IMAGE_DEVICE (device);
+
+  gboolean transport_ok;
+  gboolean protocol_ok;
+
+  (void) user_data;
+
+  transport_ok =
+    goodix5135_in_transfer_can_parse (
+      transfer,
+      completion,
+      error);
+
+  protocol_ok =
+    goodix5135_complete_config_response (
+      self,
+      transport_ok,
+      transport_ok && transfer != NULL
+        ? transfer->buffer
+        : NULL,
+      transport_ok && transfer != NULL
+        ? (gsize) transfer->actual_length
+        : 0);
+
+  if (transfer != NULL &&
+      transfer->buffer != NULL &&
+      transfer->actual_length > 0)
+    {
+      goodix5135_secure_zero (
+        transfer->buffer,
+        (gsize) transfer->actual_length);
+    }
+
+  g_clear_error (&error);
+
+  if (!protocol_ok ||
+      self->config_upload_transaction.state !=
+        GOODIX5135_CONFIG_UPLOAD_TRANSACTION_DONE)
+    {
+      goodix5135_open_transaction_fail (
+        device,
+        "Goodix CFG70 response validation failed");
+      return;
+    }
+
+  fp_dbg (
+    "One-shot Goodix CFG70 live transaction completed");
+
+  goodix5135_io_stop (
+    &self->io);
+
+  g_assert (
+    goodix5135_io_can_finish_stop (
+      &self->io));
+
+  fpi_image_device_open_complete (
+    dev,
+    NULL);
+}
+
 
 
 
