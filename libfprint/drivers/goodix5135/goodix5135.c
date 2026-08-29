@@ -22,6 +22,8 @@
 #include "goodix5135-io.h"
 #include "goodix5135-driver-lifecycle.h"
 #include "goodix5135-proto.h"
+#include "goodix5135-tls-request.h"
+#include "goodix5135-tls-session.h"
 
 struct _FpiDeviceGoodix5135
 {
@@ -87,6 +89,16 @@ struct _FpiDeviceGoodix5135
    * Preparation alone must never authorize USB transmission.
    */
   gboolean                             config_transport_armed;
+
+  /*
+   * Native TLS runtime bridge state.
+   *
+   * No PSK bytes are retained directly in the device object.
+   * The session object owns volatile TLS state only while active.
+   */
+  Goodix5135TlsSession                *tls_session;
+  Goodix5135TlsRequestTransaction      tls_request_transaction;
+  Goodix5135TlsEstablishedTransaction  tls_runtime_d4_transaction;
 };
 
 G_DECLARE_FINAL_TYPE (FpiDeviceGoodix5135,
@@ -166,6 +178,84 @@ static const FpIdEntry goodix5135_id_table[] = {
  */
 #define GOODIX5135_ACTIVATION_CHIP_ID_ADDRESS 0x0000U
 #define GOODIX5135_ACTIVATION_CHIP_ID_LENGTH  GOODIX5135_CHIP_ID_LENGTH
+
+static void
+goodix5135_tls_runtime_reset (
+  FpiDeviceGoodix5135 *self);
+
+static gboolean
+goodix5135_tls_runtime_submit_sensor_read (
+  FpDevice *device);
+
+static gboolean
+goodix5135_tls_runtime_submit_host_frame (
+  FpDevice   *device,
+  GByteArray *host_frame);
+
+static void
+goodix5135_tls_runtime_start_d4 (
+  FpDevice *device);
+
+static void
+goodix5135_tls_runtime_d0_out_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data);
+
+static void
+goodix5135_tls_runtime_d0_ack_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data);
+
+static void
+goodix5135_tls_runtime_sensor_frame_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data);
+
+static void
+goodix5135_tls_runtime_host_frame_out_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data);
+
+static void
+goodix5135_tls_runtime_d4_out_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data);
+
+static void
+goodix5135_tls_runtime_d4_ack_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data);
+
+/*
+ * This is deliberately dormant.
+ *
+ * A later explicitly gated private-PSK input seam will call it.
+ * ACTIVATE must not call it in this commit.
+ */
+static gboolean
+goodix5135_tls_runtime_start (
+  FpDevice      *device,
+  const guint8  *psk,
+  gsize          psk_len,
+  GError       **error) G_GNUC_UNUSED;
 
 static void goodix5135_queue_cleanup_cb (
   FpDevice                       *device,
@@ -1427,6 +1517,936 @@ goodix5135_activation_continue_after_nop (
         "Goodix activation NOP advanced to an invalid state");
       return;
     }
+}
+
+
+
+#define GOODIX5135_TLS_RUNTIME_SENSOR_READ_SIZE 0x10000U
+
+static void
+goodix5135_tls_runtime_set_error (
+  GError      **error,
+  const gchar  *message)
+{
+  if (error == NULL ||
+      *error != NULL)
+    return;
+
+  *error =
+    fpi_device_error_new_msg (
+      FP_DEVICE_ERROR_GENERAL,
+      "%s",
+      message);
+}
+
+
+static void
+goodix5135_tls_runtime_reset (
+  FpiDeviceGoodix5135 *self)
+{
+  g_return_if_fail (self != NULL);
+
+  if (self->tls_session != NULL)
+    {
+      goodix5135_tls_session_free (
+        self->tls_session);
+
+      self->tls_session = NULL;
+    }
+
+  goodix5135_tls_request_transaction_init (
+    &self->tls_request_transaction);
+
+  goodix5135_d4_transaction_init (
+    &self->tls_runtime_d4_transaction);
+}
+
+
+static void
+goodix5135_tls_runtime_fail (
+  FpDevice    *device,
+  const gchar *reason)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (device);
+
+  /*
+   * Never print TLS payloads, PSK material, or sensor frame bytes.
+   */
+  fp_warn (
+    "Goodix TLS runtime bridge stopped: %s",
+    reason);
+
+  goodix5135_tls_runtime_reset (
+    self);
+}
+
+
+static gboolean
+goodix5135_tls_runtime_submit_sensor_read (
+  FpDevice *device)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (device);
+
+  if (self->tls_session == NULL)
+    return FALSE;
+
+  /*
+   * Public Goodix USB reference reads up to 0x10000 bytes.
+   *
+   * A bulk transfer may span multiple 64-byte USB packets.
+   * The transport layer owns the receive buffer.
+   */
+  return goodix5135_async_submit (
+    device,
+    &self->io,
+    GOODIX5135_REQUEST_BULK_IN,
+    GOODIX5135_TLS_RUNTIME_SENSOR_READ_SIZE,
+    GOODIX5135_FIRMWARE_IO_TIMEOUT_MS,
+    NULL,
+    0,
+    goodix5135_tls_runtime_sensor_frame_cb,
+    NULL);
+}
+
+
+static gboolean
+goodix5135_tls_runtime_pad_host_frame (
+  GByteArray *frame)
+{
+  static const guint8 zeros[GOODIX5135_USB_PACKET_LENGTH] = { 0 };
+
+  gsize padded_length;
+  gsize padding;
+
+  g_return_val_if_fail (frame != NULL, FALSE);
+
+  if (frame->len == 0)
+    return FALSE;
+
+  /*
+   * Match the public Goodix USB write contract:
+   *
+   * every outbound logical frame is zero-padded to a complete
+   * 64-byte USB packet boundary before Bulk OUT.
+   */
+  padded_length =
+    (
+      ((gsize) frame->len +
+       GOODIX5135_USB_PACKET_LENGTH - 1)
+      /
+      GOODIX5135_USB_PACKET_LENGTH
+    )
+    *
+    GOODIX5135_USB_PACKET_LENGTH;
+
+  if (padded_length < frame->len ||
+      padded_length > G_MAXUINT)
+    return FALSE;
+
+  padding =
+    padded_length - frame->len;
+
+  if (padding > 0)
+    {
+      g_assert (padding <
+                GOODIX5135_USB_PACKET_LENGTH);
+
+      g_byte_array_append (
+        frame,
+        zeros,
+        (guint) padding);
+    }
+
+  return TRUE;
+}
+
+
+static gboolean
+goodix5135_tls_runtime_submit_host_frame (
+  FpDevice   *device,
+  GByteArray *host_frame)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (device);
+
+  guint transfer_length;
+
+  if (self->tls_session == NULL ||
+      host_frame == NULL ||
+      host_frame->len == 0)
+    return FALSE;
+
+  if (!goodix5135_tls_runtime_pad_host_frame (
+        host_frame))
+    return FALSE;
+
+  transfer_length =
+    (guint) host_frame->len;
+
+  return goodix5135_async_submit (
+    device,
+    &self->io,
+    GOODIX5135_REQUEST_BULK_OUT,
+    transfer_length,
+    GOODIX5135_FIRMWARE_IO_TIMEOUT_MS,
+    host_frame->data,
+    host_frame->len,
+    goodix5135_tls_runtime_host_frame_out_cb,
+    GUINT_TO_POINTER (transfer_length));
+}
+
+
+static void
+goodix5135_tls_runtime_start_d4 (
+  FpDevice *device)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (device);
+
+  guint8 packet[GOODIX5135_USB_PACKET_LENGTH];
+  gsize  logical_length = 0;
+
+  if (self->tls_session == NULL)
+    {
+      goodix5135_tls_runtime_fail (
+        device,
+        "D4 requested without an active TLS session");
+
+      return;
+    }
+
+  goodix5135_d4_transaction_init (
+    &self->tls_runtime_d4_transaction);
+
+  if (!goodix5135_d4_transaction_begin (
+        &self->tls_runtime_d4_transaction,
+        packet,
+        sizeof (packet),
+        &logical_length))
+    {
+      goodix5135_tls_runtime_fail (
+        device,
+        "could not build TLS-runtime D4 request");
+
+      return;
+    }
+
+  if (logical_length !=
+      GOODIX5135_D4_REQUEST_LENGTH)
+    {
+      goodix5135_d4_transaction_out_complete (
+        &self->tls_runtime_d4_transaction,
+        FALSE);
+
+      goodix5135_tls_runtime_fail (
+        device,
+        "TLS-runtime D4 request length mismatch");
+
+      return;
+    }
+
+  if (!goodix5135_async_submit (
+        device,
+        &self->io,
+        GOODIX5135_REQUEST_BULK_OUT,
+        GOODIX5135_USB_PACKET_LENGTH,
+        GOODIX5135_FIRMWARE_IO_TIMEOUT_MS,
+        packet,
+        sizeof (packet),
+        goodix5135_tls_runtime_d4_out_cb,
+        NULL))
+    {
+      goodix5135_d4_transaction_out_complete (
+        &self->tls_runtime_d4_transaction,
+        FALSE);
+
+      goodix5135_tls_runtime_fail (
+        device,
+        "could not submit TLS-runtime D4 request");
+    }
+}
+
+
+static gboolean
+goodix5135_tls_runtime_start (
+  FpDevice      *device,
+  const guint8  *psk,
+  gsize          psk_len,
+  GError       **error)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (device);
+
+  guint8 packet[GOODIX5135_TLS_REQUEST_USB_LENGTH];
+  guint8 command = 0;
+
+  gsize logical_length = 0;
+
+  Goodix5135TlsSessionAction action =
+    GOODIX5135_TLS_SESSION_ACTION_NONE;
+
+  g_return_val_if_fail (
+    error == NULL || *error == NULL,
+    FALSE);
+
+  if (psk == NULL ||
+      psk_len == 0)
+    {
+      goodix5135_tls_runtime_set_error (
+        error,
+        "Goodix TLS runtime requires a non-empty private PSK");
+
+      return FALSE;
+    }
+
+  if (!self->active ||
+      !self->io.running)
+    {
+      goodix5135_tls_runtime_set_error (
+        error,
+        "Goodix TLS runtime requires an active I/O lifecycle");
+
+      return FALSE;
+    }
+
+  if (self->tls_session != NULL)
+    {
+      goodix5135_tls_runtime_set_error (
+        error,
+        "Goodix TLS runtime session is already active");
+
+      return FALSE;
+    }
+
+  self->tls_session =
+    goodix5135_tls_session_new (
+      psk,
+      psk_len,
+      error);
+
+  if (self->tls_session == NULL)
+    return FALSE;
+
+  if (!goodix5135_tls_session_start (
+        self->tls_session,
+        &command,
+        &action,
+        error))
+    {
+      goodix5135_tls_runtime_reset (
+        self);
+
+      return FALSE;
+    }
+
+  if (command !=
+        GOODIX5135_TLS_COMMAND_REQUEST ||
+      command !=
+        GOODIX5135_TLS_REQUEST_COMMAND ||
+      action !=
+        GOODIX5135_TLS_SESSION_ACTION_REQUEST_D0)
+    {
+      goodix5135_tls_runtime_set_error (
+        error,
+        "Goodix TLS session did not request D0");
+
+      goodix5135_tls_runtime_reset (
+        self);
+
+      return FALSE;
+    }
+
+  goodix5135_tls_request_transaction_init (
+    &self->tls_request_transaction);
+
+  if (!goodix5135_tls_request_transaction_begin (
+        &self->tls_request_transaction,
+        packet,
+        sizeof (packet),
+        &logical_length))
+    {
+      goodix5135_tls_runtime_set_error (
+        error,
+        "Could not begin Goodix TLS D0 transaction");
+
+      goodix5135_tls_runtime_reset (
+        self);
+
+      return FALSE;
+    }
+
+  if (logical_length !=
+      GOODIX5135_TLS_REQUEST_LOGICAL_LENGTH)
+    {
+      goodix5135_tls_request_transaction_out_complete (
+        &self->tls_request_transaction,
+        FALSE);
+
+      goodix5135_tls_runtime_set_error (
+        error,
+        "Goodix TLS D0 request length mismatch");
+
+      goodix5135_tls_runtime_reset (
+        self);
+
+      return FALSE;
+    }
+
+  if (!goodix5135_async_submit (
+        device,
+        &self->io,
+        GOODIX5135_REQUEST_BULK_OUT,
+        GOODIX5135_TLS_REQUEST_USB_LENGTH,
+        GOODIX5135_FIRMWARE_IO_TIMEOUT_MS,
+        packet,
+        sizeof (packet),
+        goodix5135_tls_runtime_d0_out_cb,
+        NULL))
+    {
+      goodix5135_tls_request_transaction_out_complete (
+        &self->tls_request_transaction,
+        FALSE);
+
+      goodix5135_tls_runtime_set_error (
+        error,
+        "Could not submit Goodix TLS D0 request");
+
+      goodix5135_tls_runtime_reset (
+        self);
+
+      return FALSE;
+    }
+
+  return TRUE;
+}
+
+
+static void
+goodix5135_tls_runtime_d0_out_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (device);
+
+  gboolean transport_can_advance;
+
+  (void) user_data;
+
+  transport_can_advance =
+    goodix5135_async_result_can_advance (
+      completion,
+      error);
+
+  if (transport_can_advance &&
+      (transfer == NULL ||
+       transfer->actual_length !=
+         GOODIX5135_TLS_REQUEST_USB_LENGTH))
+    transport_can_advance = FALSE;
+
+  g_clear_error (&error);
+
+  if (!goodix5135_tls_request_transaction_out_complete (
+        &self->tls_request_transaction,
+        transport_can_advance))
+    {
+      goodix5135_tls_runtime_fail (
+        device,
+        "TLS D0 OUT transport failed");
+
+      return;
+    }
+
+  if (!goodix5135_async_submit (
+        device,
+        &self->io,
+        GOODIX5135_REQUEST_BULK_IN,
+        GOODIX5135_USB_PACKET_LENGTH,
+        GOODIX5135_FIRMWARE_IO_TIMEOUT_MS,
+        NULL,
+        0,
+        goodix5135_tls_runtime_d0_ack_cb,
+        NULL))
+    {
+      goodix5135_tls_request_transaction_ack_complete (
+        &self->tls_request_transaction,
+        FALSE,
+        NULL,
+        0);
+
+      goodix5135_tls_runtime_fail (
+        device,
+        "could not submit TLS D0 ACK receive");
+    }
+}
+
+
+static void
+goodix5135_tls_runtime_d0_ack_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (device);
+
+  gboolean transport_can_advance;
+  gboolean protocol_ok;
+
+  (void) user_data;
+
+  transport_can_advance =
+    goodix5135_in_transfer_can_parse (
+      transfer,
+      completion,
+      error);
+
+  protocol_ok =
+    goodix5135_tls_request_transaction_ack_complete (
+      &self->tls_request_transaction,
+      transport_can_advance,
+      transport_can_advance
+        ? transfer->buffer
+        : NULL,
+      transport_can_advance
+        ? (gsize) transfer->actual_length
+        : 0);
+
+  g_clear_error (&error);
+
+  if (!protocol_ok ||
+      self->tls_request_transaction.state !=
+        GOODIX5135_TLS_REQUEST_TRANSACTION_DONE)
+    {
+      goodix5135_tls_runtime_fail (
+        device,
+        transport_can_advance
+          ? "TLS D0 returned invalid ACK"
+          : "TLS D0 ACK transport failed");
+
+      return;
+    }
+
+  if (!goodix5135_tls_runtime_submit_sensor_read (
+        device))
+    {
+      goodix5135_tls_runtime_fail (
+        device,
+        "could not submit first B0 TLS receive");
+    }
+}
+
+
+static void
+goodix5135_tls_runtime_sensor_frame_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (device);
+
+  g_autoptr(GByteArray) host_frame =
+    g_byte_array_new ();
+
+  g_autoptr(GByteArray) app_output =
+    g_byte_array_new ();
+
+  Goodix5135TlsSessionAction action =
+    GOODIX5135_TLS_SESSION_ACTION_NONE;
+
+  guint8 command = 0;
+
+  gboolean transport_can_advance;
+  gboolean session_ok;
+
+  (void) user_data;
+
+  transport_can_advance =
+    goodix5135_in_transfer_can_parse (
+      transfer,
+      completion,
+      error);
+
+  if (!transport_can_advance)
+    {
+      g_clear_error (&error);
+
+      goodix5135_tls_runtime_fail (
+        device,
+        "TLS B0 receive transport failed");
+
+      return;
+    }
+
+  session_ok =
+    goodix5135_tls_session_feed_sensor_frame (
+      self->tls_session,
+      transfer->buffer,
+      (gsize) transfer->actual_length,
+      host_frame,
+      app_output,
+      &command,
+      &action,
+      &error);
+
+  g_clear_error (&error);
+
+  if (!session_ok)
+    {
+      goodix5135_tls_runtime_fail (
+        device,
+        "TLS sensor frame could not be relayed");
+
+      return;
+    }
+
+  /*
+   * During the handshake bridge no application plaintext is expected.
+   * Never print or persist it if malformed traffic produces any.
+   */
+  if (app_output->len != 0)
+    {
+      goodix5135_tls_runtime_fail (
+        device,
+        "unexpected application data during TLS handshake");
+
+      return;
+    }
+
+  switch (action)
+    {
+    case GOODIX5135_TLS_SESSION_ACTION_NONE:
+      if (host_frame->len != 0 ||
+          command != 0)
+        {
+          goodix5135_tls_runtime_fail (
+            device,
+            "TLS session returned inconsistent NONE action");
+
+          return;
+        }
+
+      if (!goodix5135_tls_runtime_submit_sensor_read (
+            device))
+        {
+          goodix5135_tls_runtime_fail (
+            device,
+            "could not continue B0 TLS receive");
+        }
+
+      return;
+
+    case GOODIX5135_TLS_SESSION_ACTION_SEND_FRAME:
+      if (host_frame->len == 0 ||
+          command != 0)
+        {
+          goodix5135_tls_runtime_fail (
+            device,
+            "TLS SEND_FRAME action had invalid output");
+
+          return;
+        }
+
+      if (!goodix5135_tls_runtime_submit_host_frame (
+            device,
+            host_frame))
+        {
+          goodix5135_tls_runtime_fail (
+            device,
+            "could not submit host B0 TLS frame");
+        }
+
+      return;
+
+    case GOODIX5135_TLS_SESSION_ACTION_SEND_D4:
+      if (host_frame->len != 0 ||
+          command != GOODIX5135_TLS_COMMAND_ESTABLISHED)
+        {
+          goodix5135_tls_runtime_fail (
+            device,
+            "TLS SEND_D4 action had invalid output");
+
+          return;
+        }
+
+      goodix5135_tls_runtime_start_d4 (
+        device);
+
+      return;
+
+    case GOODIX5135_TLS_SESSION_ACTION_REQUEST_D0:
+    case GOODIX5135_TLS_SESSION_ACTION_READY:
+    default:
+      goodix5135_tls_runtime_fail (
+        device,
+        "TLS sensor frame advanced to an invalid action");
+
+      return;
+    }
+}
+
+
+static void
+goodix5135_tls_runtime_host_frame_out_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (device);
+
+  Goodix5135TlsSessionAction action =
+    GOODIX5135_TLS_SESSION_ACTION_NONE;
+
+  guint8 command = 0;
+  guint expected_length =
+    GPOINTER_TO_UINT (user_data);
+
+  gboolean transport_can_advance;
+  gboolean session_ok;
+
+  transport_can_advance =
+    goodix5135_async_result_can_advance (
+      completion,
+      error);
+
+  if (transport_can_advance &&
+      (transfer == NULL ||
+       expected_length == 0 ||
+       transfer->actual_length !=
+         (gssize) expected_length))
+    transport_can_advance = FALSE;
+
+  g_clear_error (&error);
+
+  if (!transport_can_advance)
+    {
+      goodix5135_tls_runtime_fail (
+        device,
+        "host B0 TLS OUT transport failed");
+
+      return;
+    }
+
+  session_ok =
+    goodix5135_tls_session_host_frame_sent (
+      self->tls_session,
+      &command,
+      &action,
+      &error);
+
+  g_clear_error (&error);
+
+  if (!session_ok)
+    {
+      goodix5135_tls_runtime_fail (
+        device,
+        "TLS host-frame completion was out of order");
+
+      return;
+    }
+
+  switch (action)
+    {
+    case GOODIX5135_TLS_SESSION_ACTION_NONE:
+      if (command != 0)
+        {
+          goodix5135_tls_runtime_fail (
+            device,
+            "TLS host-frame NONE action contained a command");
+
+          return;
+        }
+
+      if (!goodix5135_tls_runtime_submit_sensor_read (
+            device))
+        {
+          goodix5135_tls_runtime_fail (
+            device,
+            "could not continue TLS handshake receive");
+        }
+
+      return;
+
+    case GOODIX5135_TLS_SESSION_ACTION_SEND_D4:
+      if (command !=
+          GOODIX5135_TLS_COMMAND_ESTABLISHED)
+        {
+          goodix5135_tls_runtime_fail (
+            device,
+            "TLS host-frame completion produced invalid D4 command");
+
+          return;
+        }
+
+      goodix5135_tls_runtime_start_d4 (
+        device);
+
+      return;
+
+    case GOODIX5135_TLS_SESSION_ACTION_REQUEST_D0:
+    case GOODIX5135_TLS_SESSION_ACTION_SEND_FRAME:
+    case GOODIX5135_TLS_SESSION_ACTION_READY:
+    default:
+      goodix5135_tls_runtime_fail (
+        device,
+        "TLS host-frame completion advanced to invalid action");
+
+      return;
+    }
+}
+
+
+static void
+goodix5135_tls_runtime_d4_out_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (device);
+
+  gboolean transport_can_advance;
+
+  (void) user_data;
+
+  transport_can_advance =
+    goodix5135_async_result_can_advance (
+      completion,
+      error);
+
+  if (transport_can_advance &&
+      (transfer == NULL ||
+       transfer->actual_length !=
+         GOODIX5135_USB_PACKET_LENGTH))
+    transport_can_advance = FALSE;
+
+  g_clear_error (&error);
+
+  if (!goodix5135_d4_transaction_out_complete (
+        &self->tls_runtime_d4_transaction,
+        transport_can_advance))
+    {
+      goodix5135_tls_runtime_fail (
+        device,
+        "TLS-runtime D4 OUT transport failed");
+
+      return;
+    }
+
+  if (!goodix5135_async_submit (
+        device,
+        &self->io,
+        GOODIX5135_REQUEST_BULK_IN,
+        GOODIX5135_USB_PACKET_LENGTH,
+        GOODIX5135_FIRMWARE_IO_TIMEOUT_MS,
+        NULL,
+        0,
+        goodix5135_tls_runtime_d4_ack_cb,
+        NULL))
+    {
+      goodix5135_d4_transaction_ack_complete (
+        &self->tls_runtime_d4_transaction,
+        FALSE,
+        NULL,
+        0);
+
+      goodix5135_tls_runtime_fail (
+        device,
+        "could not submit TLS-runtime D4 ACK receive");
+    }
+}
+
+
+static void
+goodix5135_tls_runtime_d4_ack_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (device);
+
+  Goodix5135TlsSessionAction action =
+    GOODIX5135_TLS_SESSION_ACTION_NONE;
+
+  gboolean transport_can_advance;
+  gboolean protocol_ok;
+  gboolean session_ok;
+
+  (void) user_data;
+
+  transport_can_advance =
+    goodix5135_in_transfer_can_parse (
+      transfer,
+      completion,
+      error);
+
+  protocol_ok =
+    goodix5135_d4_transaction_ack_complete (
+      &self->tls_runtime_d4_transaction,
+      transport_can_advance,
+      transport_can_advance
+        ? transfer->buffer
+        : NULL,
+      transport_can_advance
+        ? (gsize) transfer->actual_length
+        : 0);
+
+  g_clear_error (&error);
+
+  if (!protocol_ok ||
+      self->tls_runtime_d4_transaction.state !=
+        GOODIX5135_D4_TRANSACTION_DONE)
+    {
+      goodix5135_tls_runtime_fail (
+        device,
+        transport_can_advance
+          ? "TLS-runtime D4 returned invalid ACK"
+          : "TLS-runtime D4 ACK transport failed");
+
+      return;
+    }
+
+  session_ok =
+    goodix5135_tls_session_d4_ack (
+      self->tls_session,
+      &action,
+      &error);
+
+  g_clear_error (&error);
+
+  if (!session_ok ||
+      action !=
+        GOODIX5135_TLS_SESSION_ACTION_READY ||
+      !goodix5135_tls_session_is_ready (
+        self->tls_session))
+    {
+      goodix5135_tls_runtime_fail (
+        device,
+        "TLS session did not enter READY after D4");
+
+      return;
+    }
+
+  fp_dbg (
+    "Goodix native TLS runtime bridge reached READY");
 }
 
 
@@ -4672,6 +5692,12 @@ goodix5135_close (FpImageDevice *dev)
   goodix5135_config_runtime_state_reset (
     self);
 
+  /*
+   * Close cannot retain volatile TLS state.
+   */
+  goodix5135_tls_runtime_reset (
+    self);
+
   usb_dev = fpi_device_get_usb_device (FP_DEVICE (dev));
 
   g_usb_device_release_interface (usb_dev,
@@ -4694,6 +5720,9 @@ goodix5135_maybe_finish_deactivate (FpiDeviceGoodix5135 *self,
 
   fp_dbg ("I/O lifecycle drained at generation %" G_GUINT64_FORMAT,
           self->io.generation);
+
+  goodix5135_tls_runtime_reset (
+    self);
 
   self->deactivating = FALSE;
 
@@ -4799,6 +5828,14 @@ fpi_device_goodix5135_init (FpiDeviceGoodix5135 *self)
   self->state = 0;
 
   goodix5135_io_init (&self->io);
+
+  self->tls_session = NULL;
+
+  goodix5135_tls_request_transaction_init (
+    &self->tls_request_transaction);
+
+  goodix5135_d4_transaction_init (
+    &self->tls_runtime_d4_transaction);
 
   goodix5135_queue_cleanup_init (
     &self->queue_cleanup);
