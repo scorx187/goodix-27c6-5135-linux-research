@@ -129,6 +129,7 @@ struct _FpiDeviceGoodix5135
   Goodix5135TlsEstablishedTransaction  tls_runtime_d4_transaction;
   gboolean                             tls_runtime_open_gate;
   guint                                tls_runtime_d4_delay_source;
+  guint                                capture_baseline_settle_source;
 
   Goodix5135CaptureRuntimeState         capture_runtime_state;
 
@@ -1723,6 +1724,12 @@ goodix5135_activation_continue_after_nop (
 #define GOODIX5135_LIVE_FDT_UP_ENV   "GOODIX5135_LIVE_FDT_UP_FILE"
 
 #define GOODIX5135_CAPTURE_EVENT_TIMEOUT_MS 45000U
+
+/*
+ * Host-side release settling before a new FDT manual baseline.
+ * No USB retry, sensor reset, or FDT threshold change is used.
+ */
+#define GOODIX5135_CAPTURE_BASELINE_SETTLE_MS 250U
 #define GOODIX5135_CAPTURE_IMAGE_TIMEOUT_MS 10000U
 #define GOODIX5135_CAPTURE_MAX_TLS_READS    4U
 
@@ -2062,6 +2069,14 @@ goodix5135_capture_runtime_reset (
 {
   g_return_if_fail (
     self != NULL);
+
+  if (self->capture_baseline_settle_source != 0)
+    {
+      g_source_remove (
+        self->capture_baseline_settle_source);
+
+      self->capture_baseline_settle_source = 0;
+    }
 
   goodix5135_live_tls_secure_clear (
     self->capture_fdt_seed,
@@ -7933,6 +7948,50 @@ goodix5135_deactivate (FpImageDevice *dev)
   goodix5135_maybe_finish_deactivate (self, dev);
 }
 
+static gboolean
+goodix5135_capture_baseline_settle_cb (
+  gpointer user_data)
+{
+  FpImageDevice *dev =
+    FP_IMAGE_DEVICE (user_data);
+
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (dev);
+
+  /*
+   * This GLib source is currently dispatching.
+   * Clear the stored source ID first so cleanup cannot try to
+   * remove the currently executing source.
+   */
+  self->capture_baseline_settle_source = 0;
+
+  if (!goodix5135_fpimage_test_requested () ||
+      !self->active ||
+      self->deactivating ||
+      self->state !=
+        FPI_IMAGE_DEVICE_STATE_AWAIT_FINGER_ON)
+    {
+      fp_dbg (
+        "Native FpImage stage: pre-baseline settle became stale");
+
+      return G_SOURCE_REMOVE;
+    }
+
+  fp_dbg (
+    "Native FpImage stage: 250 ms pre-baseline settle completed");
+
+  if (!goodix5135_capture_runtime_start (
+        FP_DEVICE (dev)))
+    {
+      goodix5135_capture_runtime_fail (
+        FP_DEVICE (dev),
+        "could not start FDT detection after pre-baseline settle");
+    }
+
+  return G_SOURCE_REMOVE;
+}
+
+
 static void
 goodix5135_change_state (
   FpImageDevice      *dev,
@@ -7959,12 +8018,30 @@ goodix5135_change_state (
   switch (state)
     {
     case FPI_IMAGE_DEVICE_STATE_AWAIT_FINGER_ON:
-      if (!goodix5135_capture_runtime_start (
-            FP_DEVICE (dev)))
+      if (self->capture_baseline_settle_source != 0)
+        {
+          fp_dbg (
+            "Native FpImage stage: pre-baseline settle already pending");
+
+          return;
+        }
+
+      fp_dbg (
+        "Native FpImage stage: scheduling 250 ms pre-baseline settle");
+
+      self->capture_baseline_settle_source =
+        g_timeout_add_full (
+          G_PRIORITY_DEFAULT,
+          GOODIX5135_CAPTURE_BASELINE_SETTLE_MS,
+          goodix5135_capture_baseline_settle_cb,
+          g_object_ref (dev),
+          g_object_unref);
+
+      if (self->capture_baseline_settle_source == 0)
         {
           goodix5135_capture_runtime_fail (
             FP_DEVICE (dev),
-            "could not start FDT finger-on detection");
+            "could not schedule pre-baseline settle");
         }
 
       return;
@@ -8019,6 +8096,7 @@ fpi_device_goodix5135_init (FpiDeviceGoodix5135 *self)
   self->tls_session = NULL;
   self->tls_runtime_open_gate = FALSE;
   self->tls_runtime_d4_delay_source = 0;
+  self->capture_baseline_settle_source = 0;
 
   goodix5135_capture_runtime_reset (
     self);
