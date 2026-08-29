@@ -3317,6 +3317,67 @@ goodix5135_arm_config_upload_transport (
   return TRUE;
 }
 
+/*
+ * Stage exactly one 64-byte packet from the already prepared volatile
+ * CFG70 transport buffer.
+ *
+ * The current packet is selected exclusively from the protocol
+ * transaction's packets_completed counter.
+ *
+ * This helper performs no USB I/O and does not advance the transaction.
+ * A later transport-completion path must advance protocol state only
+ * after an actual successful USB completion.
+ */
+static gboolean G_GNUC_UNUSED
+goodix5135_stage_current_config_packet (
+  FpiDeviceGoodix5135 *self,
+  guint8              *packet,
+  gsize                packet_size)
+{
+  gsize packet_index;
+  gsize packet_offset;
+
+  g_assert (self != NULL);
+
+  if (packet == NULL ||
+      packet_size != GOODIX5135_USB_PACKET_LENGTH ||
+      !self->otp_calibration_valid ||
+      !self->config_calibration_ready ||
+      !self->config_prepared ||
+      !self->config_transport_armed ||
+      self->config_logical_length !=
+        GOODIX5135_CONFIG_LOGICAL_LENGTH ||
+      self->config_transport_length !=
+        GOODIX5135_CONFIG_TRANSFER_LENGTH ||
+      self->config_upload_transaction.state !=
+        GOODIX5135_CONFIG_UPLOAD_TRANSACTION_WAIT_OUT)
+    return FALSE;
+
+  packet_index =
+    (gsize) self->config_upload_transaction.packets_completed;
+
+  if (packet_index >=
+      GOODIX5135_CONFIG_USB_PACKET_COUNT)
+    return FALSE;
+
+  packet_offset =
+    packet_index * GOODIX5135_USB_PACKET_LENGTH;
+
+  if (packet_offset >
+        self->config_transport_length ||
+      GOODIX5135_USB_PACKET_LENGTH >
+        self->config_transport_length - packet_offset)
+    return FALSE;
+
+  memcpy (
+    packet,
+    self->config_transfer + packet_offset,
+    GOODIX5135_USB_PACKET_LENGTH);
+
+  return TRUE;
+}
+
+
 
 static void
 goodix5135_start_otp_read (
