@@ -5279,6 +5279,155 @@ test_otp_read_transaction_invalid_order (void)
 }
 
 
+static void
+test_goodix5135_prepare_config_upload (void)
+{
+  guint8 template_data[GOODIX5135_CONFIG_LENGTH] = { 0 };
+  guint8 runtime_config[GOODIX5135_CONFIG_LENGTH] = { 0 };
+  guint8 transfer[GOODIX5135_CONFIG_TRANSFER_LENGTH] = { 0 };
+  Goodix5135ConfigUploadTransaction transaction;
+  Goodix5135OtpCalibration calibration = {
+    .tcode = 0x0100,
+    .fdt_delta = 0x12,
+    .fdt_offset = 0,
+    .dac0 = 0x0456,
+    .dac1 = 0x22,
+    .dac2 = 0x33,
+    .dac3 = 0x44,
+  };
+  gsize logical_length = 0;
+  gsize transport_length = 0;
+  guint16 checksum = 0;
+
+  /*
+   * Synthetic protocol fixture only.
+   * This is not the vendor CFG70 blob.
+   */
+  template_data[0x00] = 0x70;
+  template_data[0x01] = 0x11;
+  template_data[0x02] = 0x74;
+  template_data[0x03] = 0x85;
+
+  /* 0x005c -> 0x0180 */
+  template_data[0x71] = 0x5c;
+  template_data[0x72] = 0x00;
+  template_data[0x73] = 0x80;
+  template_data[0x74] = 0x01;
+
+  /* 0x0220 -> 0x0808 */
+  template_data[0x75] = 0x20;
+  template_data[0x76] = 0x02;
+  template_data[0x77] = 0x08;
+  template_data[0x78] = 0x08;
+
+  /* 0x0236 -> 0x0080 */
+  template_data[0x79] = 0x36;
+  template_data[0x7a] = 0x02;
+  template_data[0x7b] = 0x80;
+  template_data[0x7c] = 0x00;
+
+  /* 0x0238 -> 0x0080 */
+  template_data[0x7d] = 0x38;
+  template_data[0x7e] = 0x02;
+  template_data[0x7f] = 0x80;
+  template_data[0x80] = 0x00;
+
+  /* 0x023a -> 0x0080 */
+  template_data[0x81] = 0x3a;
+  template_data[0x82] = 0x02;
+  template_data[0x83] = 0x80;
+  template_data[0x84] = 0x00;
+
+  /* 0x0082 -> 0x1580 */
+  template_data[0xad] = 0x82;
+  template_data[0xae] = 0x00;
+  template_data[0xaf] = 0x80;
+  template_data[0xb0] = 0x15;
+
+  g_assert_true (
+      goodix5135_prepare_config_upload (
+          template_data,
+          sizeof (template_data),
+          &calibration,
+          runtime_config,
+          sizeof (runtime_config),
+          &transaction,
+          transfer,
+          sizeof (transfer),
+          &logical_length,
+          &transport_length));
+
+  g_assert_cmpint (
+      transaction.state,
+      ==,
+      GOODIX5135_CONFIG_UPLOAD_TRANSACTION_WAIT_OUT);
+
+  g_assert_cmpuint (
+      transaction.packets_completed,
+      ==,
+      0);
+
+  g_assert_cmpuint (
+      logical_length,
+      ==,
+      GOODIX5135_CONFIG_LOGICAL_LENGTH);
+
+  g_assert_cmpuint (
+      transport_length,
+      ==,
+      GOODIX5135_CONFIG_TRANSFER_LENGTH);
+
+  g_assert_true (
+      goodix5135_cfg70_checksum (
+          runtime_config,
+          sizeof (runtime_config),
+          &checksum));
+
+  g_assert_cmpuint (
+      runtime_config[222] |
+      ((guint16) runtime_config[223] << 8),
+      ==,
+      checksum);
+
+  g_assert_cmpuint (
+      runtime_config[0x73] |
+      ((guint16) runtime_config[0x74] << 8),
+      ==,
+      calibration.tcode);
+
+  g_assert_cmpuint (
+      runtime_config[0x77] |
+      ((guint16) runtime_config[0x78] << 8),
+      ==,
+      calibration.dac0);
+
+  g_assert_false (
+      goodix5135_prepare_config_upload (
+          template_data,
+          sizeof (template_data),
+          &calibration,
+          runtime_config,
+          GOODIX5135_CONFIG_LENGTH - 1,
+          &transaction,
+          transfer,
+          sizeof (transfer),
+          &logical_length,
+          &transport_length));
+
+  g_assert_false (
+      goodix5135_prepare_config_upload (
+          template_data,
+          sizeof (template_data),
+          &calibration,
+          runtime_config,
+          sizeof (runtime_config),
+          &transaction,
+          transfer,
+          GOODIX5135_CONFIG_TRANSFER_LENGTH - 1,
+          &logical_length,
+          &transport_length));
+}
+
 int
 main (int argc, char **argv)
 {
@@ -7015,6 +7164,10 @@ main (int argc, char **argv)
 
 
 
+
+  g_test_add_func (
+        "/goodix5135/proto/config-upload/prepare-host-seam",
+        test_goodix5135_prepare_config_upload);
 
   return g_test_run ();
 }

@@ -3517,3 +3517,52 @@ goodix5135_parse_image_frame (const guint8        *data,
 
   return TRUE;
 }
+
+gboolean
+goodix5135_prepare_config_upload (
+    const guint8                      *template_data,
+    gsize                              template_length,
+    const Goodix5135OtpCalibration    *calibration,
+    guint8                            *runtime_config,
+    gsize                              runtime_config_size,
+    Goodix5135ConfigUploadTransaction *transaction,
+    guint8                            *transfer,
+    gsize                              transfer_size,
+    gsize                             *logical_length,
+    gsize                             *transport_length)
+{
+  if (template_data == NULL ||
+      calibration == NULL ||
+      runtime_config == NULL ||
+      transaction == NULL ||
+      transfer == NULL ||
+      logical_length == NULL ||
+      transport_length == NULL)
+    return FALSE;
+
+  if (runtime_config_size < GOODIX5135_CONFIG_LENGTH ||
+      transfer_size < GOODIX5135_CONFIG_TRANSFER_LENGTH)
+    return FALSE;
+
+  if (!goodix5135_build_runtime_config (
+          template_data,
+          template_length,
+          calibration,
+          runtime_config,
+          runtime_config_size))
+    return FALSE;
+
+  goodix5135_config_upload_transaction_init (transaction);
+
+  if (!goodix5135_config_upload_transaction_begin (
+          transaction,
+          runtime_config,
+          GOODIX5135_CONFIG_LENGTH,
+          transfer,
+          transfer_size,
+          logical_length,
+          transport_length))
+    return FALSE;
+
+  return TRUE;
+}

@@ -683,6 +683,27 @@ gboolean goodix5135_config_upload_transaction_response_complete (
   const guint8                      *data,
   gsize                              data_length);
 
+/*
+ * Prepare a complete volatile config-upload transaction from a caller-supplied
+ * CFG70 template and already-validated OTP-derived calibration.
+ *
+ * This helper deliberately owns no template source and performs no USB I/O.
+ * It only composes the host-side CFG70 builder with the existing 0x90
+ * transaction/framing state machine.
+ */
+gboolean goodix5135_prepare_config_upload (
+    const guint8                         *template_data,
+    gsize                                 template_length,
+    const Goodix5135OtpCalibration       *calibration,
+    guint8                               *runtime_config,
+    gsize                                 runtime_config_size,
+    Goodix5135ConfigUploadTransaction    *transaction,
+    guint8                               *transfer,
+    gsize                                 transfer_size,
+    gsize                                *logical_length,
+    gsize                                *transport_length);
+
+
 
 /*
  * Host-only activation sequence controller.
