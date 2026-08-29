@@ -153,6 +153,7 @@ driver_sources = {
           'drivers/goodix5135/goodix5135-io.c',
           'drivers/goodix5135/goodix5135-request.c',
           'drivers/goodix5135/goodix5135-transport.c',
+          'drivers/goodix5135/goodix5135-queue-cleanup.c',
           'drivers/goodix5135/goodix5135-async-dispatch.c',
           'drivers/goodix5135/goodix5135-async.c' ],
     'goodixmoc' :

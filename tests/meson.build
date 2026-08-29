@@ -431,6 +431,27 @@ endif
 
 
 if 'goodix5135' in drivers
+    goodix5135_queue_cleanup_test = executable(
+        'test-goodix5135-queue-cleanup',
+        sources: [
+            'test-goodix5135-queue-cleanup.c',
+            '../libfprint/drivers/goodix5135/goodix5135-queue-cleanup.c',
+        ],
+        dependencies: glib_dep,
+        c_args: common_cflags,
+        install: false,
+    )
+
+    test(
+        'goodix5135-queue-cleanup',
+        goodix5135_queue_cleanup_test,
+        suite: ['unit-tests'],
+        env: envs,
+    )
+endif
+
+
+if 'goodix5135' in drivers
     goodix5135_async_dispatch_test = executable(
         'test-goodix5135-async-dispatch',
         sources: [
