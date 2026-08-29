@@ -308,6 +308,31 @@ test_firmware_ack_bit1_clear (void)
 }
 
 static void
+test_firmware_ack_extended_payload (void)
+{
+  /*
+   * Reference-compatible extended ACK.
+   *
+   * decode_ack() consumes only the first two payload bytes:
+   *   payload[0] = acknowledged command 0xa8
+   *   payload[1] = status 0x01
+   *
+   * Additional payload bytes must not invalidate an otherwise valid ACK.
+   */
+  static const guint8 ack[] = {
+    0xa0, 0x08, 0x00, 0xa8,
+    0xb0, 0x05, 0x00,
+    0xa8, 0x01, 0x12, 0x34,
+    0x06,
+  };
+
+  g_assert_true (
+    goodix5135_parse_firmware_version_ack (
+      ack,
+      sizeof (ack)));
+}
+
+static void
 test_firmware_ack_negative (void)
 {
   /*
@@ -597,6 +622,13 @@ static const guint8 firmware_success_ack[] = {
   0xb0, 0x03, 0x00, 0xa8, 0x03, 0x4c,
 };
 
+static const guint8 firmware_extended_ack[] = {
+  0xa0, 0x08, 0x00, 0xa8,
+  0xb0, 0x05, 0x00,
+  0xa8, 0x01, 0x12, 0x34,
+  0x06,
+};
+
 static const guint8 firmware_negative_ack[] = {
   0xa0, 0x06, 0x00, 0xa6,
   0xb0, 0x03, 0x00, 0xa8, 0x00, 0x4f,
@@ -692,6 +724,46 @@ test_firmware_transaction_happy_path (void)
       firmware_length),
     ==,
     0);
+}
+
+static void
+test_firmware_transaction_extended_ack (void)
+{
+  Goodix5135FirmwareTransaction transaction;
+  guint8 packet[GOODIX5135_USB_PACKET_LENGTH];
+  gsize logical_length = 0;
+
+  goodix5135_firmware_transaction_init (
+    &transaction);
+
+  g_assert_true (
+    goodix5135_firmware_transaction_begin (
+      &transaction,
+      packet,
+      sizeof (packet),
+      &logical_length));
+
+  g_assert_true (
+    goodix5135_firmware_transaction_out_complete (
+      &transaction,
+      TRUE));
+
+  g_assert_cmpuint (
+    transaction.state,
+    ==,
+    GOODIX5135_FIRMWARE_TRANSACTION_WAIT_ACK);
+
+  g_assert_true (
+    goodix5135_firmware_transaction_ack_complete (
+      &transaction,
+      TRUE,
+      firmware_extended_ack,
+      sizeof (firmware_extended_ack)));
+
+  g_assert_cmpuint (
+    transaction.state,
+    ==,
+    GOODIX5135_FIRMWARE_TRANSACTION_WAIT_RESPONSE);
 }
 
 static void
@@ -983,6 +1055,9 @@ main (int argc, char **argv)
                    test_firmware_ack_success_padded);
 
   g_test_add_func ("/goodix5135/proto/firmware-ack/bit1-clear", test_firmware_ack_bit1_clear);
+  g_test_add_func ("/goodix5135/proto/firmware-ack/extended-payload",
+                   test_firmware_ack_extended_payload);
+
   g_test_add_func ("/goodix5135/proto/firmware-ack/negative",
                    test_firmware_ack_negative);
 
@@ -1019,6 +1094,9 @@ main (int argc, char **argv)
 
   g_test_add_func ("/goodix5135/proto/firmware-transaction/happy-path",
                    test_firmware_transaction_happy_path);
+
+  g_test_add_func ("/goodix5135/proto/firmware-transaction/extended-ack",
+                   test_firmware_transaction_extended_ack);
 
   g_test_add_func ("/goodix5135/proto/firmware-transaction/out-transport-failure",
                    test_firmware_transaction_out_transport_failure);

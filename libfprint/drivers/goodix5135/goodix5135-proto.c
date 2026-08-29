@@ -208,7 +208,12 @@ goodix5135_parse_firmware_version_ack (
         &payload_length))
     return FALSE;
 
-  if (payload_length != GOODIX5135_ACK_PAYLOAD_LENGTH)
+  /*
+   * Reference decode_ack() consumes payload[0] and payload[1] but does
+   * not require the ACK payload to end there.  Require only the minimum
+   * bytes needed for acknowledged-command and status fields.
+   */
+  if (payload_length < GOODIX5135_ACK_MIN_PAYLOAD_LENGTH)
     return FALSE;
 
   if (payload[0] != GOODIX5135_COMMAND_FIRMWARE_VERSION)
