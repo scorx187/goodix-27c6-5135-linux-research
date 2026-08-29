@@ -100,6 +100,7 @@ struct _FpiDeviceGoodix5135
   Goodix5135TlsRequestTransaction      tls_request_transaction;
   Goodix5135TlsEstablishedTransaction  tls_runtime_d4_transaction;
   gboolean                             tls_runtime_open_gate;
+  guint                                tls_runtime_d4_delay_source;
 };
 
 G_DECLARE_FINAL_TYPE (FpiDeviceGoodix5135,
@@ -196,6 +197,14 @@ goodix5135_tls_runtime_submit_host_frame (
 static void
 goodix5135_tls_runtime_start_d4 (
   FpDevice *device);
+
+static gboolean
+goodix5135_tls_runtime_schedule_d4 (
+  FpDevice *device);
+
+static gboolean
+goodix5135_tls_runtime_d4_delay_cb (
+  gpointer user_data);
 
 static void
 goodix5135_tls_runtime_d0_out_cb (
@@ -1523,6 +1532,7 @@ goodix5135_activation_continue_after_nop (
 
 
 #define GOODIX5135_TLS_RUNTIME_SENSOR_READ_SIZE 0x10000U
+#define GOODIX5135_TLS_D4_SETTLE_DELAY_MS       10U
 
 #define GOODIX5135_LIVE_TLS_TEST_ENV "GOODIX5135_LIVE_TLS_TEST"
 #define GOODIX5135_LIVE_TLS_PSK_ENV  "GOODIX5135_LIVE_TLS_PSK_FILE"
@@ -1769,6 +1779,14 @@ goodix5135_tls_runtime_reset (
 {
   g_return_if_fail (self != NULL);
 
+  if (self->tls_runtime_d4_delay_source != 0)
+    {
+      g_source_remove (
+        self->tls_runtime_d4_delay_source);
+
+      self->tls_runtime_d4_delay_source = 0;
+    }
+
   if (self->tls_session != NULL)
     {
       goodix5135_tls_session_free (
@@ -1932,6 +1950,61 @@ goodix5135_tls_runtime_submit_host_frame (
     host_frame->len,
     goodix5135_tls_runtime_host_frame_out_cb,
     GUINT_TO_POINTER (transfer_length));
+}
+
+
+static gboolean
+goodix5135_tls_runtime_d4_delay_cb (
+  gpointer user_data)
+{
+  FpDevice *device =
+    FP_DEVICE (user_data);
+
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (device);
+
+  self->tls_runtime_d4_delay_source =
+    0;
+
+  if (self->tls_session == NULL ||
+      !self->io.running)
+    return G_SOURCE_REMOVE;
+
+  fp_dbg (
+    "Native TLS stage: D4 settle delay completed");
+
+  goodix5135_tls_runtime_start_d4 (
+    device);
+
+  return G_SOURCE_REMOVE;
+}
+
+
+static gboolean
+goodix5135_tls_runtime_schedule_d4 (
+  FpDevice *device)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (device);
+
+  if (self->tls_session == NULL ||
+      !self->io.running ||
+      self->tls_runtime_d4_delay_source != 0)
+    return FALSE;
+
+  fp_dbg (
+    "Native TLS stage: scheduling D4 after 10 ms settle delay");
+
+  self->tls_runtime_d4_delay_source =
+    g_timeout_add_full (
+      G_PRIORITY_DEFAULT,
+      GOODIX5135_TLS_D4_SETTLE_DELAY_MS,
+      goodix5135_tls_runtime_d4_delay_cb,
+      g_object_ref (device),
+      g_object_unref);
+
+  return
+    self->tls_runtime_d4_delay_source != 0;
 }
 
 
@@ -2425,8 +2498,13 @@ goodix5135_tls_runtime_sensor_frame_cb (
           return;
         }
 
-      goodix5135_tls_runtime_start_d4 (
-        device);
+      if (!goodix5135_tls_runtime_schedule_d4 (
+            device))
+        {
+          goodix5135_tls_runtime_fail (
+            device,
+            "could not schedule TLS D4 settle delay");
+        }
 
       return;
 
@@ -2540,8 +2618,13 @@ goodix5135_tls_runtime_host_frame_out_cb (
           return;
         }
 
-      goodix5135_tls_runtime_start_d4 (
-        device);
+      if (!goodix5135_tls_runtime_schedule_d4 (
+            device))
+        {
+          goodix5135_tls_runtime_fail (
+            device,
+            "could not schedule TLS D4 settle delay");
+        }
 
       return;
 
@@ -6120,6 +6203,7 @@ fpi_device_goodix5135_init (FpiDeviceGoodix5135 *self)
 
   self->tls_session = NULL;
   self->tls_runtime_open_gate = FALSE;
+  self->tls_runtime_d4_delay_source = 0;
 
   goodix5135_tls_request_transaction_init (
     &self->tls_request_transaction);
