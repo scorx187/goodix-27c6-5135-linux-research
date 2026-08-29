@@ -66,6 +66,19 @@ struct _FpiDeviceGoodix5135
    */
   Goodix5135ConfigUploadTransaction    config_upload_transaction;
   gboolean                             config_calibration_ready;
+
+  /*
+   * Volatile CFG70 preparation state.
+   *
+   * No template source is owned here. These buffers may only contain
+   * host-prepared configuration during a later explicitly gated step,
+   * and are wiped at every relevant lifecycle boundary.
+   */
+  guint8                               config_runtime[GOODIX5135_CONFIG_LENGTH];
+  guint8                               config_transfer[GOODIX5135_CONFIG_TRANSFER_LENGTH];
+  gsize                                config_logical_length;
+  gsize                                config_transport_length;
+  gboolean                             config_prepared;
 };
 
 G_DECLARE_FINAL_TYPE (FpiDeviceGoodix5135,
@@ -366,6 +379,10 @@ static void goodix5135_start_otp_read (
   FpDevice *device);
 
 static void
+goodix5135_config_runtime_state_reset (
+  FpiDeviceGoodix5135 *self);
+
+static void
 goodix5135_open_transaction_fail (FpDevice    *device,
                                   const gchar *message)
 {
@@ -385,6 +402,12 @@ goodix5135_open_transaction_fail (FpDevice    *device,
     goodix5135_io_stop (&self->io);
 
   g_assert (goodix5135_io_can_finish_stop (&self->io));
+
+  /*
+   * Failed open cannot retain volatile config preparation state.
+   */
+  goodix5135_config_runtime_state_reset (
+    self);
 
   usb_dev = fpi_device_get_usb_device (device);
 
@@ -3102,6 +3125,27 @@ goodix5135_config_runtime_state_reset (
 {
   g_assert (self != NULL);
 
+  /*
+   * Volatile CFG70 material/framing must never survive a
+   * reset/failure/close lifecycle boundary.
+   */
+  goodix5135_secure_zero (
+    self->config_runtime,
+    sizeof (self->config_runtime));
+
+  goodix5135_secure_zero (
+    self->config_transfer,
+    sizeof (self->config_transfer));
+
+  self->config_logical_length =
+    0;
+
+  self->config_transport_length =
+    0;
+
+  self->config_prepared =
+    FALSE;
+
   goodix5135_config_upload_transaction_init (
     &self->config_upload_transaction);
 
@@ -3753,6 +3797,12 @@ goodix5135_close (FpImageDevice *dev)
     &self->otp_calibration,
     sizeof (self->otp_calibration));
 
+  /*
+   * Close cannot retain volatile config preparation state.
+   */
+  goodix5135_config_runtime_state_reset (
+    self);
+
   usb_dev = fpi_device_get_usb_device (FP_DEVICE (dev));
 
   g_usb_device_release_interface (usb_dev,
@@ -3918,6 +3968,12 @@ fpi_device_goodix5135_init (FpiDeviceGoodix5135 *self)
 
   self->otp_calibration_valid =
     FALSE;
+
+  /*
+   * Establish explicit zero/IDLE config preparation state.
+   */
+  goodix5135_config_runtime_state_reset (
+    self);
 }
 
 static void
