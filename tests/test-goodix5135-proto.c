@@ -571,6 +571,357 @@ test_firmware_response_arguments (void)
       sizeof (response)));
 }
 
+static const guint8 firmware_success_ack[] = {
+  0xa0, 0x06, 0x00, 0xa6,
+  0xb0, 0x03, 0x00, 0xa8, 0x03, 0x4c,
+};
+
+static const guint8 firmware_negative_ack[] = {
+  0xa0, 0x06, 0x00, 0xa6,
+  0xb0, 0x03, 0x00, 0xa8, 0x01, 0x4e,
+};
+
+static const guint8 firmware_valid_response[] = {
+  0xa0, 0x16, 0x00, 0xb6,
+  0xa8, 0x13, 0x00,
+  0x47, 0x46, 0x5f, 0x54, 0x45, 0x53, 0x54, 0x5f,
+  0x41, 0x50, 0x50, 0x5f,
+  0x30, 0x30, 0x30, 0x30, 0x30,
+  0x00,
+  0x34,
+};
+
+static void
+test_firmware_transaction_happy_path (void)
+{
+  Goodix5135FirmwareTransaction transaction;
+  guint8 packet[GOODIX5135_USB_PACKET_LENGTH];
+  gsize logical_length = 0;
+  const guint8 *firmware = NULL;
+  gsize firmware_length = 0;
+
+  goodix5135_firmware_transaction_init (
+    &transaction);
+
+  g_assert_cmpuint (
+    transaction.state,
+    ==,
+    GOODIX5135_FIRMWARE_TRANSACTION_IDLE);
+
+  g_assert_true (
+    goodix5135_firmware_transaction_begin (
+      &transaction,
+      packet,
+      sizeof (packet),
+      &logical_length));
+
+  g_assert_cmpuint (
+    transaction.state,
+    ==,
+    GOODIX5135_FIRMWARE_TRANSACTION_WAIT_OUT);
+
+  g_assert_cmpuint (
+    logical_length,
+    ==,
+    GOODIX5135_FIRMWARE_REQUEST_LENGTH);
+
+  g_assert_true (
+    goodix5135_firmware_transaction_out_complete (
+      &transaction,
+      TRUE));
+
+  g_assert_cmpuint (
+    transaction.state,
+    ==,
+    GOODIX5135_FIRMWARE_TRANSACTION_WAIT_ACK);
+
+  g_assert_true (
+    goodix5135_firmware_transaction_ack_complete (
+      &transaction,
+      TRUE,
+      firmware_success_ack,
+      sizeof (firmware_success_ack)));
+
+  g_assert_cmpuint (
+    transaction.state,
+    ==,
+    GOODIX5135_FIRMWARE_TRANSACTION_WAIT_RESPONSE);
+
+  g_assert_true (
+    goodix5135_firmware_transaction_response_complete (
+      &transaction,
+      TRUE,
+      firmware_valid_response,
+      sizeof (firmware_valid_response),
+      &firmware,
+      &firmware_length));
+
+  g_assert_cmpuint (
+    transaction.state,
+    ==,
+    GOODIX5135_FIRMWARE_TRANSACTION_DONE);
+
+  g_assert_nonnull (firmware);
+  g_assert_cmpuint (firmware_length, ==, 17);
+
+  g_assert_cmpint (
+    memcmp (
+      firmware,
+      "GF_TEST_APP_00000",
+      firmware_length),
+    ==,
+    0);
+}
+
+static void
+test_firmware_transaction_out_transport_failure (void)
+{
+  Goodix5135FirmwareTransaction transaction;
+  guint8 packet[GOODIX5135_USB_PACKET_LENGTH];
+  gsize logical_length = 0;
+
+  goodix5135_firmware_transaction_init (
+    &transaction);
+
+  g_assert_true (
+    goodix5135_firmware_transaction_begin (
+      &transaction,
+      packet,
+      sizeof (packet),
+      &logical_length));
+
+  g_assert_false (
+    goodix5135_firmware_transaction_out_complete (
+      &transaction,
+      FALSE));
+
+  g_assert_cmpuint (
+    transaction.state,
+    ==,
+    GOODIX5135_FIRMWARE_TRANSACTION_FAILED);
+}
+
+static void
+test_firmware_transaction_ack_transport_failure (void)
+{
+  Goodix5135FirmwareTransaction transaction;
+  guint8 packet[GOODIX5135_USB_PACKET_LENGTH];
+  gsize logical_length = 0;
+
+  goodix5135_firmware_transaction_init (
+    &transaction);
+
+  g_assert_true (
+    goodix5135_firmware_transaction_begin (
+      &transaction,
+      packet,
+      sizeof (packet),
+      &logical_length));
+
+  g_assert_true (
+    goodix5135_firmware_transaction_out_complete (
+      &transaction,
+      TRUE));
+
+  g_assert_false (
+    goodix5135_firmware_transaction_ack_complete (
+      &transaction,
+      FALSE,
+      firmware_success_ack,
+      sizeof (firmware_success_ack)));
+
+  g_assert_cmpuint (
+    transaction.state,
+    ==,
+    GOODIX5135_FIRMWARE_TRANSACTION_FAILED);
+}
+
+static void
+test_firmware_transaction_negative_ack (void)
+{
+  Goodix5135FirmwareTransaction transaction;
+  guint8 packet[GOODIX5135_USB_PACKET_LENGTH];
+  gsize logical_length = 0;
+
+  goodix5135_firmware_transaction_init (
+    &transaction);
+
+  g_assert_true (
+    goodix5135_firmware_transaction_begin (
+      &transaction,
+      packet,
+      sizeof (packet),
+      &logical_length));
+
+  g_assert_true (
+    goodix5135_firmware_transaction_out_complete (
+      &transaction,
+      TRUE));
+
+  g_assert_false (
+    goodix5135_firmware_transaction_ack_complete (
+      &transaction,
+      TRUE,
+      firmware_negative_ack,
+      sizeof (firmware_negative_ack)));
+
+  g_assert_cmpuint (
+    transaction.state,
+    ==,
+    GOODIX5135_FIRMWARE_TRANSACTION_FAILED);
+}
+
+static void
+test_firmware_transaction_response_transport_failure (void)
+{
+  Goodix5135FirmwareTransaction transaction;
+  guint8 packet[GOODIX5135_USB_PACKET_LENGTH];
+  gsize logical_length = 0;
+  const guint8 *firmware = (const guint8 *) 0x1;
+  gsize firmware_length = 123;
+
+  goodix5135_firmware_transaction_init (
+    &transaction);
+
+  g_assert_true (
+    goodix5135_firmware_transaction_begin (
+      &transaction,
+      packet,
+      sizeof (packet),
+      &logical_length));
+
+  g_assert_true (
+    goodix5135_firmware_transaction_out_complete (
+      &transaction,
+      TRUE));
+
+  g_assert_true (
+    goodix5135_firmware_transaction_ack_complete (
+      &transaction,
+      TRUE,
+      firmware_success_ack,
+      sizeof (firmware_success_ack)));
+
+  g_assert_false (
+    goodix5135_firmware_transaction_response_complete (
+      &transaction,
+      FALSE,
+      firmware_valid_response,
+      sizeof (firmware_valid_response),
+      &firmware,
+      &firmware_length));
+
+  g_assert_cmpuint (
+    transaction.state,
+    ==,
+    GOODIX5135_FIRMWARE_TRANSACTION_FAILED);
+
+  g_assert_null (firmware);
+  g_assert_cmpuint (firmware_length, ==, 0);
+}
+
+static void
+test_firmware_transaction_invalid_response (void)
+{
+  Goodix5135FirmwareTransaction transaction;
+  guint8 packet[GOODIX5135_USB_PACKET_LENGTH];
+  guint8 response[sizeof (firmware_valid_response)];
+  gsize logical_length = 0;
+  const guint8 *firmware = NULL;
+  gsize firmware_length = 0;
+
+  memcpy (
+    response,
+    firmware_valid_response,
+    sizeof (response));
+
+  response[sizeof (response) - 1] ^= 0x01;
+
+  goodix5135_firmware_transaction_init (
+    &transaction);
+
+  g_assert_true (
+    goodix5135_firmware_transaction_begin (
+      &transaction,
+      packet,
+      sizeof (packet),
+      &logical_length));
+
+  g_assert_true (
+    goodix5135_firmware_transaction_out_complete (
+      &transaction,
+      TRUE));
+
+  g_assert_true (
+    goodix5135_firmware_transaction_ack_complete (
+      &transaction,
+      TRUE,
+      firmware_success_ack,
+      sizeof (firmware_success_ack)));
+
+  g_assert_false (
+    goodix5135_firmware_transaction_response_complete (
+      &transaction,
+      TRUE,
+      response,
+      sizeof (response),
+      &firmware,
+      &firmware_length));
+
+  g_assert_cmpuint (
+    transaction.state,
+    ==,
+    GOODIX5135_FIRMWARE_TRANSACTION_FAILED);
+}
+
+static void
+test_firmware_transaction_invalid_order (void)
+{
+  Goodix5135FirmwareTransaction transaction;
+
+  goodix5135_firmware_transaction_init (
+    &transaction);
+
+  /*
+   * ACK cannot legally arrive before request construction and OUT completion.
+   * Fail closed rather than attempting recovery.
+   */
+  g_assert_false (
+    goodix5135_firmware_transaction_ack_complete (
+      &transaction,
+      TRUE,
+      firmware_success_ack,
+      sizeof (firmware_success_ack)));
+
+  g_assert_cmpuint (
+    transaction.state,
+    ==,
+    GOODIX5135_FIRMWARE_TRANSACTION_FAILED);
+}
+
+static void
+test_firmware_transaction_begin_failure (void)
+{
+  Goodix5135FirmwareTransaction transaction;
+  guint8 packet[GOODIX5135_USB_PACKET_LENGTH - 1];
+  gsize logical_length = 0;
+
+  goodix5135_firmware_transaction_init (
+    &transaction);
+
+  g_assert_false (
+    goodix5135_firmware_transaction_begin (
+      &transaction,
+      packet,
+      sizeof (packet),
+      &logical_length));
+
+  g_assert_cmpuint (
+    transaction.state,
+    ==,
+    GOODIX5135_FIRMWARE_TRANSACTION_FAILED);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -642,6 +993,31 @@ main (int argc, char **argv)
 
   g_test_add_func ("/goodix5135/proto/firmware-response/arguments",
                    test_firmware_response_arguments);
+
+
+  g_test_add_func ("/goodix5135/proto/firmware-transaction/happy-path",
+                   test_firmware_transaction_happy_path);
+
+  g_test_add_func ("/goodix5135/proto/firmware-transaction/out-transport-failure",
+                   test_firmware_transaction_out_transport_failure);
+
+  g_test_add_func ("/goodix5135/proto/firmware-transaction/ack-transport-failure",
+                   test_firmware_transaction_ack_transport_failure);
+
+  g_test_add_func ("/goodix5135/proto/firmware-transaction/negative-ack",
+                   test_firmware_transaction_negative_ack);
+
+  g_test_add_func ("/goodix5135/proto/firmware-transaction/response-transport-failure",
+                   test_firmware_transaction_response_transport_failure);
+
+  g_test_add_func ("/goodix5135/proto/firmware-transaction/invalid-response",
+                   test_firmware_transaction_invalid_response);
+
+  g_test_add_func ("/goodix5135/proto/firmware-transaction/invalid-order",
+                   test_firmware_transaction_invalid_order);
+
+  g_test_add_func ("/goodix5135/proto/firmware-transaction/begin-failure",
+                   test_firmware_transaction_begin_failure);
 
   return g_test_run ();
 }

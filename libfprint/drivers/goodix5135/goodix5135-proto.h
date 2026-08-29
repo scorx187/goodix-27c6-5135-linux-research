@@ -26,6 +26,21 @@
 #define GOODIX5135_IMAGE_PACKED_LENGTH       7680U
 #define GOODIX5135_IMAGE_STORED_CRC_LENGTH   4U
 
+typedef enum
+{
+  GOODIX5135_FIRMWARE_TRANSACTION_IDLE = 0,
+  GOODIX5135_FIRMWARE_TRANSACTION_WAIT_OUT,
+  GOODIX5135_FIRMWARE_TRANSACTION_WAIT_ACK,
+  GOODIX5135_FIRMWARE_TRANSACTION_WAIT_RESPONSE,
+  GOODIX5135_FIRMWARE_TRANSACTION_DONE,
+  GOODIX5135_FIRMWARE_TRANSACTION_FAILED,
+} Goodix5135FirmwareTransactionState;
+
+typedef struct
+{
+  Goodix5135FirmwareTransactionState state;
+} Goodix5135FirmwareTransaction;
+
 typedef struct
 {
   const guint8 *metadata;
@@ -81,6 +96,44 @@ gboolean goodix5135_parse_firmware_version_response (
   gsize          data_length,
   const guint8 **firmware,
   gsize         *firmware_length);
+
+
+/*
+ * Host-only transaction controller for the first read-only command.
+ *
+ * @transport_can_advance MUST be the result of the transport policy
+ * represented by:
+ *
+ *   goodix5135_async_result_can_advance(completion, error)
+ *
+ * This keeps transport completion semantics separate from protocol parsing.
+ */
+void goodix5135_firmware_transaction_init (
+  Goodix5135FirmwareTransaction *transaction);
+
+gboolean goodix5135_firmware_transaction_begin (
+  Goodix5135FirmwareTransaction *transaction,
+  guint8                        *packet,
+  gsize                          packet_size,
+  gsize                         *logical_length);
+
+gboolean goodix5135_firmware_transaction_out_complete (
+  Goodix5135FirmwareTransaction *transaction,
+  gboolean                       transport_can_advance);
+
+gboolean goodix5135_firmware_transaction_ack_complete (
+  Goodix5135FirmwareTransaction *transaction,
+  gboolean                       transport_can_advance,
+  const guint8                  *data,
+  gsize                          data_length);
+
+gboolean goodix5135_firmware_transaction_response_complete (
+  Goodix5135FirmwareTransaction *transaction,
+  gboolean                       transport_can_advance,
+  const guint8                  *data,
+  gsize                          data_length,
+  const guint8                 **firmware,
+  gsize                         *firmware_length);
 
 /*
  * Parse a fully decrypted command-0x20 response.

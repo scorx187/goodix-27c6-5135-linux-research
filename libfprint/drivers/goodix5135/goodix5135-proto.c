@@ -275,6 +275,155 @@ goodix5135_parse_firmware_version_response (
   return TRUE;
 }
 
+
+static gboolean
+goodix5135_firmware_transaction_fail (
+  Goodix5135FirmwareTransaction *transaction)
+{
+  if (transaction != NULL)
+    transaction->state =
+      GOODIX5135_FIRMWARE_TRANSACTION_FAILED;
+
+  return FALSE;
+}
+
+void
+goodix5135_firmware_transaction_init (
+  Goodix5135FirmwareTransaction *transaction)
+{
+  g_return_if_fail (transaction != NULL);
+
+  transaction->state =
+    GOODIX5135_FIRMWARE_TRANSACTION_IDLE;
+}
+
+gboolean
+goodix5135_firmware_transaction_begin (
+  Goodix5135FirmwareTransaction *transaction,
+  guint8                        *packet,
+  gsize                          packet_size,
+  gsize                         *logical_length)
+{
+  if (transaction == NULL)
+    return FALSE;
+
+  if (transaction->state !=
+      GOODIX5135_FIRMWARE_TRANSACTION_IDLE)
+    return goodix5135_firmware_transaction_fail (
+      transaction);
+
+  if (!goodix5135_build_firmware_version_request (
+        packet,
+        packet_size,
+        logical_length))
+    return goodix5135_firmware_transaction_fail (
+      transaction);
+
+  transaction->state =
+    GOODIX5135_FIRMWARE_TRANSACTION_WAIT_OUT;
+
+  return TRUE;
+}
+
+gboolean
+goodix5135_firmware_transaction_out_complete (
+  Goodix5135FirmwareTransaction *transaction,
+  gboolean                       transport_can_advance)
+{
+  if (transaction == NULL)
+    return FALSE;
+
+  if (transaction->state !=
+      GOODIX5135_FIRMWARE_TRANSACTION_WAIT_OUT)
+    return goodix5135_firmware_transaction_fail (
+      transaction);
+
+  if (!transport_can_advance)
+    return goodix5135_firmware_transaction_fail (
+      transaction);
+
+  transaction->state =
+    GOODIX5135_FIRMWARE_TRANSACTION_WAIT_ACK;
+
+  return TRUE;
+}
+
+gboolean
+goodix5135_firmware_transaction_ack_complete (
+  Goodix5135FirmwareTransaction *transaction,
+  gboolean                       transport_can_advance,
+  const guint8                  *data,
+  gsize                          data_length)
+{
+  if (transaction == NULL)
+    return FALSE;
+
+  if (transaction->state !=
+      GOODIX5135_FIRMWARE_TRANSACTION_WAIT_ACK)
+    return goodix5135_firmware_transaction_fail (
+      transaction);
+
+  if (!transport_can_advance)
+    return goodix5135_firmware_transaction_fail (
+      transaction);
+
+  if (!goodix5135_parse_firmware_version_ack (
+        data,
+        data_length))
+    return goodix5135_firmware_transaction_fail (
+      transaction);
+
+  transaction->state =
+    GOODIX5135_FIRMWARE_TRANSACTION_WAIT_RESPONSE;
+
+  return TRUE;
+}
+
+gboolean
+goodix5135_firmware_transaction_response_complete (
+  Goodix5135FirmwareTransaction *transaction,
+  gboolean                       transport_can_advance,
+  const guint8                  *data,
+  gsize                          data_length,
+  const guint8                 **firmware,
+  gsize                         *firmware_length)
+{
+  if (firmware != NULL)
+    *firmware = NULL;
+
+  if (firmware_length != NULL)
+    *firmware_length = 0;
+
+  if (transaction == NULL)
+    return FALSE;
+
+  if (transaction->state !=
+      GOODIX5135_FIRMWARE_TRANSACTION_WAIT_RESPONSE)
+    return goodix5135_firmware_transaction_fail (
+      transaction);
+
+  if (!transport_can_advance)
+    return goodix5135_firmware_transaction_fail (
+      transaction);
+
+  if (firmware == NULL || firmware_length == NULL)
+    return goodix5135_firmware_transaction_fail (
+      transaction);
+
+  if (!goodix5135_parse_firmware_version_response (
+        data,
+        data_length,
+        firmware,
+        firmware_length))
+    return goodix5135_firmware_transaction_fail (
+      transaction);
+
+  transaction->state =
+    GOODIX5135_FIRMWARE_TRANSACTION_DONE;
+
+  return TRUE;
+}
+
 gboolean
 goodix5135_parse_image_frame (const guint8        *data,
                               gsize                data_length,
