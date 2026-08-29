@@ -22,8 +22,33 @@
 #include "goodix5135-io.h"
 #include "goodix5135-driver-lifecycle.h"
 #include "goodix5135-proto.h"
+#include "goodix5135-capture-proto.h"
+#include "goodix5135-image.h"
+#include "goodix5135-image-response.h"
 #include "goodix5135-tls-request.h"
 #include "goodix5135-tls-session.h"
+
+typedef enum
+{
+  GOODIX5135_CAPTURE_RUNTIME_IDLE = 0,
+
+  GOODIX5135_CAPTURE_RUNTIME_WAIT_MANUAL_OUT,
+  GOODIX5135_CAPTURE_RUNTIME_WAIT_MANUAL_ACK,
+  GOODIX5135_CAPTURE_RUNTIME_WAIT_MANUAL_RESPONSE,
+
+  GOODIX5135_CAPTURE_RUNTIME_WAIT_DOWN_OUT,
+  GOODIX5135_CAPTURE_RUNTIME_WAIT_DOWN_ACK,
+  GOODIX5135_CAPTURE_RUNTIME_WAIT_DOWN_RESPONSE,
+
+  GOODIX5135_CAPTURE_RUNTIME_WAIT_IMAGE_OUT,
+  GOODIX5135_CAPTURE_RUNTIME_WAIT_IMAGE_ACK,
+  GOODIX5135_CAPTURE_RUNTIME_WAIT_IMAGE_TLS,
+
+  GOODIX5135_CAPTURE_RUNTIME_WAIT_UP_OUT,
+  GOODIX5135_CAPTURE_RUNTIME_WAIT_UP_ACK,
+  GOODIX5135_CAPTURE_RUNTIME_WAIT_UP_RESPONSE,
+} Goodix5135CaptureRuntimeState;
+
 
 struct _FpiDeviceGoodix5135
 {
@@ -101,6 +126,27 @@ struct _FpiDeviceGoodix5135
   Goodix5135TlsEstablishedTransaction  tls_runtime_d4_transaction;
   gboolean                             tls_runtime_open_gate;
   guint                                tls_runtime_d4_delay_source;
+
+  Goodix5135CaptureRuntimeState         capture_runtime_state;
+
+  guint8 capture_fdt_seed[
+    GOODIX5135_FDT_MANUAL_SEED_BYTES
+  ];
+
+  guint8 capture_fdt_down[
+    GOODIX5135_FDT_REGISTER_BYTES
+  ];
+
+  guint8 capture_fdt_up[
+    GOODIX5135_FDT_REGISTER_BYTES
+  ];
+
+  guint8 capture_plaintext[
+    GOODIX5135_IMAGE_TOTAL_LENGTH
+  ];
+
+  gsize capture_plaintext_length;
+  guint capture_tls_reads;
 };
 
 G_DECLARE_FINAL_TYPE (FpiDeviceGoodix5135,
@@ -180,6 +226,116 @@ static const FpIdEntry goodix5135_id_table[] = {
  */
 #define GOODIX5135_ACTIVATION_CHIP_ID_ADDRESS 0x0000U
 #define GOODIX5135_ACTIVATION_CHIP_ID_LENGTH  GOODIX5135_CHIP_ID_LENGTH
+
+static void
+goodix5135_capture_runtime_reset (
+  FpiDeviceGoodix5135 *self);
+
+static gboolean
+goodix5135_live_capture_test_requested (void);
+
+static gboolean
+goodix5135_capture_runtime_start (
+  FpDevice *device);
+
+static void
+goodix5135_capture_runtime_fail (
+  FpDevice    *device,
+  const gchar *reason);
+
+static void
+goodix5135_capture_manual_out_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data);
+
+static void
+goodix5135_capture_manual_ack_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data);
+
+static void
+goodix5135_capture_manual_response_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data);
+
+static void
+goodix5135_capture_down_out_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data);
+
+static void
+goodix5135_capture_down_ack_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data);
+
+static void
+goodix5135_capture_down_response_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data);
+
+static void
+goodix5135_capture_image_out_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data);
+
+static void
+goodix5135_capture_image_ack_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data);
+
+static void
+goodix5135_capture_accept_tls_plaintext (
+  FpDevice      *device,
+  const guint8  *data,
+  gsize          data_length);
+
+static void
+goodix5135_capture_up_out_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data);
+
+static void
+goodix5135_capture_up_ack_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data);
+
+static void
+goodix5135_capture_up_response_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data);
 
 static void
 goodix5135_tls_runtime_reset (
@@ -1538,6 +1694,16 @@ goodix5135_activation_continue_after_nop (
 #define GOODIX5135_LIVE_TLS_PSK_ENV  "GOODIX5135_LIVE_TLS_PSK_FILE"
 #define GOODIX5135_LIVE_TLS_TEST_VALUE "ONE_SHOT_NATIVE_TLS"
 
+#define GOODIX5135_LIVE_CAPTURE_TEST_ENV "GOODIX5135_LIVE_CAPTURE_TEST"
+#define GOODIX5135_LIVE_CAPTURE_TEST_VALUE "ONE_SHOT_NATIVE_CAPTURE"
+
+#define GOODIX5135_LIVE_FDT_SEED_ENV "GOODIX5135_LIVE_FDT_SEED_FILE"
+#define GOODIX5135_LIVE_FDT_UP_ENV   "GOODIX5135_LIVE_FDT_UP_FILE"
+
+#define GOODIX5135_CAPTURE_EVENT_TIMEOUT_MS 45000U
+#define GOODIX5135_CAPTURE_IMAGE_TIMEOUT_MS 10000U
+#define GOODIX5135_CAPTURE_MAX_TLS_READS    4U
+
 #define GOODIX5135_PRIVATE_PSK_HEX_LENGTH 64U
 #define GOODIX5135_PRIVATE_PSK_LENGTH     32U
 
@@ -1756,6 +1922,1329 @@ goodix5135_start_live_tls_open_gate (
 }
 
 
+
+static gboolean
+goodix5135_live_capture_test_requested (void)
+{
+  const gchar *value =
+    g_getenv (
+      GOODIX5135_LIVE_CAPTURE_TEST_ENV);
+
+  return g_strcmp0 (
+           value,
+           GOODIX5135_LIVE_CAPTURE_TEST_VALUE) == 0;
+}
+
+
+static gboolean
+goodix5135_capture_load_private_exact (
+  const gchar *environment_name,
+  guint8      *output,
+  gsize        expected_length)
+{
+  const gchar *path;
+
+  gchar *contents = NULL;
+
+  gsize file_length = 0;
+
+  GError *error = NULL;
+
+  g_return_val_if_fail (
+    environment_name != NULL,
+    FALSE);
+
+  g_return_val_if_fail (
+    output != NULL,
+    FALSE);
+
+  if (expected_length == 0)
+    return FALSE;
+
+  memset (
+    output,
+    0,
+    expected_length);
+
+  path =
+    g_getenv (
+      environment_name);
+
+  if (path == NULL ||
+      *path == '\0')
+    return FALSE;
+
+  if (!g_file_get_contents (
+        path,
+        &contents,
+        &file_length,
+        &error))
+    {
+      g_clear_error (&error);
+      return FALSE;
+    }
+
+  if (file_length !=
+      expected_length)
+    goto fail;
+
+  memcpy (
+    output,
+    contents,
+    expected_length);
+
+  goodix5135_live_tls_secure_clear (
+    contents,
+    file_length + 1U);
+
+  g_free (
+    contents);
+
+  return TRUE;
+
+fail:
+  goodix5135_live_tls_secure_clear (
+    output,
+    expected_length);
+
+  if (contents != NULL)
+    {
+      goodix5135_live_tls_secure_clear (
+        contents,
+        file_length + 1U);
+
+      g_free (
+        contents);
+    }
+
+  return FALSE;
+}
+
+
+static void
+goodix5135_capture_runtime_reset (
+  FpiDeviceGoodix5135 *self)
+{
+  g_return_if_fail (
+    self != NULL);
+
+  goodix5135_live_tls_secure_clear (
+    self->capture_fdt_seed,
+    sizeof (self->capture_fdt_seed));
+
+  goodix5135_live_tls_secure_clear (
+    self->capture_fdt_down,
+    sizeof (self->capture_fdt_down));
+
+  goodix5135_live_tls_secure_clear (
+    self->capture_fdt_up,
+    sizeof (self->capture_fdt_up));
+
+  goodix5135_live_tls_secure_clear (
+    self->capture_plaintext,
+    sizeof (self->capture_plaintext));
+
+  self->capture_plaintext_length =
+    0;
+
+  self->capture_tls_reads =
+    0;
+
+  self->capture_runtime_state =
+    GOODIX5135_CAPTURE_RUNTIME_IDLE;
+}
+
+
+static gboolean
+goodix5135_capture_submit_out (
+  FpDevice                       *device,
+  const guint8                   *packet,
+  Goodix5135AsyncCallback         callback)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (
+      device);
+
+  g_return_val_if_fail (
+    packet != NULL,
+    FALSE);
+
+  g_return_val_if_fail (
+    callback != NULL,
+    FALSE);
+
+  return goodix5135_async_submit (
+    device,
+    &self->io,
+    GOODIX5135_REQUEST_BULK_OUT,
+    GOODIX5135_CAPTURE_USB_LENGTH,
+    GOODIX5135_FIRMWARE_IO_TIMEOUT_MS,
+    packet,
+    GOODIX5135_CAPTURE_USB_LENGTH,
+    callback,
+    NULL);
+}
+
+
+static gboolean
+goodix5135_capture_submit_in (
+  FpDevice                       *device,
+  gsize                           length,
+  guint                           timeout_ms,
+  Goodix5135AsyncCallback         callback)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (
+      device);
+
+  g_return_val_if_fail (
+    callback != NULL,
+    FALSE);
+
+  if (length == 0 ||
+      timeout_ms == 0)
+    return FALSE;
+
+  return goodix5135_async_submit (
+    device,
+    &self->io,
+    GOODIX5135_REQUEST_BULK_IN,
+    length,
+    timeout_ms,
+    NULL,
+    0,
+    callback,
+    NULL);
+}
+
+
+static gboolean
+goodix5135_capture_out_completed (
+  FpiUsbTransfer              *transfer,
+  Goodix5135RequestCompletion  completion,
+  GError                      *error)
+{
+  if (!goodix5135_async_result_can_advance (
+        completion,
+        error))
+    return FALSE;
+
+  if (transfer == NULL)
+    return FALSE;
+
+  return transfer->actual_length ==
+         GOODIX5135_CAPTURE_USB_LENGTH;
+}
+
+
+static gboolean
+goodix5135_capture_submit_tls_image_read (
+  FpDevice *device)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (
+      device);
+
+  if (self->capture_runtime_state !=
+      GOODIX5135_CAPTURE_RUNTIME_WAIT_IMAGE_TLS)
+    return FALSE;
+
+  if (self->capture_tls_reads >=
+      GOODIX5135_CAPTURE_MAX_TLS_READS)
+    return FALSE;
+
+  self->capture_tls_reads++;
+
+  return goodix5135_capture_submit_in (
+    device,
+    GOODIX5135_TLS_RUNTIME_SENSOR_READ_SIZE,
+    GOODIX5135_CAPTURE_IMAGE_TIMEOUT_MS,
+    goodix5135_tls_runtime_sensor_frame_cb);
+}
+
+
+static void
+goodix5135_capture_runtime_fail (
+  FpDevice    *device,
+  const gchar *reason)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (
+      device);
+
+  /*
+   * Do not print private FDT values, image bytes, pixels,
+   * TLS plaintext, or local private-input paths.
+   */
+  fp_warn (
+    "Goodix native capture runtime stopped: %s",
+    reason);
+
+  goodix5135_tls_runtime_reset (
+    self);
+
+  goodix5135_open_transaction_fail (
+    device,
+    reason);
+}
+
+
+static gboolean
+goodix5135_capture_runtime_start (
+  FpDevice *device)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (
+      device);
+
+  guint8 packet[
+    GOODIX5135_CAPTURE_USB_LENGTH
+  ];
+
+  gsize logical_length = 0;
+
+  if (!goodix5135_live_capture_test_requested ())
+    return FALSE;
+
+  if (!self->tls_runtime_open_gate ||
+      !self->io.running ||
+      self->tls_session == NULL ||
+      !goodix5135_tls_session_is_ready (
+        self->tls_session))
+    return FALSE;
+
+  if (self->capture_runtime_state !=
+      GOODIX5135_CAPTURE_RUNTIME_IDLE)
+    return FALSE;
+
+  if (!goodix5135_capture_load_private_exact (
+        GOODIX5135_LIVE_FDT_SEED_ENV,
+        self->capture_fdt_seed,
+        sizeof (self->capture_fdt_seed)))
+    return FALSE;
+
+  if (!goodix5135_capture_load_private_exact (
+        GOODIX5135_LIVE_FDT_UP_ENV,
+        self->capture_fdt_up,
+        sizeof (self->capture_fdt_up)))
+    return FALSE;
+
+  fp_dbg (
+    "Native capture private FDT input gate validated");
+
+  if (!goodix5135_capture_build_fdt_manual (
+        self->capture_fdt_seed,
+        sizeof (self->capture_fdt_seed),
+        packet,
+        sizeof (packet),
+        &logical_length))
+    return FALSE;
+
+  if (logical_length == 0 ||
+      logical_length >
+        GOODIX5135_CAPTURE_USB_LENGTH)
+    return FALSE;
+
+  self->capture_runtime_state =
+    GOODIX5135_CAPTURE_RUNTIME_WAIT_MANUAL_OUT;
+
+  fp_dbg (
+    "Native capture stage: FDT manual 0x36 request");
+
+  return goodix5135_capture_submit_out (
+    device,
+    packet,
+    goodix5135_capture_manual_out_cb);
+}
+
+
+static void
+goodix5135_capture_manual_out_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (
+      device);
+
+  gboolean ok;
+
+  (void) user_data;
+
+  ok =
+    self->capture_runtime_state ==
+      GOODIX5135_CAPTURE_RUNTIME_WAIT_MANUAL_OUT &&
+    goodix5135_capture_out_completed (
+      transfer,
+      completion,
+      error);
+
+  g_clear_error (
+    &error);
+
+  if (!ok)
+    {
+      goodix5135_capture_runtime_fail (
+        device,
+        "FDT manual OUT failed");
+
+      return;
+    }
+
+  self->capture_runtime_state =
+    GOODIX5135_CAPTURE_RUNTIME_WAIT_MANUAL_ACK;
+
+  if (!goodix5135_capture_submit_in (
+        device,
+        GOODIX5135_CAPTURE_USB_LENGTH,
+        GOODIX5135_FIRMWARE_IO_TIMEOUT_MS,
+        goodix5135_capture_manual_ack_cb))
+    {
+      goodix5135_capture_runtime_fail (
+        device,
+        "could not receive FDT manual ACK");
+    }
+}
+
+
+static void
+goodix5135_capture_manual_ack_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (
+      device);
+
+  gboolean transport_ok;
+  gboolean protocol_ok;
+
+  (void) user_data;
+
+  transport_ok =
+    self->capture_runtime_state ==
+      GOODIX5135_CAPTURE_RUNTIME_WAIT_MANUAL_ACK &&
+    goodix5135_in_transfer_can_parse (
+      transfer,
+      completion,
+      error);
+
+  protocol_ok =
+    transport_ok &&
+    goodix5135_capture_parse_ack (
+      GOODIX5135_FDT_MODE_COMMAND,
+      transfer->buffer,
+      (gsize) transfer->actual_length);
+
+  g_clear_error (
+    &error);
+
+  if (!protocol_ok)
+    {
+      goodix5135_capture_runtime_fail (
+        device,
+        transport_ok
+          ? "FDT manual returned invalid ACK"
+          : "FDT manual ACK transport failed");
+
+      return;
+    }
+
+  fp_dbg (
+    "Native capture stage: FDT manual ACK validated");
+
+  self->capture_runtime_state =
+    GOODIX5135_CAPTURE_RUNTIME_WAIT_MANUAL_RESPONSE;
+
+  if (!goodix5135_capture_submit_in (
+        device,
+        GOODIX5135_CAPTURE_USB_LENGTH,
+        GOODIX5135_FIRMWARE_IO_TIMEOUT_MS,
+        goodix5135_capture_manual_response_cb))
+    {
+      goodix5135_capture_runtime_fail (
+        device,
+        "could not receive FDT manual response");
+    }
+}
+
+
+static void
+goodix5135_capture_manual_response_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (
+      device);
+
+  Goodix5135FdtResponse response = { 0 };
+
+  guint8 packet[
+    GOODIX5135_CAPTURE_USB_LENGTH
+  ];
+
+  gsize logical_length = 0;
+
+  guint16 timestamp;
+
+  gboolean transport_ok;
+  gboolean protocol_ok;
+
+  (void) user_data;
+
+  transport_ok =
+    self->capture_runtime_state ==
+      GOODIX5135_CAPTURE_RUNTIME_WAIT_MANUAL_RESPONSE &&
+    goodix5135_in_transfer_can_parse (
+      transfer,
+      completion,
+      error);
+
+  protocol_ok =
+    transport_ok &&
+    goodix5135_capture_parse_fdt_response (
+      GOODIX5135_FDT_MODE_COMMAND,
+      transfer->buffer,
+      (gsize) transfer->actual_length,
+      &response);
+
+  g_clear_error (
+    &error);
+
+  if (!protocol_ok)
+    {
+      goodix5135_capture_runtime_fail (
+        device,
+        transport_ok
+          ? "FDT manual response was invalid"
+          : "FDT manual response transport failed");
+
+      return;
+    }
+
+  if (response.touch_flag != 0)
+    {
+      goodix5135_capture_runtime_fail (
+        device,
+        "finger was present during FDT manual baseline");
+
+      return;
+    }
+
+  if (!goodix5135_capture_derive_fdt_down_registers (
+        &response,
+        self->capture_fdt_down))
+    {
+      goodix5135_capture_runtime_fail (
+        device,
+        "could not derive FDT-down thresholds");
+
+      return;
+    }
+
+  /*
+   * Match the proven 5135 reference:
+   *
+   *   (monotonic microseconds) & 0xffff
+   */
+  timestamp =
+    (guint16) (
+      ((guint64) g_get_monotonic_time ()) &
+      0xffffU);
+
+  if (!goodix5135_capture_build_fdt_down (
+        self->capture_fdt_down,
+        sizeof (self->capture_fdt_down),
+        timestamp,
+        packet,
+        sizeof (packet),
+        &logical_length))
+    {
+      goodix5135_capture_runtime_fail (
+        device,
+        "could not build FDT-down request");
+
+      return;
+    }
+
+  goodix5135_live_tls_secure_clear (
+    self->capture_fdt_seed,
+    sizeof (self->capture_fdt_seed));
+
+  fp_dbg (
+    "Native capture stage: FDT manual baseline validated");
+
+  self->capture_runtime_state =
+    GOODIX5135_CAPTURE_RUNTIME_WAIT_DOWN_OUT;
+
+  fp_dbg (
+    "Native capture stage: FDT-down 0x32 request");
+
+  if (!goodix5135_capture_submit_out (
+        device,
+        packet,
+        goodix5135_capture_down_out_cb))
+    {
+      goodix5135_capture_runtime_fail (
+        device,
+        "could not submit FDT-down request");
+    }
+}
+
+
+static void
+goodix5135_capture_down_out_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (
+      device);
+
+  gboolean ok;
+
+  (void) user_data;
+
+  ok =
+    self->capture_runtime_state ==
+      GOODIX5135_CAPTURE_RUNTIME_WAIT_DOWN_OUT &&
+    goodix5135_capture_out_completed (
+      transfer,
+      completion,
+      error);
+
+  g_clear_error (
+    &error);
+
+  if (!ok)
+    {
+      goodix5135_capture_runtime_fail (
+        device,
+        "FDT-down OUT failed");
+
+      return;
+    }
+
+  self->capture_runtime_state =
+    GOODIX5135_CAPTURE_RUNTIME_WAIT_DOWN_ACK;
+
+  if (!goodix5135_capture_submit_in (
+        device,
+        GOODIX5135_CAPTURE_USB_LENGTH,
+        GOODIX5135_FIRMWARE_IO_TIMEOUT_MS,
+        goodix5135_capture_down_ack_cb))
+    {
+      goodix5135_capture_runtime_fail (
+        device,
+        "could not receive FDT-down ACK");
+    }
+}
+
+
+static void
+goodix5135_capture_down_ack_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (
+      device);
+
+  gboolean transport_ok;
+  gboolean protocol_ok;
+
+  (void) user_data;
+
+  transport_ok =
+    self->capture_runtime_state ==
+      GOODIX5135_CAPTURE_RUNTIME_WAIT_DOWN_ACK &&
+    goodix5135_in_transfer_can_parse (
+      transfer,
+      completion,
+      error);
+
+  protocol_ok =
+    transport_ok &&
+    goodix5135_capture_parse_ack (
+      GOODIX5135_FDT_DOWN_COMMAND,
+      transfer->buffer,
+      (gsize) transfer->actual_length);
+
+  g_clear_error (
+    &error);
+
+  if (!protocol_ok)
+    {
+      goodix5135_capture_runtime_fail (
+        device,
+        transport_ok
+          ? "FDT-down returned invalid ACK"
+          : "FDT-down ACK transport failed");
+
+      return;
+    }
+
+  fp_dbg (
+    "Native capture stage: FDT-down ACK validated");
+
+  self->capture_runtime_state =
+    GOODIX5135_CAPTURE_RUNTIME_WAIT_DOWN_RESPONSE;
+
+  fp_dbg (
+    "Native capture prompt: PLACE_FINGER_NOW");
+
+  if (!goodix5135_capture_submit_in (
+        device,
+        GOODIX5135_CAPTURE_USB_LENGTH,
+        GOODIX5135_CAPTURE_EVENT_TIMEOUT_MS,
+        goodix5135_capture_down_response_cb))
+    {
+      goodix5135_capture_runtime_fail (
+        device,
+        "could not arm FDT-down event receive");
+    }
+}
+
+
+static void
+goodix5135_capture_down_response_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (
+      device);
+
+  Goodix5135FdtResponse response = { 0 };
+
+  guint8 packet[
+    GOODIX5135_CAPTURE_USB_LENGTH
+  ];
+
+  gsize logical_length = 0;
+
+  gboolean transport_ok;
+  gboolean protocol_ok;
+
+  (void) user_data;
+
+  transport_ok =
+    self->capture_runtime_state ==
+      GOODIX5135_CAPTURE_RUNTIME_WAIT_DOWN_RESPONSE &&
+    goodix5135_in_transfer_can_parse (
+      transfer,
+      completion,
+      error);
+
+  protocol_ok =
+    transport_ok &&
+    goodix5135_capture_parse_fdt_response (
+      GOODIX5135_FDT_DOWN_COMMAND,
+      transfer->buffer,
+      (gsize) transfer->actual_length,
+      &response);
+
+  g_clear_error (
+    &error);
+
+  if (!protocol_ok)
+    {
+      goodix5135_capture_runtime_fail (
+        device,
+        transport_ok
+          ? "FDT-down event was invalid"
+          : "FDT-down event transport failed");
+
+      return;
+    }
+
+  if ((response.touch_flag & 0x3fU) == 0)
+    {
+      goodix5135_capture_runtime_fail (
+        device,
+        "FDT-down event reported zero touched zones");
+
+      return;
+    }
+
+  if (!goodix5135_capture_build_image_request (
+        packet,
+        sizeof (packet),
+        &logical_length))
+    {
+      goodix5135_capture_runtime_fail (
+        device,
+        "could not build image 0x20 request");
+
+      return;
+    }
+
+  if (logical_length == 0 ||
+      logical_length >
+        GOODIX5135_CAPTURE_USB_LENGTH)
+    {
+      goodix5135_capture_runtime_fail (
+        device,
+        "image 0x20 request length was invalid");
+
+      return;
+    }
+
+  fp_dbg (
+    "Native capture stage: FDT-down event validated");
+
+  fp_dbg (
+    "Native capture prompt: KEEP_FINGER_ON_SENSOR");
+
+  self->capture_runtime_state =
+    GOODIX5135_CAPTURE_RUNTIME_WAIT_IMAGE_OUT;
+
+  fp_dbg (
+    "Native capture stage: image 0x20 request");
+
+  if (!goodix5135_capture_submit_out (
+        device,
+        packet,
+        goodix5135_capture_image_out_cb))
+    {
+      goodix5135_capture_runtime_fail (
+        device,
+        "could not submit image 0x20 request");
+    }
+}
+
+
+static void
+goodix5135_capture_image_out_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (
+      device);
+
+  gboolean ok;
+
+  (void) user_data;
+
+  ok =
+    self->capture_runtime_state ==
+      GOODIX5135_CAPTURE_RUNTIME_WAIT_IMAGE_OUT &&
+    goodix5135_capture_out_completed (
+      transfer,
+      completion,
+      error);
+
+  g_clear_error (
+    &error);
+
+  if (!ok)
+    {
+      goodix5135_capture_runtime_fail (
+        device,
+        "image 0x20 OUT failed");
+
+      return;
+    }
+
+  self->capture_runtime_state =
+    GOODIX5135_CAPTURE_RUNTIME_WAIT_IMAGE_ACK;
+
+  if (!goodix5135_capture_submit_in (
+        device,
+        GOODIX5135_CAPTURE_USB_LENGTH,
+        GOODIX5135_FIRMWARE_IO_TIMEOUT_MS,
+        goodix5135_capture_image_ack_cb))
+    {
+      goodix5135_capture_runtime_fail (
+        device,
+        "could not receive image 0x20 ACK");
+    }
+}
+
+
+static void
+goodix5135_capture_image_ack_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (
+      device);
+
+  gboolean transport_ok;
+  gboolean protocol_ok;
+
+  (void) user_data;
+
+  transport_ok =
+    self->capture_runtime_state ==
+      GOODIX5135_CAPTURE_RUNTIME_WAIT_IMAGE_ACK &&
+    goodix5135_in_transfer_can_parse (
+      transfer,
+      completion,
+      error);
+
+  protocol_ok =
+    transport_ok &&
+    goodix5135_capture_parse_ack (
+      GOODIX5135_IMAGE_COMMAND,
+      transfer->buffer,
+      (gsize) transfer->actual_length);
+
+  g_clear_error (
+    &error);
+
+  if (!protocol_ok)
+    {
+      goodix5135_capture_runtime_fail (
+        device,
+        transport_ok
+          ? "image 0x20 returned invalid ACK"
+          : "image 0x20 ACK transport failed");
+
+      return;
+    }
+
+  fp_dbg (
+    "Native capture stage: image 0x20 ACK validated");
+
+  self->capture_plaintext_length =
+    0;
+
+  self->capture_tls_reads =
+    0;
+
+  self->capture_runtime_state =
+    GOODIX5135_CAPTURE_RUNTIME_WAIT_IMAGE_TLS;
+
+  if (!goodix5135_capture_submit_tls_image_read (
+        device))
+    {
+      goodix5135_capture_runtime_fail (
+        device,
+        "could not receive TLS image frame");
+    }
+}
+
+
+static void
+goodix5135_capture_accept_tls_plaintext (
+  FpDevice      *device,
+  const guint8  *data,
+  gsize          data_length)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (
+      device);
+
+  guint16 pixels[
+    GOODIX5135_IMAGE_PIXELS
+  ];
+
+  guint8 packet[
+    GOODIX5135_CAPTURE_USB_LENGTH
+  ];
+
+  gsize logical_length = 0;
+  gsize remaining;
+
+  gboolean decoded;
+
+  memset (
+    pixels,
+    0,
+    sizeof (pixels));
+
+  if (self->capture_runtime_state !=
+      GOODIX5135_CAPTURE_RUNTIME_WAIT_IMAGE_TLS)
+    {
+      goodix5135_capture_runtime_fail (
+        device,
+        "TLS image plaintext arrived out of order");
+
+      return;
+    }
+
+  remaining =
+    sizeof (self->capture_plaintext) -
+    self->capture_plaintext_length;
+
+  if (data_length >
+      remaining)
+    {
+      goodix5135_live_tls_secure_clear (
+        pixels,
+        sizeof (pixels));
+
+      goodix5135_capture_runtime_fail (
+        device,
+        "TLS image plaintext exceeded expected length");
+
+      return;
+    }
+
+  if (data_length > 0)
+    {
+      memcpy (
+        self->capture_plaintext +
+          self->capture_plaintext_length,
+        data,
+        data_length);
+
+      self->capture_plaintext_length +=
+        data_length;
+    }
+
+  if (self->capture_plaintext_length <
+      GOODIX5135_IMAGE_TOTAL_LENGTH)
+    {
+      goodix5135_live_tls_secure_clear (
+        pixels,
+        sizeof (pixels));
+
+      if (!goodix5135_capture_submit_tls_image_read (
+            device))
+        {
+          goodix5135_capture_runtime_fail (
+            device,
+            "TLS image plaintext remained incomplete");
+        }
+
+      return;
+    }
+
+  if (self->capture_plaintext_length !=
+      GOODIX5135_IMAGE_TOTAL_LENGTH)
+    {
+      goodix5135_live_tls_secure_clear (
+        pixels,
+        sizeof (pixels));
+
+      goodix5135_capture_runtime_fail (
+        device,
+        "TLS image plaintext length mismatch");
+
+      return;
+    }
+
+  fp_dbg (
+    "Native capture stage: TLS image plaintext complete");
+
+  decoded =
+    goodix5135_decode_image_response (
+      self->capture_plaintext,
+      self->capture_plaintext_length,
+      pixels,
+      G_N_ELEMENTS (pixels));
+
+  goodix5135_live_tls_secure_clear (
+    self->capture_plaintext,
+    sizeof (self->capture_plaintext));
+
+  self->capture_plaintext_length =
+    0;
+
+  if (!decoded)
+    {
+      goodix5135_live_tls_secure_clear (
+        pixels,
+        sizeof (pixels));
+
+      goodix5135_capture_runtime_fail (
+        device,
+        "native image framing, CRC, or RAW12 decode failed");
+
+      return;
+    }
+
+  /*
+   * Fingerprint pixels are deliberately not printed, persisted,
+   * hashed, or retained after this validation gate.
+   */
+  goodix5135_live_tls_secure_clear (
+    pixels,
+    sizeof (pixels));
+
+  fp_dbg (
+    "Native capture stage: image 5120-pixel decode validated");
+
+  if (!goodix5135_capture_build_fdt_up (
+        self->capture_fdt_up,
+        sizeof (self->capture_fdt_up),
+        packet,
+        sizeof (packet),
+        &logical_length))
+    {
+      goodix5135_capture_runtime_fail (
+        device,
+        "could not build FDT-up request");
+
+      return;
+    }
+
+  if (logical_length == 0 ||
+      logical_length >
+        GOODIX5135_CAPTURE_USB_LENGTH)
+    {
+      goodix5135_capture_runtime_fail (
+        device,
+        "FDT-up request length was invalid");
+
+      return;
+    }
+
+  self->capture_runtime_state =
+    GOODIX5135_CAPTURE_RUNTIME_WAIT_UP_OUT;
+
+  fp_dbg (
+    "Native capture stage: FDT-up 0x34 request");
+
+  if (!goodix5135_capture_submit_out (
+        device,
+        packet,
+        goodix5135_capture_up_out_cb))
+    {
+      goodix5135_capture_runtime_fail (
+        device,
+        "could not submit FDT-up request");
+    }
+}
+
+
+static void
+goodix5135_capture_up_out_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (
+      device);
+
+  gboolean ok;
+
+  (void) user_data;
+
+  ok =
+    self->capture_runtime_state ==
+      GOODIX5135_CAPTURE_RUNTIME_WAIT_UP_OUT &&
+    goodix5135_capture_out_completed (
+      transfer,
+      completion,
+      error);
+
+  g_clear_error (
+    &error);
+
+  if (!ok)
+    {
+      goodix5135_capture_runtime_fail (
+        device,
+        "FDT-up OUT failed");
+
+      return;
+    }
+
+  self->capture_runtime_state =
+    GOODIX5135_CAPTURE_RUNTIME_WAIT_UP_ACK;
+
+  if (!goodix5135_capture_submit_in (
+        device,
+        GOODIX5135_CAPTURE_USB_LENGTH,
+        GOODIX5135_FIRMWARE_IO_TIMEOUT_MS,
+        goodix5135_capture_up_ack_cb))
+    {
+      goodix5135_capture_runtime_fail (
+        device,
+        "could not receive FDT-up ACK");
+    }
+}
+
+
+static void
+goodix5135_capture_up_ack_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (
+      device);
+
+  gboolean transport_ok;
+  gboolean protocol_ok;
+
+  (void) user_data;
+
+  transport_ok =
+    self->capture_runtime_state ==
+      GOODIX5135_CAPTURE_RUNTIME_WAIT_UP_ACK &&
+    goodix5135_in_transfer_can_parse (
+      transfer,
+      completion,
+      error);
+
+  protocol_ok =
+    transport_ok &&
+    goodix5135_capture_parse_ack (
+      GOODIX5135_FDT_UP_COMMAND,
+      transfer->buffer,
+      (gsize) transfer->actual_length);
+
+  g_clear_error (
+    &error);
+
+  if (!protocol_ok)
+    {
+      goodix5135_capture_runtime_fail (
+        device,
+        transport_ok
+          ? "FDT-up returned invalid ACK"
+          : "FDT-up ACK transport failed");
+
+      return;
+    }
+
+  fp_dbg (
+    "Native capture stage: FDT-up ACK validated");
+
+  self->capture_runtime_state =
+    GOODIX5135_CAPTURE_RUNTIME_WAIT_UP_RESPONSE;
+
+  fp_dbg (
+    "Native capture prompt: LIFT_FINGER_NOW");
+
+  if (!goodix5135_capture_submit_in (
+        device,
+        GOODIX5135_CAPTURE_USB_LENGTH,
+        GOODIX5135_CAPTURE_EVENT_TIMEOUT_MS,
+        goodix5135_capture_up_response_cb))
+    {
+      goodix5135_capture_runtime_fail (
+        device,
+        "could not arm FDT-up event receive");
+    }
+}
+
+
+static void
+goodix5135_capture_up_response_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (
+      device);
+
+  Goodix5135FdtResponse response = { 0 };
+
+  gboolean transport_ok;
+  gboolean protocol_ok;
+
+  (void) user_data;
+
+  transport_ok =
+    self->capture_runtime_state ==
+      GOODIX5135_CAPTURE_RUNTIME_WAIT_UP_RESPONSE &&
+    goodix5135_in_transfer_can_parse (
+      transfer,
+      completion,
+      error);
+
+  protocol_ok =
+    transport_ok &&
+    goodix5135_capture_parse_fdt_response (
+      GOODIX5135_FDT_UP_COMMAND,
+      transfer->buffer,
+      (gsize) transfer->actual_length,
+      &response);
+
+  g_clear_error (
+    &error);
+
+  if (!protocol_ok)
+    {
+      goodix5135_capture_runtime_fail (
+        device,
+        transport_ok
+          ? "FDT-up event was invalid"
+          : "FDT-up event transport failed");
+
+      return;
+    }
+
+  if (response.touch_flag != 0)
+    {
+      goodix5135_capture_runtime_fail (
+        device,
+        "FDT-up event did not clear touch state");
+
+      return;
+    }
+
+  fp_dbg (
+    "Native capture stage: FDT-up event validated");
+
+  /*
+   * Clear all private FDT and fingerprint material before OPEN
+   * completes. The established TLS object remains volatile until
+   * normal CLOSE.
+   */
+  goodix5135_capture_runtime_reset (
+    self);
+
+  self->tls_runtime_open_gate =
+    FALSE;
+
+  goodix5135_io_stop (
+    &self->io);
+
+  g_assert (
+    goodix5135_io_can_finish_stop (
+      &self->io));
+
+  fp_dbg (
+    "One-shot native capture OPEN gate completed");
+
+  fpi_image_device_open_complete (
+    FP_IMAGE_DEVICE (device),
+    NULL);
+}
+
+
 static void
 goodix5135_tls_runtime_set_error (
   GError      **error,
@@ -1778,6 +3267,9 @@ goodix5135_tls_runtime_reset (
   FpiDeviceGoodix5135 *self)
 {
   g_return_if_fail (self != NULL);
+
+  goodix5135_capture_runtime_reset (
+    self);
 
   if (self->tls_runtime_d4_delay_source != 0)
     {
@@ -2419,9 +3911,48 @@ goodix5135_tls_runtime_sensor_frame_cb (
 
   if (!session_ok)
     {
-      goodix5135_tls_runtime_fail (
+      if (self->capture_runtime_state ==
+          GOODIX5135_CAPTURE_RUNTIME_WAIT_IMAGE_TLS)
+        {
+          goodix5135_capture_runtime_fail (
+            device,
+            "post-handshake TLS image decrypt failed");
+        }
+      else
+        {
+          goodix5135_tls_runtime_fail (
+            device,
+            "TLS sensor frame could not be relayed");
+        }
+
+      return;
+    }
+
+  /*
+   * READY-state application plaintext belongs to the explicitly
+   * armed one-shot image capture runtime.
+   */
+  if (self->capture_runtime_state ==
+        GOODIX5135_CAPTURE_RUNTIME_WAIT_IMAGE_TLS &&
+      goodix5135_tls_session_is_ready (
+        self->tls_session))
+    {
+      if (host_frame->len != 0 ||
+          command != 0 ||
+          action !=
+            GOODIX5135_TLS_SESSION_ACTION_NONE)
+        {
+          goodix5135_capture_runtime_fail (
+            device,
+            "post-handshake TLS image action was inconsistent");
+
+          return;
+        }
+
+      goodix5135_capture_accept_tls_plaintext (
         device,
-        "TLS sensor frame could not be relayed");
+        app_output->data,
+        app_output->len);
 
       return;
     }
@@ -2779,6 +4310,20 @@ goodix5135_tls_runtime_d4_ack_cb (
 
   fp_dbg (
     "Goodix native TLS runtime bridge reached READY");
+
+  if (self->tls_runtime_open_gate &&
+      goodix5135_live_capture_test_requested ())
+    {
+      if (!goodix5135_capture_runtime_start (
+            device))
+        {
+          goodix5135_capture_runtime_fail (
+            device,
+            "could not start one-shot native capture runtime");
+        }
+
+      return;
+    }
 
   if (self->tls_runtime_open_gate)
     {
@@ -6204,6 +7749,9 @@ fpi_device_goodix5135_init (FpiDeviceGoodix5135 *self)
   self->tls_session = NULL;
   self->tls_runtime_open_gate = FALSE;
   self->tls_runtime_d4_delay_source = 0;
+
+  goodix5135_capture_runtime_reset (
+    self);
 
   goodix5135_tls_request_transaction_init (
     &self->tls_request_transaction);
