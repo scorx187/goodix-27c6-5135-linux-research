@@ -34,6 +34,13 @@ typedef enum
 typedef struct
 {
   Goodix5135QueueCleanupState state;
+
+  /*
+   * Number of non-empty stale packets already consumed.
+   *
+   * max_discarded_packets is a hard consumption budget, not a threshold
+   * after which another potentially consuming probe is permitted.
+   */
   guint                       discarded_packets;
   guint                       max_discarded_packets;
 } Goodix5135QueueCleanup;

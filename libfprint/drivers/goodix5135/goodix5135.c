@@ -15,6 +15,7 @@
 #include "goodix5135.h"
 #include "goodix5135-async.h"
 #include "goodix5135-async-dispatch.h"
+#include "goodix5135-queue-cleanup.h"
 #include "goodix5135-io.h"
 #include "goodix5135-driver-lifecycle.h"
 #include "goodix5135-proto.h"
@@ -27,6 +28,7 @@ struct _FpiDeviceGoodix5135
   gboolean               deactivating;
   FpiImageDeviceState           state;
   Goodix5135IoLifecycle         io;
+  Goodix5135QueueCleanup        queue_cleanup;
   Goodix5135FirmwareTransaction firmware_transaction;
 };
 
@@ -59,6 +61,27 @@ static const FpIdEntry goodix5135_id_table[] = {
  * one Bulk OUT request, followed by ACK and firmware-response Bulk IN.
  */
 #define GOODIX5135_FIRMWARE_IO_TIMEOUT_MS 1000U
+
+/*
+ * Match the reference driver's 100 ms queue-empty observation window.
+ *
+ * GOODIX5135_QUEUE_CLEANUP_MAX_PACKETS is a hard consumption budget:
+ * once that many non-empty stale packets have been consumed without seeing
+ * an empty-queue timeout, cleanup fails closed.
+ *
+ * We intentionally do not perform one extra read after the budget is
+ * exhausted because that read could consume a packet beyond the configured
+ * stale-data budget.
+ */
+#define GOODIX5135_QUEUE_CLEANUP_TIMEOUT_MS 100U
+#define GOODIX5135_QUEUE_CLEANUP_MAX_PACKETS 8U
+
+static void goodix5135_queue_cleanup_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data);
 
 static void goodix5135_firmware_ack_cb (
   FpDevice                       *device,
@@ -394,14 +417,195 @@ goodix5135_firmware_response_cb (
 }
 
 static void
+goodix5135_start_firmware_version_transaction (
+  FpDevice *device)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (device);
+  guint8 packet[GOODIX5135_USB_PACKET_LENGTH];
+  gsize logical_length = 0;
+
+  goodix5135_firmware_transaction_init (
+    &self->firmware_transaction);
+
+  if (!goodix5135_firmware_transaction_begin (
+        &self->firmware_transaction,
+        packet,
+        sizeof (packet),
+        &logical_length))
+    {
+      goodix5135_open_transaction_fail (
+        device,
+        "Could not build Goodix firmware-version request");
+      return;
+    }
+
+  if (logical_length !=
+      GOODIX5135_FIRMWARE_REQUEST_LENGTH)
+    {
+      goodix5135_firmware_transaction_out_complete (
+        &self->firmware_transaction,
+        FALSE);
+
+      goodix5135_open_transaction_fail (
+        device,
+        "Unexpected Goodix firmware request length");
+      return;
+    }
+
+  /*
+   * Exactly one read-only Goodix application request:
+   *
+   *   command 0xa8 — firmware version
+   *
+   * The builder produced:
+   *   10 logical bytes
+   *   padded to one 64-byte USB Bulk OUT packet.
+   *
+   * goodix5135_async_submit() copies the OUT packet into transfer-owned
+   * storage before this stack buffer goes out of scope.
+   */
+  if (!goodix5135_async_submit (
+        device,
+        &self->io,
+        GOODIX5135_REQUEST_BULK_OUT,
+        GOODIX5135_USB_PACKET_LENGTH,
+        GOODIX5135_FIRMWARE_IO_TIMEOUT_MS,
+        packet,
+        sizeof (packet),
+        goodix5135_firmware_out_cb,
+        NULL))
+    {
+      goodix5135_firmware_transaction_out_complete (
+        &self->firmware_transaction,
+        FALSE);
+
+      goodix5135_open_transaction_fail (
+        device,
+        "Could not submit Goodix firmware-version request");
+    }
+}
+
+static gboolean
+goodix5135_submit_queue_cleanup_read (
+  FpDevice *device)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (device);
+
+  /*
+   * Receive-only cleanup operation. No Goodix command is sent here.
+   * Received bytes are intentionally discarded and never logged.
+   */
+  return goodix5135_async_submit (
+    device,
+    &self->io,
+    GOODIX5135_REQUEST_BULK_IN,
+    GOODIX5135_USB_PACKET_LENGTH,
+    GOODIX5135_QUEUE_CLEANUP_TIMEOUT_MS,
+    NULL,
+    0,
+    goodix5135_queue_cleanup_cb,
+    NULL);
+}
+
+static void
+goodix5135_queue_cleanup_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (device);
+  Goodix5135QueueReadResult result;
+  Goodix5135QueueCleanupAction action;
+
+  (void) user_data;
+
+  /*
+   * Keep lifecycle/generation semantics separate from USB transport
+   * semantics.
+   *
+   * CURRENT + data/no-error:
+   *   one stale packet was consumed.
+   *
+   * CURRENT + GUsb timeout:
+   *   endpoint queue is considered empty for this cleanup window.
+   *
+   * CANCELLED, STALE, malformed completion, or any other transport error:
+   *   fail closed.
+   */
+  if (completion ==
+        GOODIX5135_REQUEST_COMPLETION_CURRENT &&
+      error == NULL &&
+      transfer != NULL &&
+      transfer->actual_length > 0 &&
+      transfer->actual_length <= transfer->length)
+    {
+      result = GOODIX5135_QUEUE_READ_DATA;
+    }
+  else if (completion ==
+             GOODIX5135_REQUEST_COMPLETION_CURRENT &&
+           error != NULL &&
+           g_error_matches (
+             error,
+             G_USB_DEVICE_ERROR,
+             G_USB_DEVICE_ERROR_TIMED_OUT))
+    {
+      result =
+        GOODIX5135_QUEUE_READ_EMPTY_TIMEOUT;
+    }
+  else
+    {
+      result = GOODIX5135_QUEUE_READ_FATAL;
+    }
+
+  action =
+    goodix5135_queue_cleanup_read_complete (
+      &self->queue_cleanup,
+      result);
+
+  g_clear_error (&error);
+
+  switch (action)
+    {
+    case GOODIX5135_QUEUE_ACTION_READ_AGAIN:
+      if (!goodix5135_submit_queue_cleanup_read (
+            device))
+        {
+          goodix5135_queue_cleanup_read_complete (
+            &self->queue_cleanup,
+            GOODIX5135_QUEUE_READ_FATAL);
+
+          goodix5135_open_transaction_fail (
+            device,
+            "Could not submit Goodix pre-command queue cleanup read");
+        }
+      return;
+
+    case GOODIX5135_QUEUE_ACTION_DONE:
+      goodix5135_start_firmware_version_transaction (
+        device);
+      return;
+
+    case GOODIX5135_QUEUE_ACTION_FAILED:
+    default:
+      goodix5135_open_transaction_fail (
+        device,
+        "Goodix pre-command receive-queue cleanup failed");
+      return;
+    }
+}
+
+static void
 goodix5135_open (FpImageDevice *dev)
 {
   FpiDeviceGoodix5135 *self =
     FPI_DEVICE_GOODIX5135 (dev);
   GUsbDevice *usb_dev;
   GError *error = NULL;
-  guint8 packet[GOODIX5135_USB_PACKET_LENGTH];
-  gsize logical_length = 0;
 
   usb_dev =
     fpi_device_get_usb_device (
@@ -447,64 +651,30 @@ goodix5135_open (FpImageDevice *dev)
       return;
     }
 
-  goodix5135_firmware_transaction_init (
-    &self->firmware_transaction);
+  goodix5135_queue_cleanup_init (
+    &self->queue_cleanup);
 
-  if (!goodix5135_firmware_transaction_begin (
-        &self->firmware_transaction,
-        packet,
-        sizeof (packet),
-        &logical_length))
+  if (goodix5135_queue_cleanup_begin (
+        &self->queue_cleanup,
+        GOODIX5135_QUEUE_CLEANUP_MAX_PACKETS) !=
+      GOODIX5135_QUEUE_ACTION_READ_AGAIN)
     {
       goodix5135_open_transaction_fail (
         FP_DEVICE (dev),
-        "Could not build Goodix firmware-version request");
+        "Could not start Goodix pre-command queue cleanup");
       return;
     }
 
-  if (logical_length !=
-      GOODIX5135_FIRMWARE_REQUEST_LENGTH)
+  if (!goodix5135_submit_queue_cleanup_read (
+        FP_DEVICE (dev)))
     {
-      goodix5135_firmware_transaction_out_complete (
-        &self->firmware_transaction,
-        FALSE);
+      goodix5135_queue_cleanup_read_complete (
+        &self->queue_cleanup,
+        GOODIX5135_QUEUE_READ_FATAL);
 
       goodix5135_open_transaction_fail (
         FP_DEVICE (dev),
-        "Unexpected Goodix firmware request length");
-      return;
-    }
-
-  /*
-   * Exactly one read-only Goodix application request:
-   *
-   *   command 0xa8 — firmware version
-   *
-   * The builder produced:
-   *   10 logical bytes
-   *   padded to one 64-byte USB Bulk OUT packet.
-   *
-   * goodix5135_async_submit() copies the OUT packet into transfer-owned
-   * storage before this stack buffer goes out of scope.
-   */
-  if (!goodix5135_async_submit (
-        FP_DEVICE (dev),
-        &self->io,
-        GOODIX5135_REQUEST_BULK_OUT,
-        GOODIX5135_USB_PACKET_LENGTH,
-        GOODIX5135_FIRMWARE_IO_TIMEOUT_MS,
-        packet,
-        sizeof (packet),
-        goodix5135_firmware_out_cb,
-        NULL))
-    {
-      goodix5135_firmware_transaction_out_complete (
-        &self->firmware_transaction,
-        FALSE);
-
-      goodix5135_open_transaction_fail (
-        FP_DEVICE (dev),
-        "Could not submit Goodix firmware-version request");
+        "Could not submit Goodix pre-command queue cleanup read");
     }
 }
 
@@ -641,6 +811,9 @@ fpi_device_goodix5135_init (FpiDeviceGoodix5135 *self)
   self->state = 0;
 
   goodix5135_io_init (&self->io);
+
+  goodix5135_queue_cleanup_init (
+    &self->queue_cleanup);
 
   goodix5135_firmware_transaction_init (
     &self->firmware_transaction);

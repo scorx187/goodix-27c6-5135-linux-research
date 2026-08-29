@@ -87,11 +87,13 @@ goodix5135_queue_cleanup_read_complete (
       cleanup->discarded_packets++;
 
       /*
-       * Fail closed once the configured discard bound is reached.
+       * Fail closed once the hard consumption budget is exhausted.
        *
-       * We deliberately do not issue an additional read here: proving that
-       * another packet exists would itself require consuming beyond the
-       * caller's configured stale-packet bound.
+       * At this point we have consumed exactly max_discarded_packets stale
+       * packets without observing the queue-empty timeout.
+       *
+       * A further read could consume packet N+1, which would exceed the
+       * caller's stale-data consumption budget, so no final probe is issued.
        */
       if (cleanup->discarded_packets >=
           cleanup->max_discarded_packets)

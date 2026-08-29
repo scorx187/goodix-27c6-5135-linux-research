@@ -110,7 +110,7 @@ test_multiple_stale_under_bound (void)
 }
 
 static void
-test_bound_fails_closed (void)
+test_consumption_budget_fails_on_exhaustion (void)
 {
   Goodix5135QueueCleanup cleanup;
 
@@ -234,8 +234,8 @@ main (int argc, char **argv)
     test_multiple_stale_under_bound);
 
   g_test_add_func (
-    "/goodix5135/queue-cleanup/bound-fails-closed",
-    test_bound_fails_closed);
+    "/goodix5135/queue-cleanup/consumption-budget-exhausted",
+    test_consumption_budget_fails_on_exhaustion);
 
   g_test_add_func (
     "/goodix5135/queue-cleanup/fatal-fails-closed",
