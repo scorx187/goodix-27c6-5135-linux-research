@@ -53,10 +53,10 @@ static const FpIdEntry goodix5135_id_table[] = {
 };
 
 /*
- * TEMPORARY BUILD-ONLY runtime wiring for the first read-only transaction.
+ * Firmware-version OPEN transaction timeout.
  *
- * This source snapshot lives under /tmp and must not be committed or run
- * until a separate live-hardware gate has been reviewed.
+ * OPEN performs one read-only command-0xa8 transaction:
+ * one Bulk OUT request, followed by ACK and firmware-response Bulk IN.
  */
 #define GOODIX5135_FIRMWARE_IO_TIMEOUT_MS 1000U
 
