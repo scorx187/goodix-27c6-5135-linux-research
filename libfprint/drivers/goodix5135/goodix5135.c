@@ -130,6 +130,7 @@ struct _FpiDeviceGoodix5135
   gboolean                             tls_runtime_open_gate;
   guint                                tls_runtime_d4_delay_source;
   guint                                capture_baseline_settle_source;
+  guint                                capture_baseline_recheck_count;
 
   Goodix5135CaptureRuntimeState         capture_runtime_state;
 
@@ -257,6 +258,10 @@ goodix5135_capture_start_fdt_up (
 static gboolean
 goodix5135_capture_runtime_start (
   FpDevice *device);
+
+static gboolean
+goodix5135_capture_baseline_settle_cb (
+  gpointer user_data);
 
 static void
 goodix5135_capture_runtime_fail (
@@ -1730,6 +1735,14 @@ goodix5135_activation_continue_after_nop (
  * No USB retry, sensor reset, or FDT threshold change is used.
  */
 #define GOODIX5135_CAPTURE_BASELINE_SETTLE_MS 250U
+
+/*
+ * A protocol-valid manual FDT response may briefly report touch
+ * again after an FDT-up event reported finger-off. Recheck the
+ * actual sensor state instead of relying on a longer fixed delay.
+ */
+#define GOODIX5135_CAPTURE_BASELINE_RECHECK_MS 100U
+#define GOODIX5135_CAPTURE_BASELINE_RECHECK_MAX 20U
 #define GOODIX5135_CAPTURE_IMAGE_TIMEOUT_MS 10000U
 #define GOODIX5135_CAPTURE_MAX_TLS_READS    4U
 
@@ -2613,6 +2626,8 @@ goodix5135_capture_manual_response_cb (
 
   guint16 timestamp;
 
+  guint recheck_attempt;
+
   gboolean transport_ok;
   gboolean protocol_ok;
 
@@ -2650,12 +2665,72 @@ goodix5135_capture_manual_response_cb (
 
   if (response.touch_flag != 0)
     {
-      goodix5135_capture_runtime_fail (
-        device,
-        "finger was present during FDT manual baseline");
+      if (!goodix5135_fpimage_test_requested () ||
+          self->state !=
+            FPI_IMAGE_DEVICE_STATE_AWAIT_FINGER_ON)
+        {
+          goodix5135_capture_runtime_fail (
+            device,
+            "finger was present during FDT manual baseline");
+
+          return;
+        }
+
+      if (self->capture_baseline_recheck_count >=
+          GOODIX5135_CAPTURE_BASELINE_RECHECK_MAX)
+        {
+          goodix5135_capture_runtime_fail (
+            device,
+            "finger-off state did not stabilize during bounded manual FDT rechecks");
+
+          return;
+        }
+
+      recheck_attempt =
+        self->capture_baseline_recheck_count + 1U;
+
+      fp_dbg (
+        "Native FpImage stage: manual baseline still reports touch; "
+        "scheduling 100 ms stability recheck %u/%u",
+        recheck_attempt,
+        GOODIX5135_CAPTURE_BASELINE_RECHECK_MAX);
+
+      /*
+       * The completed manual response has no outstanding transport.
+       * Reset only the host capture runtime so the next manual FDT
+       * transaction starts from the normal IDLE path.
+       *
+       * This does not send a sensor reset command.
+       */
+      goodix5135_capture_runtime_reset (
+        self);
+
+      self->capture_baseline_recheck_count =
+        recheck_attempt;
+
+      self->capture_baseline_settle_source =
+        g_timeout_add_full (
+          G_PRIORITY_DEFAULT,
+          GOODIX5135_CAPTURE_BASELINE_RECHECK_MS,
+          goodix5135_capture_baseline_settle_cb,
+          g_object_ref (device),
+          g_object_unref);
+
+      if (self->capture_baseline_settle_source == 0)
+        {
+          goodix5135_capture_runtime_fail (
+            device,
+            "could not schedule manual FDT stability recheck");
+        }
 
       return;
     }
+
+  fp_dbg (
+    "Native FpImage stage: stable finger-off baseline confirmed after %u recheck(s)",
+    self->capture_baseline_recheck_count);
+
+  self->capture_baseline_recheck_count = 0;
 
   if (!goodix5135_capture_derive_fdt_down_registers (
         &response,
@@ -7977,8 +8052,16 @@ goodix5135_capture_baseline_settle_cb (
       return G_SOURCE_REMOVE;
     }
 
-  fp_dbg (
-    "Native FpImage stage: 250 ms pre-baseline settle completed");
+  if (self->capture_baseline_recheck_count == 0)
+    {
+      fp_dbg (
+        "Native FpImage stage: initial 250 ms pre-baseline settle completed");
+    }
+  else
+    {
+      fp_dbg (
+        "Native FpImage stage: 100 ms baseline stability recheck delay completed");
+    }
 
   if (!goodix5135_capture_runtime_start (
         FP_DEVICE (dev)))
@@ -8018,6 +8101,8 @@ goodix5135_change_state (
   switch (state)
     {
     case FPI_IMAGE_DEVICE_STATE_AWAIT_FINGER_ON:
+      self->capture_baseline_recheck_count = 0;
+
       if (self->capture_baseline_settle_source != 0)
         {
           fp_dbg (
@@ -8097,6 +8182,7 @@ fpi_device_goodix5135_init (FpiDeviceGoodix5135 *self)
   self->tls_runtime_open_gate = FALSE;
   self->tls_runtime_d4_delay_source = 0;
   self->capture_baseline_settle_source = 0;
+  self->capture_baseline_recheck_count = 0;
 
   goodix5135_capture_runtime_reset (
     self);
