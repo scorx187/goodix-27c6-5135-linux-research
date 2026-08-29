@@ -131,6 +131,7 @@ struct _FpiDeviceGoodix5135
   guint                                tls_runtime_d4_delay_source;
   guint                                capture_baseline_settle_source;
   guint                                capture_baseline_recheck_count;
+  guint                                capture_down_empty_event_count;
 
   Goodix5135CaptureRuntimeState         capture_runtime_state;
 
@@ -1743,6 +1744,13 @@ goodix5135_activation_continue_after_nop (
  */
 #define GOODIX5135_CAPTURE_BASELINE_RECHECK_MS 100U
 #define GOODIX5135_CAPTURE_BASELINE_RECHECK_MAX 20U
+
+/*
+ * FDT-down may produce a protocol-valid event with no touched
+ * zones while the image device is still awaiting finger-on.
+ * Continue waiting for a real finger event without resending 0x32.
+ */
+#define GOODIX5135_CAPTURE_DOWN_EMPTY_EVENT_MAX 8U
 #define GOODIX5135_CAPTURE_IMAGE_TIMEOUT_MS 10000U
 #define GOODIX5135_CAPTURE_MAX_TLS_READS    4U
 
@@ -2894,6 +2902,8 @@ goodix5135_capture_down_ack_cb (
   fp_dbg (
     "Native capture stage: FDT-down ACK validated");
 
+  self->capture_down_empty_event_count = 0;
+
   self->capture_runtime_state =
     GOODIX5135_CAPTURE_RUNTIME_WAIT_DOWN_RESPONSE;
 
@@ -2964,12 +2974,61 @@ goodix5135_capture_down_response_cb (
 
   if ((response.touch_flag & 0x3fU) == 0)
     {
-      goodix5135_capture_runtime_fail (
-        device,
-        "FDT-down event reported zero touched zones");
+      guint empty_event_number;
+
+      if (!goodix5135_fpimage_test_requested () ||
+          self->state !=
+            FPI_IMAGE_DEVICE_STATE_AWAIT_FINGER_ON)
+        {
+          goodix5135_capture_runtime_fail (
+            device,
+            "FDT-down event reported zero touched zones");
+
+          return;
+        }
+
+      if (self->capture_down_empty_event_count >=
+          GOODIX5135_CAPTURE_DOWN_EMPTY_EVENT_MAX)
+        {
+          goodix5135_capture_runtime_fail (
+            device,
+            "too many empty FDT-down events while awaiting finger-on");
+
+          return;
+        }
+
+      empty_event_number =
+        self->capture_down_empty_event_count + 1U;
+
+      self->capture_down_empty_event_count =
+        empty_event_number;
+
+      fp_dbg (
+        "Native FpImage stage: empty FDT-down event; "
+        "rearming finger-on event wait %u/%u",
+        empty_event_number,
+        GOODIX5135_CAPTURE_DOWN_EMPTY_EVENT_MAX);
+
+      /*
+       * The FDT-down command is already armed and the received event was
+       * protocol-valid. Do not resend 0x32 and do not reset the sensor.
+       * Continue the same WAIT_DOWN_RESPONSE phase with another IN only.
+       */
+      if (!goodix5135_capture_submit_in (
+            device,
+            GOODIX5135_CAPTURE_USB_LENGTH,
+            GOODIX5135_CAPTURE_EVENT_TIMEOUT_MS,
+            goodix5135_capture_down_response_cb))
+        {
+          goodix5135_capture_runtime_fail (
+            device,
+            "could not re-arm FDT-down event receive after empty event");
+        }
 
       return;
     }
+
+  self->capture_down_empty_event_count = 0;
 
   fp_dbg (
     "Native capture stage: FDT-down event validated");
@@ -8183,6 +8242,7 @@ fpi_device_goodix5135_init (FpiDeviceGoodix5135 *self)
   self->tls_runtime_d4_delay_source = 0;
   self->capture_baseline_settle_source = 0;
   self->capture_baseline_recheck_count = 0;
+  self->capture_down_empty_event_count = 0;
 
   goodix5135_capture_runtime_reset (
     self);
