@@ -3153,6 +3153,117 @@ goodix5135_config_runtime_state_reset (
     FALSE;
 }
 
+/*
+ * Prepare volatile CFG70/config-upload state from an explicitly supplied
+ * template.
+ *
+ * This helper deliberately owns no template source and performs no USB I/O.
+ * It is dormant until an explicitly gated caller invokes it.
+ *
+ * Failure invalidates config-preparation readiness so a caller cannot retry
+ * implicitly with stale state; a fresh validated OTP gate is required before
+ * another attempt.
+ */
+static gboolean G_GNUC_UNUSED
+goodix5135_prepare_runtime_config_from_template (
+  FpiDeviceGoodix5135 *self,
+  const guint8        *template_data,
+  gsize                template_length)
+{
+  g_assert (self != NULL);
+
+  if (template_data == NULL ||
+      template_length != GOODIX5135_CONFIG_LENGTH ||
+      !self->otp_calibration_valid ||
+      !self->config_calibration_ready ||
+      self->config_prepared ||
+      self->config_upload_transaction.state !=
+        GOODIX5135_CONFIG_UPLOAD_TRANSACTION_IDLE)
+    return FALSE;
+
+  /*
+   * Start from a known zeroed volatile-output state while retaining the
+   * already-validated OTP-derived calibration for this single preparation
+   * attempt.
+   */
+  goodix5135_secure_zero (
+    self->config_runtime,
+    sizeof (self->config_runtime));
+
+  goodix5135_secure_zero (
+    self->config_transfer,
+    sizeof (self->config_transfer));
+
+  self->config_logical_length =
+    0;
+
+  self->config_transport_length =
+    0;
+
+  self->config_prepared =
+    FALSE;
+
+  if (!goodix5135_prepare_config_upload (
+        template_data,
+        template_length,
+        &self->otp_calibration,
+        self->config_runtime,
+        sizeof (self->config_runtime),
+        &self->config_upload_transaction,
+        self->config_transfer,
+        sizeof (self->config_transfer),
+        &self->config_logical_length,
+        &self->config_transport_length))
+    goto fail;
+
+  if (self->config_logical_length !=
+        GOODIX5135_CONFIG_LOGICAL_LENGTH ||
+      self->config_transport_length !=
+        GOODIX5135_CONFIG_TRANSFER_LENGTH ||
+      self->config_upload_transaction.state !=
+        GOODIX5135_CONFIG_UPLOAD_TRANSACTION_WAIT_OUT ||
+      self->config_upload_transaction.packets_completed != 0)
+    goto fail;
+
+  self->config_prepared =
+    TRUE;
+
+  return TRUE;
+
+fail:
+  /*
+   * Preparation failure must not leave partial config/framing material.
+   *
+   * Do not use goodix5135_config_runtime_state_reset() here because that
+   * helper also describes a full lifecycle reset.  Perform the precise
+   * failure cleanup locally and require a fresh calibration gate.
+   */
+  goodix5135_secure_zero (
+    self->config_runtime,
+    sizeof (self->config_runtime));
+
+  goodix5135_secure_zero (
+    self->config_transfer,
+    sizeof (self->config_transfer));
+
+  self->config_logical_length =
+    0;
+
+  self->config_transport_length =
+    0;
+
+  self->config_prepared =
+    FALSE;
+
+  goodix5135_config_upload_transaction_init (
+    &self->config_upload_transaction);
+
+  self->config_calibration_ready =
+    FALSE;
+
+  return FALSE;
+}
+
 static void
 goodix5135_start_otp_read (
   FpDevice *device)
