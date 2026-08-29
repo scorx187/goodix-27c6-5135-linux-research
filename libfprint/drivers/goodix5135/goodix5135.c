@@ -79,6 +79,14 @@ struct _FpiDeviceGoodix5135
   gsize                                config_logical_length;
   gsize                                config_transport_length;
   gboolean                             config_prepared;
+
+  /*
+   * Explicit host-only safety interlock for the future live CFG70
+   * transport path.
+   *
+   * Preparation alone must never authorize USB transmission.
+   */
+  gboolean                             config_transport_armed;
 };
 
 G_DECLARE_FINAL_TYPE (FpiDeviceGoodix5135,
@@ -3146,6 +3154,9 @@ goodix5135_config_runtime_state_reset (
   self->config_prepared =
     FALSE;
 
+  self->config_transport_armed =
+    FALSE;
+
   goodix5135_config_upload_transaction_init (
     &self->config_upload_transaction);
 
@@ -3228,6 +3239,13 @@ goodix5135_prepare_runtime_config_from_template (
   self->config_prepared =
     TRUE;
 
+  /*
+   * A successfully prepared CFG70 transfer is still dormant.
+   * A later explicit gate must arm transport separately.
+   */
+  self->config_transport_armed =
+    FALSE;
+
   return TRUE;
 
 fail:
@@ -3255,6 +3273,9 @@ fail:
   self->config_prepared =
     FALSE;
 
+  self->config_transport_armed =
+    FALSE;
+
   goodix5135_config_upload_transaction_init (
     &self->config_upload_transaction);
 
@@ -3263,6 +3284,39 @@ fail:
 
   return FALSE;
 }
+
+/*
+ * Explicitly arm a fully prepared CFG70 transfer for a later transport
+ * implementation.
+ *
+ * This helper performs no USB I/O, does not expose configuration bytes,
+ * and does not advance the config-upload transaction.
+ */
+static gboolean G_GNUC_UNUSED
+goodix5135_arm_config_upload_transport (
+  FpiDeviceGoodix5135 *self)
+{
+  g_assert (self != NULL);
+
+  if (!self->otp_calibration_valid ||
+      !self->config_calibration_ready ||
+      !self->config_prepared ||
+      self->config_transport_armed ||
+      self->config_logical_length !=
+        GOODIX5135_CONFIG_LOGICAL_LENGTH ||
+      self->config_transport_length !=
+        GOODIX5135_CONFIG_TRANSFER_LENGTH ||
+      self->config_upload_transaction.state !=
+        GOODIX5135_CONFIG_UPLOAD_TRANSACTION_WAIT_OUT ||
+      self->config_upload_transaction.packets_completed != 0)
+    return FALSE;
+
+  self->config_transport_armed =
+    TRUE;
+
+  return TRUE;
+}
+
 
 static void
 goodix5135_start_otp_read (
