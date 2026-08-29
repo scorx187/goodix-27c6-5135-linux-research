@@ -189,6 +189,70 @@ test_null_arguments (void)
                     NULL));
 }
 
+static void
+test_firmware_version_request (void)
+{
+  static const guint8 expected[] = {
+    0xa0, 0x06, 0x00, 0xa6,
+    0xa8, 0x03, 0x00, 0x00, 0x00, 0xff,
+  };
+
+  guint8 packet[GOODIX5135_USB_PACKET_LENGTH];
+  gsize logical_length = 0;
+  gsize i;
+
+  memset (packet, 0x5a, sizeof (packet));
+
+  g_assert_true (
+    goodix5135_build_firmware_version_request (
+      packet,
+      sizeof (packet),
+      &logical_length));
+
+  g_assert_cmpuint (
+    logical_length,
+    ==,
+    GOODIX5135_FIRMWARE_REQUEST_LENGTH);
+
+  g_assert_cmpuint (
+    sizeof (expected),
+    ==,
+    GOODIX5135_FIRMWARE_REQUEST_LENGTH);
+
+  g_assert_cmpint (
+    memcmp (packet, expected, sizeof (expected)),
+    ==,
+    0);
+
+  for (i = sizeof (expected); i < sizeof (packet); i++)
+    g_assert_cmpuint (packet[i], ==, 0x00);
+}
+
+static void
+test_firmware_version_request_arguments (void)
+{
+  guint8 packet[GOODIX5135_USB_PACKET_LENGTH];
+  gsize logical_length = 0;
+
+  g_assert_false (
+    goodix5135_build_firmware_version_request (
+      NULL,
+      sizeof (packet),
+      &logical_length));
+
+  g_assert_false (
+    goodix5135_build_firmware_version_request (
+      packet,
+      sizeof (packet) - 1,
+      &logical_length));
+
+  g_assert_false (
+    goodix5135_build_firmware_version_request (
+      packet,
+      sizeof (packet),
+      NULL));
+}
+
 int
 main (int argc, char **argv)
 {
@@ -214,6 +278,12 @@ main (int argc, char **argv)
 
   g_test_add_func ("/goodix5135/proto/image-frame/null-arguments",
                    test_null_arguments);
+
+  g_test_add_func ("/goodix5135/proto/firmware-request/vector",
+                   test_firmware_version_request);
+
+  g_test_add_func ("/goodix5135/proto/firmware-request/arguments",
+                   test_firmware_version_request_arguments);
 
   return g_test_run ();
 }
