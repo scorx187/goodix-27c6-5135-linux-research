@@ -42,6 +42,12 @@
 #define GOODIX5135_SENSOR_RESET_FLAGS            0x05U
 #define GOODIX5135_SENSOR_RESET_DELAY            20U
 
+/*
+ * Logical ChicagoHU chip identity returned by
+ * READ_SENSOR_REGISTER 0x0000 / 4 bytes.
+ */
+#define GOODIX5135_CHIP_ID_LENGTH                4U
+
 #define GOODIX5135_IMAGE_COMMAND             0x20U
 #define GOODIX5135_PROTOCOL_TRAILER          0x88U
 
@@ -82,6 +88,28 @@ typedef struct
   Goodix5135RegisterReadTransactionState state;
   gsize                                  expected_length;
 } Goodix5135RegisterReadTransaction;
+
+typedef enum
+{
+  GOODIX5135_ACTIVATION_IDLE = 0,
+
+  GOODIX5135_ACTIVATION_WAIT_NOP1,
+  GOODIX5135_ACTIVATION_WAIT_D4,
+  GOODIX5135_ACTIVATION_WAIT_NOP2,
+  GOODIX5135_ACTIVATION_WAIT_ENABLE_CHIP,
+  GOODIX5135_ACTIVATION_WAIT_NOP3,
+  GOODIX5135_ACTIVATION_WAIT_FIRMWARE,
+  GOODIX5135_ACTIVATION_WAIT_RESET,
+  GOODIX5135_ACTIVATION_WAIT_CHIP_ID,
+
+  GOODIX5135_ACTIVATION_DONE,
+  GOODIX5135_ACTIVATION_FAILED,
+} Goodix5135ActivationSequenceState;
+
+typedef struct
+{
+  Goodix5135ActivationSequenceState state;
+} Goodix5135ActivationSequence;
 
 typedef enum
 {
@@ -305,6 +333,62 @@ gboolean goodix5135_register_read_transaction_response_complete (
   gsize                              data_length,
   const guint8                     **value,
   gsize                             *value_length);
+
+
+/*
+ * Host-only activation sequence controller.
+ *
+ * This does not build, send, receive, or submit USB data.
+ * Individual command transactions remain responsible for
+ * protocol and transport validation.
+ *
+ * Required ordering:
+ *
+ *   NOP #1
+ *    -> 0xd4
+ *    -> NOP #2
+ *    -> ENABLE_CHIP(true)
+ *    -> NOP #3
+ *    -> firmware 0xa8
+ *    -> sensor reset 0xa2
+ *    -> register read 0x0000 / 4
+ *    -> chip ID a2 04 25 00
+ *    -> DONE
+ *
+ * Any failure or invalid ordering moves permanently to FAILED
+ * until explicit reinitialization.
+ */
+void goodix5135_activation_sequence_init (
+  Goodix5135ActivationSequence *sequence);
+
+gboolean goodix5135_activation_sequence_begin (
+  Goodix5135ActivationSequence *sequence);
+
+gboolean goodix5135_activation_sequence_nop_complete (
+  Goodix5135ActivationSequence *sequence,
+  gboolean                      success);
+
+gboolean goodix5135_activation_sequence_d4_complete (
+  Goodix5135ActivationSequence *sequence,
+  gboolean                      success);
+
+gboolean goodix5135_activation_sequence_enable_chip_complete (
+  Goodix5135ActivationSequence *sequence,
+  gboolean                      success);
+
+gboolean goodix5135_activation_sequence_firmware_complete (
+  Goodix5135ActivationSequence *sequence,
+  gboolean                      success);
+
+gboolean goodix5135_activation_sequence_reset_complete (
+  Goodix5135ActivationSequence *sequence,
+  gboolean                      success);
+
+gboolean goodix5135_activation_sequence_chip_id_complete (
+  Goodix5135ActivationSequence *sequence,
+  gboolean                      success,
+  const guint8                 *chip_id,
+  gsize                         chip_id_length);
 
 
 /*

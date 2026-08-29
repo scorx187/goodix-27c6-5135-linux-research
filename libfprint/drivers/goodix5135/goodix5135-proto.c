@@ -603,6 +603,228 @@ goodix5135_register_read_transaction_response_complete (
 }
 
 
+static gboolean
+goodix5135_activation_sequence_fail (
+  Goodix5135ActivationSequence *sequence)
+{
+  if (sequence != NULL)
+    sequence->state =
+      GOODIX5135_ACTIVATION_FAILED;
+
+  return FALSE;
+}
+
+
+void
+goodix5135_activation_sequence_init (
+  Goodix5135ActivationSequence *sequence)
+{
+  g_return_if_fail (sequence != NULL);
+
+  sequence->state =
+    GOODIX5135_ACTIVATION_IDLE;
+}
+
+
+gboolean
+goodix5135_activation_sequence_begin (
+  Goodix5135ActivationSequence *sequence)
+{
+  if (sequence == NULL)
+    return FALSE;
+
+  if (sequence->state !=
+      GOODIX5135_ACTIVATION_IDLE)
+    return goodix5135_activation_sequence_fail (
+      sequence);
+
+  sequence->state =
+    GOODIX5135_ACTIVATION_WAIT_NOP1;
+
+  return TRUE;
+}
+
+
+gboolean
+goodix5135_activation_sequence_nop_complete (
+  Goodix5135ActivationSequence *sequence,
+  gboolean                      success)
+{
+  if (sequence == NULL)
+    return FALSE;
+
+  if (!success)
+    return goodix5135_activation_sequence_fail (
+      sequence);
+
+  switch (sequence->state)
+    {
+    case GOODIX5135_ACTIVATION_WAIT_NOP1:
+      sequence->state =
+        GOODIX5135_ACTIVATION_WAIT_D4;
+      return TRUE;
+
+    case GOODIX5135_ACTIVATION_WAIT_NOP2:
+      sequence->state =
+        GOODIX5135_ACTIVATION_WAIT_ENABLE_CHIP;
+      return TRUE;
+
+    case GOODIX5135_ACTIVATION_WAIT_NOP3:
+      sequence->state =
+        GOODIX5135_ACTIVATION_WAIT_FIRMWARE;
+      return TRUE;
+
+    default:
+      return goodix5135_activation_sequence_fail (
+        sequence);
+    }
+}
+
+
+gboolean
+goodix5135_activation_sequence_d4_complete (
+  Goodix5135ActivationSequence *sequence,
+  gboolean                      success)
+{
+  if (sequence == NULL)
+    return FALSE;
+
+  if (sequence->state !=
+      GOODIX5135_ACTIVATION_WAIT_D4)
+    return goodix5135_activation_sequence_fail (
+      sequence);
+
+  if (!success)
+    return goodix5135_activation_sequence_fail (
+      sequence);
+
+  sequence->state =
+    GOODIX5135_ACTIVATION_WAIT_NOP2;
+
+  return TRUE;
+}
+
+
+gboolean
+goodix5135_activation_sequence_enable_chip_complete (
+  Goodix5135ActivationSequence *sequence,
+  gboolean                      success)
+{
+  if (sequence == NULL)
+    return FALSE;
+
+  if (sequence->state !=
+      GOODIX5135_ACTIVATION_WAIT_ENABLE_CHIP)
+    return goodix5135_activation_sequence_fail (
+      sequence);
+
+  if (!success)
+    return goodix5135_activation_sequence_fail (
+      sequence);
+
+  sequence->state =
+    GOODIX5135_ACTIVATION_WAIT_NOP3;
+
+  return TRUE;
+}
+
+
+gboolean
+goodix5135_activation_sequence_firmware_complete (
+  Goodix5135ActivationSequence *sequence,
+  gboolean                      success)
+{
+  if (sequence == NULL)
+    return FALSE;
+
+  if (sequence->state !=
+      GOODIX5135_ACTIVATION_WAIT_FIRMWARE)
+    return goodix5135_activation_sequence_fail (
+      sequence);
+
+  if (!success)
+    return goodix5135_activation_sequence_fail (
+      sequence);
+
+  sequence->state =
+    GOODIX5135_ACTIVATION_WAIT_RESET;
+
+  return TRUE;
+}
+
+
+gboolean
+goodix5135_activation_sequence_reset_complete (
+  Goodix5135ActivationSequence *sequence,
+  gboolean                      success)
+{
+  if (sequence == NULL)
+    return FALSE;
+
+  if (sequence->state !=
+      GOODIX5135_ACTIVATION_WAIT_RESET)
+    return goodix5135_activation_sequence_fail (
+      sequence);
+
+  if (!success)
+    return goodix5135_activation_sequence_fail (
+      sequence);
+
+  sequence->state =
+    GOODIX5135_ACTIVATION_WAIT_CHIP_ID;
+
+  return TRUE;
+}
+
+
+gboolean
+goodix5135_activation_sequence_chip_id_complete (
+  Goodix5135ActivationSequence *sequence,
+  gboolean                      success,
+  const guint8                 *chip_id,
+  gsize                         chip_id_length)
+{
+  static const guint8 expected_chip_id[
+    GOODIX5135_CHIP_ID_LENGTH
+  ] = {
+    0xa2,
+    0x04,
+    0x25,
+    0x00,
+  };
+
+  if (sequence == NULL)
+    return FALSE;
+
+  if (sequence->state !=
+      GOODIX5135_ACTIVATION_WAIT_CHIP_ID)
+    return goodix5135_activation_sequence_fail (
+      sequence);
+
+  if (!success)
+    return goodix5135_activation_sequence_fail (
+      sequence);
+
+  if (chip_id == NULL ||
+      chip_id_length <
+        GOODIX5135_CHIP_ID_LENGTH)
+    return goodix5135_activation_sequence_fail (
+      sequence);
+
+  if (memcmp (
+        chip_id,
+        expected_chip_id,
+        GOODIX5135_CHIP_ID_LENGTH) != 0)
+    return goodix5135_activation_sequence_fail (
+      sequence);
+
+  sequence->state =
+    GOODIX5135_ACTIVATION_DONE;
+
+  return TRUE;
+}
+
+
 gboolean
 goodix5135_build_sensor_reset_request (
   guint8 *packet,
