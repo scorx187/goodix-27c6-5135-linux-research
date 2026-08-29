@@ -71,7 +71,7 @@ gboolean
 goodix5135_capture_build_fdt_down (
   const guint8 *registers,
   gsize         registers_length,
-  guint32       timestamp,
+  guint16       timestamp,
   guint8       *packet,
   gsize         packet_size,
   gsize        *logical_length);

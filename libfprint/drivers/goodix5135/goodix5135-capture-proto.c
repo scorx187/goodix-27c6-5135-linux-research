@@ -13,7 +13,7 @@
 #define GOODIX5135_CAPTURE_ACK_LOGICAL_LENGTH 10U
 
 #define GOODIX5135_FDT_MANUAL_PAYLOAD_LENGTH  14U
-#define GOODIX5135_FDT_DOWN_PAYLOAD_LENGTH    18U
+#define GOODIX5135_FDT_DOWN_PAYLOAD_LENGTH    16U
 #define GOODIX5135_FDT_UP_PAYLOAD_LENGTH      14U
 #define GOODIX5135_IMAGE_REQUEST_PAYLOAD_LENGTH 2U
 
@@ -520,7 +520,7 @@ gboolean
 goodix5135_capture_build_fdt_down (
   const guint8 *registers,
   gsize         registers_length,
-  guint32       timestamp,
+  guint16       timestamp,
   guint8       *packet,
   gsize         packet_size,
   gsize        *logical_length)
@@ -542,17 +542,20 @@ goodix5135_capture_build_fdt_down (
     registers,
     GOODIX5135_FDT_REGISTER_BYTES);
 
+  /*
+   * Proven ChicagoHU/5135 FDT-down contract:
+   *
+   *   08 01
+   *   + six 80/threshold pairs
+   *   + timestamp u16 little-endian
+   *
+   * Total payload length: 16 bytes.
+   */
   payload[14] =
     timestamp & 0xffU;
 
   payload[15] =
     (timestamp >> 8) & 0xffU;
-
-  payload[16] =
-    (timestamp >> 16) & 0xffU;
-
-  payload[17] =
-    (timestamp >> 24) & 0xffU;
 
   return goodix5135_capture_build_command (
     GOODIX5135_FDT_DOWN_COMMAND,
