@@ -603,6 +603,402 @@ goodix5135_register_read_transaction_response_complete (
 }
 
 
+gboolean
+goodix5135_build_config_upload_transfer (
+  const guint8 *config,
+  gsize         config_length,
+  guint8       *transfer,
+  gsize         transfer_size,
+  gsize        *logical_length,
+  gsize        *transport_length)
+{
+  gsize inner_protocol_length;
+  gsize inner_length_field;
+  guint outer_sum;
+
+  if (logical_length != NULL)
+    *logical_length = 0;
+
+  if (transport_length != NULL)
+    *transport_length = 0;
+
+  if (config == NULL ||
+      transfer == NULL ||
+      logical_length == NULL ||
+      transport_length == NULL)
+    return FALSE;
+
+  if (config_length !=
+      GOODIX5135_CONFIG_LENGTH)
+    return FALSE;
+
+  if (transfer_size <
+      GOODIX5135_CONFIG_TRANSFER_LENGTH)
+    return FALSE;
+
+  memset (
+    transfer,
+    0,
+    GOODIX5135_CONFIG_TRANSFER_LENGTH);
+
+  /*
+   * Inner protocol:
+   *
+   *   command           1
+   *   LE16 length       2
+   *   config          224
+   *   checksum           1
+   *                  ----
+   *                    228 bytes
+   */
+  inner_protocol_length =
+    1U +
+    2U +
+    config_length +
+    1U;
+
+  /*
+   * Goodix inner length field includes:
+   *
+   *   payload + checksum
+   *
+   * = 224 + 1
+   * = 225
+   * = 0x00e1
+   */
+  inner_length_field =
+    config_length + 1U;
+
+  /*
+   * Outer message-pack header:
+   *
+   *   a0 e4 00 84
+   */
+  transfer[0] =
+    GOODIX5135_PACK_FLAGS_MESSAGE_PROTOCOL;
+
+  transfer[1] =
+    (guint8) (
+      inner_protocol_length & 0xffU);
+
+  transfer[2] =
+    (guint8) (
+      (inner_protocol_length >> 8) & 0xffU);
+
+  outer_sum =
+    (guint) transfer[0] +
+    (guint) transfer[1] +
+    (guint) transfer[2];
+
+  transfer[3] =
+    (guint8) (
+      outer_sum & 0xffU);
+
+  /*
+   * Inner protocol header.
+   */
+  transfer[4] =
+    GOODIX5135_COMMAND_UPLOAD_CONFIG_MCU;
+
+  transfer[5] =
+    (guint8) (
+      inner_length_field & 0xffU);
+
+  transfer[6] =
+    (guint8) (
+      (inner_length_field >> 8) & 0xffU);
+
+  /*
+   * The caller-provided configuration is copied only into this
+   * caller-owned transient transfer buffer.
+   */
+  memcpy (
+    transfer + 7,
+    config,
+    config_length);
+
+  /*
+   * Checksum covers:
+   *
+   *   command + LE16 length + configuration
+   *
+   * and is appended immediately after the 224-byte config.
+   */
+  transfer[7 + config_length] =
+    goodix5135_checksum_aa (
+      transfer + 4,
+      3U + config_length);
+
+  *logical_length =
+    4U + inner_protocol_length;
+
+  *transport_length =
+    GOODIX5135_CONFIG_TRANSFER_LENGTH;
+
+  if (*logical_length !=
+      GOODIX5135_CONFIG_LOGICAL_LENGTH)
+    {
+      *logical_length = 0;
+      *transport_length = 0;
+      return FALSE;
+    }
+
+  return TRUE;
+}
+
+
+gboolean
+goodix5135_config_upload_get_packet (
+  const guint8  *transfer,
+  gsize          transfer_length,
+  guint          packet_index,
+  const guint8 **packet,
+  gsize         *packet_length)
+{
+  if (packet != NULL)
+    *packet = NULL;
+
+  if (packet_length != NULL)
+    *packet_length = 0;
+
+  if (transfer == NULL ||
+      packet == NULL ||
+      packet_length == NULL)
+    return FALSE;
+
+  if (transfer_length !=
+      GOODIX5135_CONFIG_TRANSFER_LENGTH)
+    return FALSE;
+
+  if (packet_index >=
+      GOODIX5135_CONFIG_USB_PACKET_COUNT)
+    return FALSE;
+
+  *packet =
+    transfer +
+    ((gsize) packet_index *
+     GOODIX5135_USB_PACKET_LENGTH);
+
+  *packet_length =
+    GOODIX5135_USB_PACKET_LENGTH;
+
+  return TRUE;
+}
+
+
+gboolean
+goodix5135_parse_config_upload_ack (
+  const guint8 *data,
+  gsize         data_length)
+{
+  const guint8 *payload;
+  gsize payload_length;
+
+  if (!goodix5135_parse_wrapped_protocol (
+        data,
+        data_length,
+        GOODIX5135_COMMAND_ACK,
+        &payload,
+        &payload_length))
+    return FALSE;
+
+  if (payload_length <
+      GOODIX5135_ACK_MIN_PAYLOAD_LENGTH)
+    return FALSE;
+
+  if (payload[0] !=
+      GOODIX5135_COMMAND_UPLOAD_CONFIG_MCU)
+    return FALSE;
+
+  if ((payload[1] & 0x01U) == 0)
+    return FALSE;
+
+  return TRUE;
+}
+
+
+gboolean
+goodix5135_parse_config_upload_response (
+  const guint8 *data,
+  gsize         data_length)
+{
+  const guint8 *payload;
+  gsize payload_length;
+
+  if (!goodix5135_parse_wrapped_protocol (
+        data,
+        data_length,
+        GOODIX5135_COMMAND_UPLOAD_CONFIG_MCU,
+        &payload,
+        &payload_length))
+    return FALSE;
+
+  if (payload_length < 1U)
+    return FALSE;
+
+  return payload[0] == 0x01U;
+}
+
+
+static gboolean
+goodix5135_config_upload_transaction_fail (
+  Goodix5135ConfigUploadTransaction *transaction)
+{
+  if (transaction != NULL)
+    transaction->state =
+      GOODIX5135_CONFIG_UPLOAD_TRANSACTION_FAILED;
+
+  return FALSE;
+}
+
+
+void
+goodix5135_config_upload_transaction_init (
+  Goodix5135ConfigUploadTransaction *transaction)
+{
+  g_return_if_fail (transaction != NULL);
+
+  transaction->state =
+    GOODIX5135_CONFIG_UPLOAD_TRANSACTION_IDLE;
+
+  transaction->packets_completed = 0;
+}
+
+
+gboolean
+goodix5135_config_upload_transaction_begin (
+  Goodix5135ConfigUploadTransaction *transaction,
+  const guint8                      *config,
+  gsize                              config_length,
+  guint8                            *transfer,
+  gsize                              transfer_size,
+  gsize                             *logical_length,
+  gsize                             *transport_length)
+{
+  if (transaction == NULL)
+    return FALSE;
+
+  if (transaction->state !=
+      GOODIX5135_CONFIG_UPLOAD_TRANSACTION_IDLE)
+    return goodix5135_config_upload_transaction_fail (
+      transaction);
+
+  if (!goodix5135_build_config_upload_transfer (
+        config,
+        config_length,
+        transfer,
+        transfer_size,
+        logical_length,
+        transport_length))
+    return goodix5135_config_upload_transaction_fail (
+      transaction);
+
+  transaction->packets_completed = 0;
+
+  transaction->state =
+    GOODIX5135_CONFIG_UPLOAD_TRANSACTION_WAIT_OUT;
+
+  return TRUE;
+}
+
+
+gboolean
+goodix5135_config_upload_transaction_out_complete (
+  Goodix5135ConfigUploadTransaction *transaction,
+  gboolean                           transport_can_advance)
+{
+  if (transaction == NULL)
+    return FALSE;
+
+  if (transaction->state !=
+      GOODIX5135_CONFIG_UPLOAD_TRANSACTION_WAIT_OUT)
+    return goodix5135_config_upload_transaction_fail (
+      transaction);
+
+  if (!transport_can_advance)
+    return goodix5135_config_upload_transaction_fail (
+      transaction);
+
+  if (transaction->packets_completed >=
+      GOODIX5135_CONFIG_USB_PACKET_COUNT)
+    return goodix5135_config_upload_transaction_fail (
+      transaction);
+
+  transaction->packets_completed++;
+
+  if (transaction->packets_completed ==
+      GOODIX5135_CONFIG_USB_PACKET_COUNT)
+    transaction->state =
+      GOODIX5135_CONFIG_UPLOAD_TRANSACTION_WAIT_ACK;
+
+  return TRUE;
+}
+
+
+gboolean
+goodix5135_config_upload_transaction_ack_complete (
+  Goodix5135ConfigUploadTransaction *transaction,
+  gboolean                           transport_can_advance,
+  const guint8                      *data,
+  gsize                              data_length)
+{
+  if (transaction == NULL)
+    return FALSE;
+
+  if (transaction->state !=
+      GOODIX5135_CONFIG_UPLOAD_TRANSACTION_WAIT_ACK)
+    return goodix5135_config_upload_transaction_fail (
+      transaction);
+
+  if (!transport_can_advance)
+    return goodix5135_config_upload_transaction_fail (
+      transaction);
+
+  if (!goodix5135_parse_config_upload_ack (
+        data,
+        data_length))
+    return goodix5135_config_upload_transaction_fail (
+      transaction);
+
+  transaction->state =
+    GOODIX5135_CONFIG_UPLOAD_TRANSACTION_WAIT_RESPONSE;
+
+  return TRUE;
+}
+
+
+gboolean
+goodix5135_config_upload_transaction_response_complete (
+  Goodix5135ConfigUploadTransaction *transaction,
+  gboolean                           transport_can_advance,
+  const guint8                      *data,
+  gsize                              data_length)
+{
+  if (transaction == NULL)
+    return FALSE;
+
+  if (transaction->state !=
+      GOODIX5135_CONFIG_UPLOAD_TRANSACTION_WAIT_RESPONSE)
+    return goodix5135_config_upload_transaction_fail (
+      transaction);
+
+  if (!transport_can_advance)
+    return goodix5135_config_upload_transaction_fail (
+      transaction);
+
+  if (!goodix5135_parse_config_upload_response (
+        data,
+        data_length))
+    return goodix5135_config_upload_transaction_fail (
+      transaction);
+
+  transaction->state =
+    GOODIX5135_CONFIG_UPLOAD_TRANSACTION_DONE;
+
+  return TRUE;
+}
+
+
 static gboolean
 goodix5135_activation_sequence_fail (
   Goodix5135ActivationSequence *sequence)

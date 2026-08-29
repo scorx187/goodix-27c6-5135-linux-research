@@ -12,6 +12,7 @@
 #define GOODIX5135_PACK_FLAGS_MESSAGE_PROTOCOL  0xa0U
 #define GOODIX5135_COMMAND_NOP                  0x00U
 #define GOODIX5135_COMMAND_READ_SENSOR_REGISTER 0x82U
+#define GOODIX5135_COMMAND_UPLOAD_CONFIG_MCU    0x90U
 #define GOODIX5135_COMMAND_ENABLE_CHIP          0x96U
 #define GOODIX5135_COMMAND_RESET                0xa2U
 #define GOODIX5135_COMMAND_FIRMWARE_VERSION     0xa8U
@@ -27,6 +28,30 @@
 #define GOODIX5135_D4_REQUEST_LENGTH             10U
 #define GOODIX5135_ENABLE_CHIP_REQUEST_LENGTH    10U
 #define GOODIX5135_SENSOR_RESET_REQUEST_LENGTH   10U
+
+/*
+ * ChicagoHU runtime configuration transport shape.
+ *
+ * IMPORTANT:
+ *
+ * These constants describe LENGTH ONLY.
+ * The unit-specific configuration bytes are not stored here.
+ *
+ * 224-byte payload
+ * + command byte
+ * + LE16 inner length
+ * + protocol checksum
+ * + outer 4-byte wrapper
+ * = 232 logical bytes
+ *
+ * USB reference transport pads/splits this to:
+ *
+ *   4 x 64-byte Bulk OUT transfers = 256 bytes
+ */
+#define GOODIX5135_CONFIG_LENGTH                 224U
+#define GOODIX5135_CONFIG_LOGICAL_LENGTH         232U
+#define GOODIX5135_CONFIG_TRANSFER_LENGTH        256U
+#define GOODIX5135_CONFIG_USB_PACKET_COUNT       4U
 
 /*
  * Exact historical ChicagoHU reset gate:
@@ -110,6 +135,23 @@ typedef struct
 {
   Goodix5135ActivationSequenceState state;
 } Goodix5135ActivationSequence;
+
+typedef enum
+{
+  GOODIX5135_CONFIG_UPLOAD_TRANSACTION_IDLE = 0,
+  GOODIX5135_CONFIG_UPLOAD_TRANSACTION_WAIT_OUT,
+  GOODIX5135_CONFIG_UPLOAD_TRANSACTION_WAIT_ACK,
+  GOODIX5135_CONFIG_UPLOAD_TRANSACTION_WAIT_RESPONSE,
+  GOODIX5135_CONFIG_UPLOAD_TRANSACTION_DONE,
+  GOODIX5135_CONFIG_UPLOAD_TRANSACTION_FAILED,
+} Goodix5135ConfigUploadTransactionState;
+
+typedef struct
+{
+  Goodix5135ConfigUploadTransactionState state;
+  guint                                  packets_completed;
+} Goodix5135ConfigUploadTransaction;
+
 
 typedef enum
 {
@@ -333,6 +375,104 @@ gboolean goodix5135_register_read_transaction_response_complete (
   gsize                              data_length,
   const guint8                     **value,
   gsize                             *value_length);
+
+
+/*
+ * Build the complete wrapped 0x90 MCU configuration frame.
+ *
+ * The caller supplies exactly GOODIX5135_CONFIG_LENGTH bytes.
+ *
+ * This function:
+ *
+ *   - does not know or persist the device's real configuration
+ *   - performs no USB access
+ *   - writes a padded 256-byte transport buffer
+ *   - reports 232 logical Goodix bytes
+ *
+ * The resulting 256-byte transport buffer consists of four
+ * consecutive 64-byte Bulk OUT packets.
+ */
+gboolean goodix5135_build_config_upload_transfer (
+  const guint8 *config,
+  gsize         config_length,
+  guint8       *transfer,
+  gsize         transfer_size,
+  gsize        *logical_length,
+  gsize        *transport_length);
+
+/*
+ * Borrow one of the four 64-byte USB packets from an already
+ * constructed transport buffer.
+ *
+ * No copying is performed.
+ */
+gboolean goodix5135_config_upload_get_packet (
+  const guint8  *transfer,
+  gsize          transfer_length,
+  guint          packet_index,
+  const guint8 **packet,
+  gsize         *packet_length);
+
+/*
+ * Parse ACK specifically for command 0x90.
+ */
+gboolean goodix5135_parse_config_upload_ack (
+  const guint8 *data,
+  gsize         data_length);
+
+/*
+ * Parse the 0x90 response.
+ *
+ * Reference semantics:
+ *
+ *   response payload[0] == 0x01 -> success
+ */
+gboolean goodix5135_parse_config_upload_response (
+  const guint8 *data,
+  gsize         data_length);
+
+/*
+ * Host-only multi-packet transaction controller:
+ *
+ * IDLE
+ *  -> WAIT_OUT
+ *       packet 1
+ *       packet 2
+ *       packet 3
+ *       packet 4
+ *  -> WAIT_ACK
+ *  -> WAIT_RESPONSE
+ *  -> DONE
+ *
+ * Any transport/protocol/order error -> FAILED.
+ */
+void goodix5135_config_upload_transaction_init (
+  Goodix5135ConfigUploadTransaction *transaction);
+
+gboolean goodix5135_config_upload_transaction_begin (
+  Goodix5135ConfigUploadTransaction *transaction,
+  const guint8                      *config,
+  gsize                              config_length,
+  guint8                            *transfer,
+  gsize                              transfer_size,
+  gsize                             *logical_length,
+  gsize                             *transport_length);
+
+gboolean goodix5135_config_upload_transaction_out_complete (
+  Goodix5135ConfigUploadTransaction *transaction,
+  gboolean                           transport_can_advance);
+
+gboolean goodix5135_config_upload_transaction_ack_complete (
+  Goodix5135ConfigUploadTransaction *transaction,
+  gboolean                           transport_can_advance,
+  const guint8                      *data,
+  gsize                              data_length);
+
+gboolean goodix5135_config_upload_transaction_response_complete (
+  Goodix5135ConfigUploadTransaction *transaction,
+  gboolean                           transport_can_advance,
+  const guint8                      *data,
+  gsize                              data_length);
 
 
 /*

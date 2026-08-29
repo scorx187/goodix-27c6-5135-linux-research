@@ -3630,6 +3630,570 @@ test_activation_sequence_short_chip_id (void)
 }
 
 
+
+static void
+test_config_upload_request_zero_vector (void)
+{
+  guint8 config[GOODIX5135_CONFIG_LENGTH] = { 0 };
+  guint8 transfer[GOODIX5135_CONFIG_TRANSFER_LENGTH];
+
+  gsize logical_length = 0;
+  gsize transport_length = 0;
+
+  g_assert_true (
+    goodix5135_build_config_upload_transfer (
+      config,
+      sizeof (config),
+      transfer,
+      sizeof (transfer),
+      &logical_length,
+      &transport_length));
+
+  g_assert_cmpuint (
+    logical_length,
+    ==,
+    GOODIX5135_CONFIG_LOGICAL_LENGTH);
+
+  g_assert_cmpuint (
+    transport_length,
+    ==,
+    GOODIX5135_CONFIG_TRANSFER_LENGTH);
+
+  /*
+   * Outer:
+   *   a0 e4 00 84
+   *
+   * Inner:
+   *   90 e1 00
+   */
+  g_assert_cmpuint (transfer[0], ==, 0xa0);
+  g_assert_cmpuint (transfer[1], ==, 0xe4);
+  g_assert_cmpuint (transfer[2], ==, 0x00);
+  g_assert_cmpuint (transfer[3], ==, 0x84);
+
+  g_assert_cmpuint (transfer[4], ==, 0x90);
+  g_assert_cmpuint (transfer[5], ==, 0xe1);
+  g_assert_cmpuint (transfer[6], ==, 0x00);
+
+  for (gsize i = 0;
+       i < GOODIX5135_CONFIG_LENGTH;
+       i++)
+    g_assert_cmpuint (
+      transfer[7 + i],
+      ==,
+      0);
+
+  /*
+   * Synthetic all-zero config checksum.
+   */
+  g_assert_cmpuint (
+    transfer[231],
+    ==,
+    0x39);
+
+  /*
+   * USB padding:
+   * bytes 232..255 must be zero.
+   */
+  for (gsize i = GOODIX5135_CONFIG_LOGICAL_LENGTH;
+       i < GOODIX5135_CONFIG_TRANSFER_LENGTH;
+       i++)
+    g_assert_cmpuint (
+      transfer[i],
+      ==,
+      0);
+}
+
+
+static void
+test_config_upload_request_pattern (void)
+{
+  guint8 config[GOODIX5135_CONFIG_LENGTH];
+  guint8 transfer[GOODIX5135_CONFIG_TRANSFER_LENGTH];
+
+  gsize logical_length = 0;
+  gsize transport_length = 0;
+
+  for (gsize i = 0;
+       i < sizeof (config);
+       i++)
+    config[i] = (guint8) i;
+
+  g_assert_true (
+    goodix5135_build_config_upload_transfer (
+      config,
+      sizeof (config),
+      transfer,
+      sizeof (transfer),
+      &logical_length,
+      &transport_length));
+
+  g_assert_cmpmem (
+    transfer + 7,
+    GOODIX5135_CONFIG_LENGTH,
+    config,
+    sizeof (config));
+
+  /*
+   * checksum for synthetic sequence 00..df.
+   */
+  g_assert_cmpuint (
+    transfer[231],
+    ==,
+    0xa9);
+}
+
+
+static void
+test_config_upload_request_arguments (void)
+{
+  guint8 config[GOODIX5135_CONFIG_LENGTH] = { 0 };
+  guint8 transfer[GOODIX5135_CONFIG_TRANSFER_LENGTH];
+
+  gsize logical_length = 99;
+  gsize transport_length = 99;
+
+  g_assert_false (
+    goodix5135_build_config_upload_transfer (
+      NULL,
+      sizeof (config),
+      transfer,
+      sizeof (transfer),
+      &logical_length,
+      &transport_length));
+
+  g_assert_false (
+    goodix5135_build_config_upload_transfer (
+      config,
+      GOODIX5135_CONFIG_LENGTH - 1,
+      transfer,
+      sizeof (transfer),
+      &logical_length,
+      &transport_length));
+
+  g_assert_false (
+    goodix5135_build_config_upload_transfer (
+      config,
+      sizeof (config),
+      NULL,
+      sizeof (transfer),
+      &logical_length,
+      &transport_length));
+
+  g_assert_false (
+    goodix5135_build_config_upload_transfer (
+      config,
+      sizeof (config),
+      transfer,
+      GOODIX5135_CONFIG_TRANSFER_LENGTH - 1,
+      &logical_length,
+      &transport_length));
+
+  g_assert_false (
+    goodix5135_build_config_upload_transfer (
+      config,
+      sizeof (config),
+      transfer,
+      sizeof (transfer),
+      NULL,
+      &transport_length));
+
+  g_assert_false (
+    goodix5135_build_config_upload_transfer (
+      config,
+      sizeof (config),
+      transfer,
+      sizeof (transfer),
+      &logical_length,
+      NULL));
+}
+
+
+static void
+test_config_upload_packet_view_first (void)
+{
+  guint8 config[GOODIX5135_CONFIG_LENGTH] = { 0 };
+  guint8 transfer[GOODIX5135_CONFIG_TRANSFER_LENGTH];
+
+  gsize logical_length = 0;
+  gsize transport_length = 0;
+
+  const guint8 *packet = NULL;
+  gsize packet_length = 0;
+
+  g_assert_true (
+    goodix5135_build_config_upload_transfer (
+      config,
+      sizeof (config),
+      transfer,
+      sizeof (transfer),
+      &logical_length,
+      &transport_length));
+
+  g_assert_true (
+    goodix5135_config_upload_get_packet (
+      transfer,
+      transport_length,
+      0,
+      &packet,
+      &packet_length));
+
+  g_assert_true (
+    packet == transfer);
+
+  g_assert_cmpuint (
+    packet_length,
+    ==,
+    GOODIX5135_USB_PACKET_LENGTH);
+
+  g_assert_cmpuint (packet[0], ==, 0xa0);
+  g_assert_cmpuint (packet[1], ==, 0xe4);
+  g_assert_cmpuint (packet[4], ==, 0x90);
+}
+
+
+static void
+test_config_upload_packet_view_last (void)
+{
+  guint8 config[GOODIX5135_CONFIG_LENGTH] = { 0 };
+  guint8 transfer[GOODIX5135_CONFIG_TRANSFER_LENGTH];
+
+  gsize logical_length = 0;
+  gsize transport_length = 0;
+
+  const guint8 *packet = NULL;
+  gsize packet_length = 0;
+
+  g_assert_true (
+    goodix5135_build_config_upload_transfer (
+      config,
+      sizeof (config),
+      transfer,
+      sizeof (transfer),
+      &logical_length,
+      &transport_length));
+
+  g_assert_true (
+    goodix5135_config_upload_get_packet (
+      transfer,
+      transport_length,
+      3,
+      &packet,
+      &packet_length));
+
+  g_assert_true (
+    packet ==
+      transfer +
+      (3U * GOODIX5135_USB_PACKET_LENGTH));
+
+  g_assert_cmpuint (
+    packet_length,
+    ==,
+    GOODIX5135_USB_PACKET_LENGTH);
+
+  /*
+   * Checksum is absolute byte 231.
+   * Relative to packet 3 starting at byte 192:
+   *
+   *   231 - 192 = 39
+   */
+  g_assert_cmpuint (
+    packet[39],
+    ==,
+    0x39);
+
+  for (gsize i = 40;
+       i < GOODIX5135_USB_PACKET_LENGTH;
+       i++)
+    g_assert_cmpuint (
+      packet[i],
+      ==,
+      0);
+}
+
+
+static void
+test_config_upload_packet_view_invalid (void)
+{
+  guint8 transfer[GOODIX5135_CONFIG_TRANSFER_LENGTH] = { 0 };
+
+  const guint8 *packet = NULL;
+  gsize packet_length = 0;
+
+  g_assert_false (
+    goodix5135_config_upload_get_packet (
+      transfer,
+      sizeof (transfer),
+      GOODIX5135_CONFIG_USB_PACKET_COUNT,
+      &packet,
+      &packet_length));
+
+  g_assert_false (
+    goodix5135_config_upload_get_packet (
+      transfer,
+      GOODIX5135_CONFIG_TRANSFER_LENGTH - 1,
+      0,
+      &packet,
+      &packet_length));
+
+  g_assert_false (
+    goodix5135_config_upload_get_packet (
+      NULL,
+      sizeof (transfer),
+      0,
+      &packet,
+      &packet_length));
+}
+
+
+static void
+test_config_upload_ack_success (void)
+{
+  static const guint8 ack[GOODIX5135_USB_PACKET_LENGTH] = {
+    0xa0, 0x06, 0x00, 0xa6,
+    0xb0, 0x03, 0x00,
+    0x90, 0x01,
+    0x66,
+  };
+
+  g_assert_true (
+    goodix5135_parse_config_upload_ack (
+      ack,
+      sizeof (ack)));
+}
+
+
+static void
+test_config_upload_ack_negative (void)
+{
+  static const guint8 ack[GOODIX5135_USB_PACKET_LENGTH] = {
+    0xa0, 0x06, 0x00, 0xa6,
+    0xb0, 0x03, 0x00,
+    0x90, 0x00,
+    0x67,
+  };
+
+  g_assert_false (
+    goodix5135_parse_config_upload_ack (
+      ack,
+      sizeof (ack)));
+}
+
+
+static void
+test_config_upload_response_success (void)
+{
+  static const guint8 response[GOODIX5135_USB_PACKET_LENGTH] = {
+    0xa0, 0x05, 0x00, 0xa5,
+    0x90, 0x02, 0x00,
+    0x01,
+    0x17,
+  };
+
+  g_assert_true (
+    goodix5135_parse_config_upload_response (
+      response,
+      sizeof (response)));
+}
+
+
+static void
+test_config_upload_response_negative (void)
+{
+  static const guint8 response[GOODIX5135_USB_PACKET_LENGTH] = {
+    0xa0, 0x05, 0x00, 0xa5,
+    0x90, 0x02, 0x00,
+    0x00,
+    0x18,
+  };
+
+  g_assert_false (
+    goodix5135_parse_config_upload_response (
+      response,
+      sizeof (response)));
+}
+
+
+static void
+test_config_upload_transaction_happy_path (void)
+{
+  Goodix5135ConfigUploadTransaction transaction;
+
+  guint8 config[GOODIX5135_CONFIG_LENGTH] = { 0 };
+  guint8 transfer[GOODIX5135_CONFIG_TRANSFER_LENGTH];
+
+  gsize logical_length = 0;
+  gsize transport_length = 0;
+
+  static const guint8 ack[GOODIX5135_USB_PACKET_LENGTH] = {
+    0xa0, 0x06, 0x00, 0xa6,
+    0xb0, 0x03, 0x00,
+    0x90, 0x01,
+    0x66,
+  };
+
+  static const guint8 response[GOODIX5135_USB_PACKET_LENGTH] = {
+    0xa0, 0x05, 0x00, 0xa5,
+    0x90, 0x02, 0x00,
+    0x01,
+    0x17,
+  };
+
+  goodix5135_config_upload_transaction_init (
+    &transaction);
+
+  g_assert_true (
+    goodix5135_config_upload_transaction_begin (
+      &transaction,
+      config,
+      sizeof (config),
+      transfer,
+      sizeof (transfer),
+      &logical_length,
+      &transport_length));
+
+  g_assert_cmpint (
+    transaction.state,
+    ==,
+    GOODIX5135_CONFIG_UPLOAD_TRANSACTION_WAIT_OUT);
+
+  for (guint i = 0;
+       i < GOODIX5135_CONFIG_USB_PACKET_COUNT;
+       i++)
+    {
+      g_assert_true (
+        goodix5135_config_upload_transaction_out_complete (
+          &transaction,
+          TRUE));
+
+      g_assert_cmpuint (
+        transaction.packets_completed,
+        ==,
+        i + 1);
+
+      if (i + 1 <
+          GOODIX5135_CONFIG_USB_PACKET_COUNT)
+        g_assert_cmpint (
+          transaction.state,
+          ==,
+          GOODIX5135_CONFIG_UPLOAD_TRANSACTION_WAIT_OUT);
+    }
+
+  g_assert_cmpint (
+    transaction.state,
+    ==,
+    GOODIX5135_CONFIG_UPLOAD_TRANSACTION_WAIT_ACK);
+
+  g_assert_true (
+    goodix5135_config_upload_transaction_ack_complete (
+      &transaction,
+      TRUE,
+      ack,
+      sizeof (ack)));
+
+  g_assert_cmpint (
+    transaction.state,
+    ==,
+    GOODIX5135_CONFIG_UPLOAD_TRANSACTION_WAIT_RESPONSE);
+
+  g_assert_true (
+    goodix5135_config_upload_transaction_response_complete (
+      &transaction,
+      TRUE,
+      response,
+      sizeof (response)));
+
+  g_assert_cmpint (
+    transaction.state,
+    ==,
+    GOODIX5135_CONFIG_UPLOAD_TRANSACTION_DONE);
+}
+
+
+static void
+test_config_upload_transaction_out_failure (void)
+{
+  Goodix5135ConfigUploadTransaction transaction;
+
+  guint8 config[GOODIX5135_CONFIG_LENGTH] = { 0 };
+  guint8 transfer[GOODIX5135_CONFIG_TRANSFER_LENGTH];
+
+  gsize logical_length = 0;
+  gsize transport_length = 0;
+
+  goodix5135_config_upload_transaction_init (
+    &transaction);
+
+  g_assert_true (
+    goodix5135_config_upload_transaction_begin (
+      &transaction,
+      config,
+      sizeof (config),
+      transfer,
+      sizeof (transfer),
+      &logical_length,
+      &transport_length));
+
+  g_assert_false (
+    goodix5135_config_upload_transaction_out_complete (
+      &transaction,
+      FALSE));
+
+  g_assert_cmpint (
+    transaction.state,
+    ==,
+    GOODIX5135_CONFIG_UPLOAD_TRANSACTION_FAILED);
+}
+
+
+static void
+test_config_upload_transaction_invalid_order (void)
+{
+  Goodix5135ConfigUploadTransaction transaction;
+
+  guint8 config[GOODIX5135_CONFIG_LENGTH] = { 0 };
+  guint8 transfer[GOODIX5135_CONFIG_TRANSFER_LENGTH];
+
+  gsize logical_length = 0;
+  gsize transport_length = 0;
+
+  static const guint8 ack[GOODIX5135_USB_PACKET_LENGTH] = {
+    0xa0, 0x06, 0x00, 0xa6,
+    0xb0, 0x03, 0x00,
+    0x90, 0x01,
+    0x66,
+  };
+
+  goodix5135_config_upload_transaction_init (
+    &transaction);
+
+  g_assert_true (
+    goodix5135_config_upload_transaction_begin (
+      &transaction,
+      config,
+      sizeof (config),
+      transfer,
+      sizeof (transfer),
+      &logical_length,
+      &transport_length));
+
+  /*
+   * ACK before all four OUT packets must fail closed.
+   */
+  g_assert_false (
+    goodix5135_config_upload_transaction_ack_complete (
+      &transaction,
+      TRUE,
+      ack,
+      sizeof (ack)));
+
+  g_assert_cmpint (
+    transaction.state,
+    ==,
+    GOODIX5135_CONFIG_UPLOAD_TRANSACTION_FAILED);
+}
+
+
 int
 main (int argc, char **argv)
 {
@@ -4567,6 +5131,267 @@ main (int argc, char **argv)
 
 
                    test_activation_sequence_short_chip_id);
+
+
+
+
+
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/config-upload/request-zero-vector",
+
+
+
+
+
+
+
+
+
+                   test_config_upload_request_zero_vector);
+
+
+
+
+
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/config-upload/request-pattern",
+
+
+
+
+
+
+
+
+
+                   test_config_upload_request_pattern);
+
+
+
+
+
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/config-upload/request-arguments",
+
+
+
+
+
+
+
+
+
+                   test_config_upload_request_arguments);
+
+
+
+
+
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/config-upload/packet-view-first",
+
+
+
+
+
+
+
+
+
+                   test_config_upload_packet_view_first);
+
+
+
+
+
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/config-upload/packet-view-last",
+
+
+
+
+
+
+
+
+
+                   test_config_upload_packet_view_last);
+
+
+
+
+
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/config-upload/packet-view-invalid",
+
+
+
+
+
+
+
+
+
+                   test_config_upload_packet_view_invalid);
+
+
+
+
+
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/config-upload/ack-success",
+
+
+
+
+
+
+
+
+
+                   test_config_upload_ack_success);
+
+
+
+
+
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/config-upload/ack-negative",
+
+
+
+
+
+
+
+
+
+                   test_config_upload_ack_negative);
+
+
+
+
+
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/config-upload/response-success",
+
+
+
+
+
+
+
+
+
+                   test_config_upload_response_success);
+
+
+
+
+
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/config-upload/response-negative",
+
+
+
+
+
+
+
+
+
+                   test_config_upload_response_negative);
+
+
+
+
+
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/config-upload-transaction/happy-path",
+
+
+
+
+
+
+
+
+
+                   test_config_upload_transaction_happy_path);
+
+
+
+
+
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/config-upload-transaction/out-failure",
+
+
+
+
+
+
+
+
+
+                   test_config_upload_transaction_out_failure);
+
+
+
+
+
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/config-upload-transaction/invalid-order",
+
+
+
+
+
+
+
+
+
+                   test_config_upload_transaction_invalid_order);
+
 
 
 
