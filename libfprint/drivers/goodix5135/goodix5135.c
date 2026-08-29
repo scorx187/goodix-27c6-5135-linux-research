@@ -1732,6 +1732,13 @@ goodix5135_activation_continue_after_nop (
 #define GOODIX5135_CAPTURE_EVENT_TIMEOUT_MS 45000U
 
 /*
+ * Human interaction window for finger placement/removal only.
+ * Protocol, ACK, TLS, firmware and ordinary USB timeouts remain
+ * unchanged and continue using their existing constants.
+ */
+#define GOODIX5135_CAPTURE_HUMAN_EVENT_TIMEOUT_MS 180000U
+
+/*
  * Host-side release settling before a new FDT manual baseline.
  * No USB retry, sensor reset, or FDT threshold change is used.
  */
@@ -2913,7 +2920,7 @@ goodix5135_capture_down_ack_cb (
   if (!goodix5135_capture_submit_in (
         device,
         GOODIX5135_CAPTURE_USB_LENGTH,
-        GOODIX5135_CAPTURE_EVENT_TIMEOUT_MS,
+        GOODIX5135_CAPTURE_HUMAN_EVENT_TIMEOUT_MS,
         goodix5135_capture_down_response_cb))
     {
       goodix5135_capture_runtime_fail (
@@ -3017,7 +3024,7 @@ goodix5135_capture_down_response_cb (
       if (!goodix5135_capture_submit_in (
             device,
             GOODIX5135_CAPTURE_USB_LENGTH,
-            GOODIX5135_CAPTURE_EVENT_TIMEOUT_MS,
+            GOODIX5135_CAPTURE_HUMAN_EVENT_TIMEOUT_MS,
             goodix5135_capture_down_response_cb))
         {
           goodix5135_capture_runtime_fail (
@@ -3443,7 +3450,7 @@ goodix5135_capture_up_ack_cb (
   if (!goodix5135_capture_submit_in (
         device,
         GOODIX5135_CAPTURE_USB_LENGTH,
-        GOODIX5135_CAPTURE_EVENT_TIMEOUT_MS,
+        GOODIX5135_CAPTURE_HUMAN_EVENT_TIMEOUT_MS,
         goodix5135_capture_up_response_cb))
     {
       goodix5135_capture_runtime_fail (
