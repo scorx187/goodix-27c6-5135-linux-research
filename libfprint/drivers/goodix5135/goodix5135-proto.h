@@ -12,11 +12,13 @@
 #define GOODIX5135_PACK_FLAGS_MESSAGE_PROTOCOL  0xa0U
 #define GOODIX5135_COMMAND_READ_SENSOR_REGISTER 0x82U
 #define GOODIX5135_COMMAND_FIRMWARE_VERSION     0xa8U
+#define GOODIX5135_COMMAND_QUERY_MCU_STATE      0xaeU
 #define GOODIX5135_COMMAND_ACK                  0xb0U
 #define GOODIX5135_ACK_MIN_PAYLOAD_LENGTH       2U
 #define GOODIX5135_USB_PACKET_LENGTH            64U
 #define GOODIX5135_REGISTER_READ_REQUEST_LENGTH 12U
 #define GOODIX5135_FIRMWARE_REQUEST_LENGTH      10U
+#define GOODIX5135_MCU_STATE_REQUEST_LENGTH      9U
 
 #define GOODIX5135_IMAGE_COMMAND             0x20U
 #define GOODIX5135_PROTOCOL_TRAILER          0x88U
@@ -58,6 +60,21 @@ typedef struct
   Goodix5135RegisterReadTransactionState state;
   gsize                                  expected_length;
 } Goodix5135RegisterReadTransaction;
+
+typedef enum
+{
+  GOODIX5135_MCU_STATE_TRANSACTION_IDLE = 0,
+  GOODIX5135_MCU_STATE_TRANSACTION_WAIT_OUT,
+  GOODIX5135_MCU_STATE_TRANSACTION_WAIT_ACK,
+  GOODIX5135_MCU_STATE_TRANSACTION_WAIT_RESPONSE,
+  GOODIX5135_MCU_STATE_TRANSACTION_DONE,
+  GOODIX5135_MCU_STATE_TRANSACTION_FAILED,
+} Goodix5135McuStateTransactionState;
+
+typedef struct
+{
+  Goodix5135McuStateTransactionState state;
+} Goodix5135McuStateTransaction;
 
 typedef struct
 {
@@ -202,6 +219,83 @@ gboolean goodix5135_register_read_transaction_response_complete (
   gsize                              data_length,
   const guint8                     **value,
   gsize                             *value_length);
+
+
+/*
+ * Build QUERY_MCU_STATE (0xae).
+ *
+ * The reference read-only state probe uses query byte 0x55.
+ *
+ * Logical Goodix frame: 9 bytes.
+ * USB wire packet:      64 bytes, zero padded.
+ *
+ * This helper performs no USB operation.
+ */
+gboolean goodix5135_build_mcu_state_request (
+  guint8  query,
+  guint8 *packet,
+  gsize   packet_size,
+  gsize  *logical_length);
+
+/*
+ * Parse ACK for QUERY_MCU_STATE (0xae).
+ */
+gboolean goodix5135_parse_mcu_state_ack (
+  const guint8 *data,
+  gsize         data_length);
+
+/*
+ * Parse wrapped QUERY_MCU_STATE response.
+ *
+ * @state_data is a borrowed view into @data.
+ * At least one response byte is required.
+ * No bytes are copied or logged.
+ */
+gboolean goodix5135_parse_mcu_state_response (
+  const guint8  *data,
+  gsize          data_length,
+  const guint8 **state_data,
+  gsize         *state_length);
+
+/*
+ * Host-only 0xae transaction controller.
+ *
+ * IDLE
+ *   -> WAIT_OUT
+ *   -> WAIT_ACK
+ *   -> WAIT_RESPONSE
+ *   -> DONE
+ *
+ * Invalid order, transport failure, ACK failure,
+ * or invalid/empty response -> FAILED.
+ */
+void goodix5135_mcu_state_transaction_init (
+  Goodix5135McuStateTransaction *transaction);
+
+gboolean goodix5135_mcu_state_transaction_begin (
+  Goodix5135McuStateTransaction *transaction,
+  guint8                         query,
+  guint8                        *packet,
+  gsize                          packet_size,
+  gsize                         *logical_length);
+
+gboolean goodix5135_mcu_state_transaction_out_complete (
+  Goodix5135McuStateTransaction *transaction,
+  gboolean                       transport_can_advance);
+
+gboolean goodix5135_mcu_state_transaction_ack_complete (
+  Goodix5135McuStateTransaction *transaction,
+  gboolean                       transport_can_advance,
+  const guint8                  *data,
+  gsize                          data_length);
+
+gboolean goodix5135_mcu_state_transaction_response_complete (
+  Goodix5135McuStateTransaction *transaction,
+  gboolean                       transport_can_advance,
+  const guint8                  *data,
+  gsize                          data_length,
+  const guint8                 **state_data,
+  gsize                         *state_length);
 
 
 /*

@@ -603,6 +603,300 @@ goodix5135_register_read_transaction_response_complete (
 }
 
 
+gboolean
+goodix5135_build_mcu_state_request (
+  guint8  query,
+  guint8 *packet,
+  gsize   packet_size,
+  gsize  *logical_length)
+{
+  guint outer_sum;
+
+  if (packet == NULL || logical_length == NULL)
+    return FALSE;
+
+  if (packet_size < GOODIX5135_USB_PACKET_LENGTH)
+    return FALSE;
+
+  /*
+   * Reference request for query byte 0x55:
+   *
+   * outer:
+   *   a0 05 00 a5
+   *
+   * protocol:
+   *   ae 02 00 <query> <checksum>
+   */
+  memset (packet, 0, GOODIX5135_USB_PACKET_LENGTH);
+
+  packet[0] =
+    GOODIX5135_PACK_FLAGS_MESSAGE_PROTOCOL;
+
+  packet[1] = 0x05;
+  packet[2] = 0x00;
+
+  outer_sum =
+    (guint) packet[0] +
+    (guint) packet[1] +
+    (guint) packet[2];
+
+  packet[3] =
+    (guint8) (outer_sum & 0xffU);
+
+  packet[4] =
+    GOODIX5135_COMMAND_QUERY_MCU_STATE;
+
+  /*
+   * Declared length =
+   *   one payload byte + checksum.
+   */
+  packet[5] = 0x02;
+  packet[6] = 0x00;
+
+  packet[7] = query;
+
+  packet[8] =
+    goodix5135_checksum_aa (
+      packet + 4,
+      4);
+
+  *logical_length =
+    GOODIX5135_MCU_STATE_REQUEST_LENGTH;
+
+  return TRUE;
+}
+
+
+gboolean
+goodix5135_parse_mcu_state_ack (
+  const guint8 *data,
+  gsize         data_length)
+{
+  const guint8 *payload;
+  gsize payload_length;
+  guint8 status;
+
+  if (!goodix5135_parse_wrapped_protocol (
+        data,
+        data_length,
+        GOODIX5135_COMMAND_ACK,
+        &payload,
+        &payload_length))
+    return FALSE;
+
+  if (payload_length <
+      GOODIX5135_ACK_MIN_PAYLOAD_LENGTH)
+    return FALSE;
+
+  if (payload[0] !=
+      GOODIX5135_COMMAND_QUERY_MCU_STATE)
+    return FALSE;
+
+  status = payload[1];
+
+  /*
+   * Same ACK semantics already proven for 0xa8 and 0x82:
+   * bit 0 must indicate a valid ACK structure.
+   */
+  if ((status & 0x01U) == 0)
+    return FALSE;
+
+  return TRUE;
+}
+
+
+gboolean
+goodix5135_parse_mcu_state_response (
+  const guint8  *data,
+  gsize          data_length,
+  const guint8 **state_data,
+  gsize         *state_length)
+{
+  const guint8 *payload;
+  gsize payload_length;
+
+  if (state_data == NULL ||
+      state_length == NULL)
+    return FALSE;
+
+  *state_data = NULL;
+  *state_length = 0;
+
+  if (!goodix5135_parse_wrapped_protocol (
+        data,
+        data_length,
+        GOODIX5135_COMMAND_QUERY_MCU_STATE,
+        &payload,
+        &payload_length))
+    return FALSE;
+
+  if (payload_length == 0)
+    return FALSE;
+
+  *state_data = payload;
+  *state_length = payload_length;
+
+  return TRUE;
+}
+
+
+static gboolean
+goodix5135_mcu_state_transaction_fail (
+  Goodix5135McuStateTransaction *transaction)
+{
+  if (transaction != NULL)
+    transaction->state =
+      GOODIX5135_MCU_STATE_TRANSACTION_FAILED;
+
+  return FALSE;
+}
+
+
+void
+goodix5135_mcu_state_transaction_init (
+  Goodix5135McuStateTransaction *transaction)
+{
+  g_return_if_fail (transaction != NULL);
+
+  transaction->state =
+    GOODIX5135_MCU_STATE_TRANSACTION_IDLE;
+}
+
+
+gboolean
+goodix5135_mcu_state_transaction_begin (
+  Goodix5135McuStateTransaction *transaction,
+  guint8                         query,
+  guint8                        *packet,
+  gsize                          packet_size,
+  gsize                         *logical_length)
+{
+  if (transaction == NULL)
+    return FALSE;
+
+  if (transaction->state !=
+      GOODIX5135_MCU_STATE_TRANSACTION_IDLE)
+    return goodix5135_mcu_state_transaction_fail (
+      transaction);
+
+  if (!goodix5135_build_mcu_state_request (
+        query,
+        packet,
+        packet_size,
+        logical_length))
+    return goodix5135_mcu_state_transaction_fail (
+      transaction);
+
+  transaction->state =
+    GOODIX5135_MCU_STATE_TRANSACTION_WAIT_OUT;
+
+  return TRUE;
+}
+
+
+gboolean
+goodix5135_mcu_state_transaction_out_complete (
+  Goodix5135McuStateTransaction *transaction,
+  gboolean                       transport_can_advance)
+{
+  if (transaction == NULL)
+    return FALSE;
+
+  if (transaction->state !=
+      GOODIX5135_MCU_STATE_TRANSACTION_WAIT_OUT)
+    return goodix5135_mcu_state_transaction_fail (
+      transaction);
+
+  if (!transport_can_advance)
+    return goodix5135_mcu_state_transaction_fail (
+      transaction);
+
+  transaction->state =
+    GOODIX5135_MCU_STATE_TRANSACTION_WAIT_ACK;
+
+  return TRUE;
+}
+
+
+gboolean
+goodix5135_mcu_state_transaction_ack_complete (
+  Goodix5135McuStateTransaction *transaction,
+  gboolean                       transport_can_advance,
+  const guint8                  *data,
+  gsize                          data_length)
+{
+  if (transaction == NULL)
+    return FALSE;
+
+  if (transaction->state !=
+      GOODIX5135_MCU_STATE_TRANSACTION_WAIT_ACK)
+    return goodix5135_mcu_state_transaction_fail (
+      transaction);
+
+  if (!transport_can_advance)
+    return goodix5135_mcu_state_transaction_fail (
+      transaction);
+
+  if (!goodix5135_parse_mcu_state_ack (
+        data,
+        data_length))
+    return goodix5135_mcu_state_transaction_fail (
+      transaction);
+
+  transaction->state =
+    GOODIX5135_MCU_STATE_TRANSACTION_WAIT_RESPONSE;
+
+  return TRUE;
+}
+
+
+gboolean
+goodix5135_mcu_state_transaction_response_complete (
+  Goodix5135McuStateTransaction *transaction,
+  gboolean                       transport_can_advance,
+  const guint8                  *data,
+  gsize                          data_length,
+  const guint8                 **state_data,
+  gsize                         *state_length)
+{
+  if (state_data != NULL)
+    *state_data = NULL;
+
+  if (state_length != NULL)
+    *state_length = 0;
+
+  if (transaction == NULL)
+    return FALSE;
+
+  if (transaction->state !=
+      GOODIX5135_MCU_STATE_TRANSACTION_WAIT_RESPONSE)
+    return goodix5135_mcu_state_transaction_fail (
+      transaction);
+
+  if (!transport_can_advance)
+    return goodix5135_mcu_state_transaction_fail (
+      transaction);
+
+  if (state_data == NULL ||
+      state_length == NULL)
+    return goodix5135_mcu_state_transaction_fail (
+      transaction);
+
+  if (!goodix5135_parse_mcu_state_response (
+        data,
+        data_length,
+        state_data,
+        state_length))
+    return goodix5135_mcu_state_transaction_fail (
+      transaction);
+
+  transaction->state =
+    GOODIX5135_MCU_STATE_TRANSACTION_DONE;
+
+  return TRUE;
+}
+
+
 static gboolean
 goodix5135_firmware_transaction_fail (
   Goodix5135FirmwareTransaction *transaction)
