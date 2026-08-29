@@ -10,12 +10,14 @@
 #include <glib.h>
 
 #define GOODIX5135_PACK_FLAGS_MESSAGE_PROTOCOL  0xa0U
+#define GOODIX5135_COMMAND_NOP                  0x00U
 #define GOODIX5135_COMMAND_READ_SENSOR_REGISTER 0x82U
 #define GOODIX5135_COMMAND_FIRMWARE_VERSION     0xa8U
 #define GOODIX5135_COMMAND_QUERY_MCU_STATE      0xaeU
 #define GOODIX5135_COMMAND_ACK                  0xb0U
 #define GOODIX5135_ACK_MIN_PAYLOAD_LENGTH       2U
 #define GOODIX5135_USB_PACKET_LENGTH            64U
+#define GOODIX5135_NOP_REQUEST_LENGTH           12U
 #define GOODIX5135_REGISTER_READ_REQUEST_LENGTH 12U
 #define GOODIX5135_FIRMWARE_REQUEST_LENGTH      10U
 #define GOODIX5135_MCU_STATE_REQUEST_LENGTH      9U
@@ -60,6 +62,27 @@ typedef struct
   Goodix5135RegisterReadTransactionState state;
   gsize                                  expected_length;
 } Goodix5135RegisterReadTransaction;
+
+typedef enum
+{
+  GOODIX5135_NOP_REPLY_RECEIVED = 0,
+  GOODIX5135_NOP_REPLY_TIMEOUT,
+  GOODIX5135_NOP_REPLY_TRANSPORT_FAILURE,
+} Goodix5135NopReplyResult;
+
+typedef enum
+{
+  GOODIX5135_NOP_TRANSACTION_IDLE = 0,
+  GOODIX5135_NOP_TRANSACTION_WAIT_OUT,
+  GOODIX5135_NOP_TRANSACTION_WAIT_OPTIONAL_ACK,
+  GOODIX5135_NOP_TRANSACTION_DONE,
+  GOODIX5135_NOP_TRANSACTION_FAILED,
+} Goodix5135NopTransactionState;
+
+typedef struct
+{
+  Goodix5135NopTransactionState state;
+} Goodix5135NopTransaction;
 
 typedef enum
 {
@@ -219,6 +242,67 @@ gboolean goodix5135_register_read_transaction_response_complete (
   gsize                              data_length,
   const guint8                     **value,
   gsize                             *value_length);
+
+
+/*
+ * Build the reference Goodix NOP request.
+ *
+ * Payload:
+ *   00 00 00 00
+ *
+ * The reference NOP uses the protocol no-checksum trailer 0x88.
+ *
+ * Logical frame: 12 bytes.
+ * USB packet:    64 bytes, zero padded.
+ *
+ * This helper performs no USB operation.
+ */
+gboolean goodix5135_build_nop_request (
+  guint8 *packet,
+  gsize   packet_size,
+  gsize  *logical_length);
+
+/*
+ * Parse an optional ACK belonging to NOP command 0x00.
+ */
+gboolean goodix5135_parse_nop_ack (
+  const guint8 *data,
+  gsize         data_length);
+
+/*
+ * Host-only NOP transaction policy.
+ *
+ * Reference behavior:
+ *
+ *   IDLE
+ *    -> WAIT_OUT
+ *    -> WAIT_OPTIONAL_ACK
+ *
+ * At WAIT_OPTIONAL_ACK:
+ *
+ *   valid ACK       -> DONE
+ *   expected timeout -> DONE
+ *   malformed ACK   -> FAILED
+ *   other transport failure -> FAILED
+ */
+void goodix5135_nop_transaction_init (
+  Goodix5135NopTransaction *transaction);
+
+gboolean goodix5135_nop_transaction_begin (
+  Goodix5135NopTransaction *transaction,
+  guint8                   *packet,
+  gsize                     packet_size,
+  gsize                    *logical_length);
+
+gboolean goodix5135_nop_transaction_out_complete (
+  Goodix5135NopTransaction *transaction,
+  gboolean                  transport_can_advance);
+
+gboolean goodix5135_nop_transaction_reply_complete (
+  Goodix5135NopTransaction *transaction,
+  Goodix5135NopReplyResult  result,
+  const guint8             *data,
+  gsize                     data_length);
 
 
 /*

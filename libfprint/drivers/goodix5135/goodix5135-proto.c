@@ -604,6 +604,231 @@ goodix5135_register_read_transaction_response_complete (
 
 
 gboolean
+goodix5135_build_nop_request (
+  guint8 *packet,
+  gsize   packet_size,
+  gsize  *logical_length)
+{
+  guint outer_sum;
+
+  if (packet == NULL ||
+      logical_length == NULL)
+    return FALSE;
+
+  if (packet_size <
+      GOODIX5135_USB_PACKET_LENGTH)
+    return FALSE;
+
+  memset (
+    packet,
+    0,
+    GOODIX5135_USB_PACKET_LENGTH);
+
+  /*
+   * Reference Goodix NOP:
+   *
+   * outer:
+   *   a0 08 00 a8
+   *
+   * protocol:
+   *   00             command NOP
+   *   05 00          four payload bytes + trailer
+   *   00 00 00 00    payload
+   *   88             no-checksum trailer
+   */
+  packet[0] =
+    GOODIX5135_PACK_FLAGS_MESSAGE_PROTOCOL;
+
+  packet[1] = 0x08;
+  packet[2] = 0x00;
+
+  outer_sum =
+    (guint) packet[0] +
+    (guint) packet[1] +
+    (guint) packet[2];
+
+  packet[3] =
+    (guint8) (outer_sum & 0xffU);
+
+  packet[4] =
+    GOODIX5135_COMMAND_NOP;
+
+  packet[5] = 0x05;
+  packet[6] = 0x00;
+
+  packet[7] = 0x00;
+  packet[8] = 0x00;
+  packet[9] = 0x00;
+  packet[10] = 0x00;
+
+  packet[11] = 0x88;
+
+  *logical_length =
+    GOODIX5135_NOP_REQUEST_LENGTH;
+
+  return TRUE;
+}
+
+
+gboolean
+goodix5135_parse_nop_ack (
+  const guint8 *data,
+  gsize         data_length)
+{
+  const guint8 *payload;
+  gsize payload_length;
+  guint8 status;
+
+  if (!goodix5135_parse_wrapped_protocol (
+        data,
+        data_length,
+        GOODIX5135_COMMAND_ACK,
+        &payload,
+        &payload_length))
+    return FALSE;
+
+  if (payload_length <
+      GOODIX5135_ACK_MIN_PAYLOAD_LENGTH)
+    return FALSE;
+
+  if (payload[0] !=
+      GOODIX5135_COMMAND_NOP)
+    return FALSE;
+
+  status = payload[1];
+
+  if ((status & 0x01U) == 0)
+    return FALSE;
+
+  return TRUE;
+}
+
+
+static gboolean
+goodix5135_nop_transaction_fail (
+  Goodix5135NopTransaction *transaction)
+{
+  if (transaction != NULL)
+    transaction->state =
+      GOODIX5135_NOP_TRANSACTION_FAILED;
+
+  return FALSE;
+}
+
+
+void
+goodix5135_nop_transaction_init (
+  Goodix5135NopTransaction *transaction)
+{
+  g_return_if_fail (transaction != NULL);
+
+  transaction->state =
+    GOODIX5135_NOP_TRANSACTION_IDLE;
+}
+
+
+gboolean
+goodix5135_nop_transaction_begin (
+  Goodix5135NopTransaction *transaction,
+  guint8                   *packet,
+  gsize                     packet_size,
+  gsize                    *logical_length)
+{
+  if (transaction == NULL)
+    return FALSE;
+
+  if (transaction->state !=
+      GOODIX5135_NOP_TRANSACTION_IDLE)
+    return goodix5135_nop_transaction_fail (
+      transaction);
+
+  if (!goodix5135_build_nop_request (
+        packet,
+        packet_size,
+        logical_length))
+    return goodix5135_nop_transaction_fail (
+      transaction);
+
+  transaction->state =
+    GOODIX5135_NOP_TRANSACTION_WAIT_OUT;
+
+  return TRUE;
+}
+
+
+gboolean
+goodix5135_nop_transaction_out_complete (
+  Goodix5135NopTransaction *transaction,
+  gboolean                  transport_can_advance)
+{
+  if (transaction == NULL)
+    return FALSE;
+
+  if (transaction->state !=
+      GOODIX5135_NOP_TRANSACTION_WAIT_OUT)
+    return goodix5135_nop_transaction_fail (
+      transaction);
+
+  if (!transport_can_advance)
+    return goodix5135_nop_transaction_fail (
+      transaction);
+
+  transaction->state =
+    GOODIX5135_NOP_TRANSACTION_WAIT_OPTIONAL_ACK;
+
+  return TRUE;
+}
+
+
+gboolean
+goodix5135_nop_transaction_reply_complete (
+  Goodix5135NopTransaction *transaction,
+  Goodix5135NopReplyResult  result,
+  const guint8             *data,
+  gsize                     data_length)
+{
+  if (transaction == NULL)
+    return FALSE;
+
+  if (transaction->state !=
+      GOODIX5135_NOP_TRANSACTION_WAIT_OPTIONAL_ACK)
+    return goodix5135_nop_transaction_fail (
+      transaction);
+
+  switch (result)
+    {
+    case GOODIX5135_NOP_REPLY_TIMEOUT:
+      /*
+       * The public reference treats the short NOP receive timeout
+       * as successful completion.
+       */
+      transaction->state =
+        GOODIX5135_NOP_TRANSACTION_DONE;
+      return TRUE;
+
+    case GOODIX5135_NOP_REPLY_RECEIVED:
+      if (!goodix5135_parse_nop_ack (
+            data,
+            data_length))
+        return goodix5135_nop_transaction_fail (
+          transaction);
+
+      transaction->state =
+        GOODIX5135_NOP_TRANSACTION_DONE;
+      return TRUE;
+
+    case GOODIX5135_NOP_REPLY_TRANSPORT_FAILURE:
+      return goodix5135_nop_transaction_fail (
+        transaction);
+
+    default:
+      return goodix5135_nop_transaction_fail (
+        transaction);
+    }
+}
+
+
+gboolean
 goodix5135_build_mcu_state_request (
   guint8  query,
   guint8 *packet,

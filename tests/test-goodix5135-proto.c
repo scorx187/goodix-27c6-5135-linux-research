@@ -1872,6 +1872,315 @@ test_mcu_state_transaction_invalid_order (void)
 }
 
 
+
+static void
+test_nop_request_vector (void)
+{
+  guint8 packet[GOODIX5135_USB_PACKET_LENGTH];
+  gsize logical_length = 0;
+
+  static const guint8 expected[] = {
+    0xa0, 0x08, 0x00, 0xa8,
+    0x00, 0x05, 0x00,
+    0x00, 0x00, 0x00, 0x00,
+    0x88,
+  };
+
+  g_assert_true (
+    goodix5135_build_nop_request (
+      packet,
+      sizeof (packet),
+      &logical_length));
+
+  g_assert_cmpuint (
+    logical_length,
+    ==,
+    GOODIX5135_NOP_REQUEST_LENGTH);
+
+  g_assert_cmpmem (
+    packet,
+    logical_length,
+    expected,
+    sizeof (expected));
+
+  for (gsize i = logical_length;
+       i < sizeof (packet);
+       i++)
+    g_assert_cmpuint (
+      packet[i],
+      ==,
+      0);
+}
+
+
+static void
+test_nop_request_arguments (void)
+{
+  guint8 packet[GOODIX5135_USB_PACKET_LENGTH];
+  gsize logical_length = 0;
+
+  g_assert_false (
+    goodix5135_build_nop_request (
+      NULL,
+      sizeof (packet),
+      &logical_length));
+
+  g_assert_false (
+    goodix5135_build_nop_request (
+      packet,
+      GOODIX5135_USB_PACKET_LENGTH - 1,
+      &logical_length));
+
+  g_assert_false (
+    goodix5135_build_nop_request (
+      packet,
+      sizeof (packet),
+      NULL));
+}
+
+
+static void
+test_nop_ack (void)
+{
+  guint8 ack[GOODIX5135_USB_PACKET_LENGTH] = {
+    0xa0, 0x06, 0x00, 0xa6,
+    0xb0, 0x03, 0x00,
+    0x00, 0x01,
+    0xf6,
+  };
+
+  g_assert_true (
+    goodix5135_parse_nop_ack (
+      ack,
+      sizeof (ack)));
+
+  ack[8] = 0x00;
+  ack[9] = 0xf7;
+
+  g_assert_false (
+    goodix5135_parse_nop_ack (
+      ack,
+      sizeof (ack)));
+}
+
+
+static void
+test_nop_transaction_ack_success (void)
+{
+  Goodix5135NopTransaction transaction;
+  guint8 packet[GOODIX5135_USB_PACKET_LENGTH];
+  gsize logical_length = 0;
+
+  static const guint8 ack[GOODIX5135_USB_PACKET_LENGTH] = {
+    0xa0, 0x06, 0x00, 0xa6,
+    0xb0, 0x03, 0x00,
+    0x00, 0x01,
+    0xf6,
+  };
+
+  goodix5135_nop_transaction_init (
+    &transaction);
+
+  g_assert_true (
+    goodix5135_nop_transaction_begin (
+      &transaction,
+      packet,
+      sizeof (packet),
+      &logical_length));
+
+  g_assert_cmpint (
+    transaction.state,
+    ==,
+    GOODIX5135_NOP_TRANSACTION_WAIT_OUT);
+
+  g_assert_true (
+    goodix5135_nop_transaction_out_complete (
+      &transaction,
+      TRUE));
+
+  g_assert_cmpint (
+    transaction.state,
+    ==,
+    GOODIX5135_NOP_TRANSACTION_WAIT_OPTIONAL_ACK);
+
+  g_assert_true (
+    goodix5135_nop_transaction_reply_complete (
+      &transaction,
+      GOODIX5135_NOP_REPLY_RECEIVED,
+      ack,
+      sizeof (ack)));
+
+  g_assert_cmpint (
+    transaction.state,
+    ==,
+    GOODIX5135_NOP_TRANSACTION_DONE);
+}
+
+
+static void
+test_nop_transaction_timeout_success (void)
+{
+  Goodix5135NopTransaction transaction;
+  guint8 packet[GOODIX5135_USB_PACKET_LENGTH];
+  gsize logical_length = 0;
+
+  goodix5135_nop_transaction_init (
+    &transaction);
+
+  g_assert_true (
+    goodix5135_nop_transaction_begin (
+      &transaction,
+      packet,
+      sizeof (packet),
+      &logical_length));
+
+  g_assert_true (
+    goodix5135_nop_transaction_out_complete (
+      &transaction,
+      TRUE));
+
+  g_assert_true (
+    goodix5135_nop_transaction_reply_complete (
+      &transaction,
+      GOODIX5135_NOP_REPLY_TIMEOUT,
+      NULL,
+      0));
+
+  g_assert_cmpint (
+    transaction.state,
+    ==,
+    GOODIX5135_NOP_TRANSACTION_DONE);
+}
+
+
+static void
+test_nop_transaction_bad_ack (void)
+{
+  Goodix5135NopTransaction transaction;
+  guint8 packet[GOODIX5135_USB_PACKET_LENGTH];
+  gsize logical_length = 0;
+
+  static const guint8 bad_ack[GOODIX5135_USB_PACKET_LENGTH] = {
+    0xa0, 0x06, 0x00, 0xa6,
+    0xb0, 0x03, 0x00,
+    0x00, 0x00,
+    0xf7,
+  };
+
+  goodix5135_nop_transaction_init (
+    &transaction);
+
+  g_assert_true (
+    goodix5135_nop_transaction_begin (
+      &transaction,
+      packet,
+      sizeof (packet),
+      &logical_length));
+
+  g_assert_true (
+    goodix5135_nop_transaction_out_complete (
+      &transaction,
+      TRUE));
+
+  g_assert_false (
+    goodix5135_nop_transaction_reply_complete (
+      &transaction,
+      GOODIX5135_NOP_REPLY_RECEIVED,
+      bad_ack,
+      sizeof (bad_ack)));
+
+  g_assert_cmpint (
+    transaction.state,
+    ==,
+    GOODIX5135_NOP_TRANSACTION_FAILED);
+}
+
+
+static void
+test_nop_transaction_transport_failure (void)
+{
+  Goodix5135NopTransaction transaction;
+  guint8 packet[GOODIX5135_USB_PACKET_LENGTH];
+  gsize logical_length = 0;
+
+  goodix5135_nop_transaction_init (
+    &transaction);
+
+  g_assert_true (
+    goodix5135_nop_transaction_begin (
+      &transaction,
+      packet,
+      sizeof (packet),
+      &logical_length));
+
+  g_assert_true (
+    goodix5135_nop_transaction_out_complete (
+      &transaction,
+      TRUE));
+
+  g_assert_false (
+    goodix5135_nop_transaction_reply_complete (
+      &transaction,
+      GOODIX5135_NOP_REPLY_TRANSPORT_FAILURE,
+      NULL,
+      0));
+
+  g_assert_cmpint (
+    transaction.state,
+    ==,
+    GOODIX5135_NOP_TRANSACTION_FAILED);
+}
+
+
+static void
+test_nop_transaction_out_failure (void)
+{
+  Goodix5135NopTransaction transaction;
+  guint8 packet[GOODIX5135_USB_PACKET_LENGTH];
+  gsize logical_length = 0;
+
+  goodix5135_nop_transaction_init (
+    &transaction);
+
+  g_assert_true (
+    goodix5135_nop_transaction_begin (
+      &transaction,
+      packet,
+      sizeof (packet),
+      &logical_length));
+
+  g_assert_false (
+    goodix5135_nop_transaction_out_complete (
+      &transaction,
+      FALSE));
+
+  g_assert_cmpint (
+    transaction.state,
+    ==,
+    GOODIX5135_NOP_TRANSACTION_FAILED);
+}
+
+
+static void
+test_nop_transaction_invalid_order (void)
+{
+  Goodix5135NopTransaction transaction;
+
+  goodix5135_nop_transaction_init (
+    &transaction);
+
+  g_assert_false (
+    goodix5135_nop_transaction_out_complete (
+      &transaction,
+      TRUE));
+
+  g_assert_cmpint (
+    transaction.state,
+    ==,
+    GOODIX5135_NOP_TRANSACTION_FAILED);
+}
+
+
 int
 main (int argc, char **argv)
 {
@@ -2115,6 +2424,97 @@ main (int argc, char **argv)
 
 
                    test_mcu_state_transaction_invalid_order);
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/nop/request-vector",
+
+
+
+
+                   test_nop_request_vector);
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/nop/request-arguments",
+
+
+
+
+                   test_nop_request_arguments);
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/nop/ack",
+
+
+
+
+                   test_nop_ack);
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/nop-transaction/ack-success",
+
+
+
+
+                   test_nop_transaction_ack_success);
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/nop-transaction/timeout-success",
+
+
+
+
+                   test_nop_transaction_timeout_success);
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/nop-transaction/bad-ack",
+
+
+
+
+                   test_nop_transaction_bad_ack);
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/nop-transaction/transport-failure",
+
+
+
+
+                   test_nop_transaction_transport_failure);
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/nop-transaction/out-failure",
+
+
+
+
+                   test_nop_transaction_out_failure);
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/nop-transaction/invalid-order",
+
+
+
+
+                   test_nop_transaction_invalid_order);
+
 
 
 
