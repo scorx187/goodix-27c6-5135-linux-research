@@ -150,6 +150,7 @@ driver_sources = {
         'drivers/goodix5135/goodix5135-tls.c',
         'drivers/goodix5135/goodix5135-tls-transport.c',
         'drivers/goodix5135/goodix5135-tls-session.c',
+        'drivers/goodix5135/goodix5135-tls-request.c',
           'drivers/goodix5135/goodix5135-proto.c',
           'drivers/goodix5135/goodix5135-image.c',
           'drivers/goodix5135/goodix5135-image-response.c',
