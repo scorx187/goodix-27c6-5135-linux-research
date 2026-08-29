@@ -154,6 +154,7 @@ driver_sources = {
           'drivers/goodix5135/goodix5135-proto.c',
           'drivers/goodix5135/goodix5135-image.c',
           'drivers/goodix5135/goodix5135-image-response.c',
+          'drivers/goodix5135/goodix5135-capture-proto.c',
           'drivers/goodix5135/goodix5135-io.c',
           'drivers/goodix5135/goodix5135-request.c',
           'drivers/goodix5135/goodix5135-transport.c',
