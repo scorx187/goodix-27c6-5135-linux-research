@@ -674,10 +674,26 @@ goodix5135_activation_sequence_nop_complete (
         GOODIX5135_ACTIVATION_WAIT_FIRMWARE;
       return TRUE;
 
-    default:
+    case GOODIX5135_ACTIVATION_IDLE:
+    case GOODIX5135_ACTIVATION_WAIT_D4:
+    case GOODIX5135_ACTIVATION_WAIT_ENABLE_CHIP:
+    case GOODIX5135_ACTIVATION_WAIT_FIRMWARE:
+    case GOODIX5135_ACTIVATION_WAIT_RESET:
+    case GOODIX5135_ACTIVATION_WAIT_CHIP_ID:
+    case GOODIX5135_ACTIVATION_DONE:
+    case GOODIX5135_ACTIVATION_FAILED:
       return goodix5135_activation_sequence_fail (
         sequence);
     }
+
+  /*
+   * Defensive fallback for an invalid enum representation.
+   *
+   * Keep every declared enum value explicit above so that
+   * -Wswitch-enum still detects future omissions.
+   */
+  return goodix5135_activation_sequence_fail (
+    sequence);
 }
 
 
