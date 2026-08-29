@@ -1,7 +1,7 @@
 /*
  * Goodix 27c6:5135 ChicagoHU protocol helpers.
  *
- * Host-side parsing only.
+ * Host-side protocol construction/parsing only.
  */
 
 #include <string.h>
@@ -87,6 +87,190 @@ goodix5135_build_firmware_version_request (
     goodix5135_checksum_aa (packet + 4, 5);
 
   *logical_length = GOODIX5135_FIRMWARE_REQUEST_LENGTH;
+
+  return TRUE;
+}
+
+
+static gboolean
+goodix5135_parse_wrapped_protocol (
+  const guint8  *data,
+  gsize          data_length,
+  guint8         expected_command,
+  const guint8 **payload,
+  gsize         *payload_length)
+{
+  guint16 outer_length;
+  guint16 protocol_length;
+  gsize outer_total_length;
+  gsize protocol_total_length;
+  const guint8 *protocol;
+  guint8 outer_checksum;
+  guint8 protocol_checksum;
+
+  if (data == NULL ||
+      payload == NULL ||
+      payload_length == NULL)
+    return FALSE;
+
+  /*
+   * Minimum possible frame:
+   *
+   * outer header      4
+   * protocol command  1
+   * protocol length   2
+   * protocol checksum 1
+   */
+  if (data_length < 8)
+    return FALSE;
+
+  if (data[0] != GOODIX5135_PACK_FLAGS_MESSAGE_PROTOCOL)
+    return FALSE;
+
+  outer_length =
+    ((guint16) data[1]) |
+    ((guint16) data[2] << 8);
+
+  outer_checksum =
+    (guint8) (
+      ((guint) data[0] +
+       (guint) data[1] +
+       (guint) data[2]) &
+      0xffU);
+
+  if (data[3] != outer_checksum)
+    return FALSE;
+
+  outer_total_length = 4U + (gsize) outer_length;
+
+  /*
+   * USB reads may contain trailing packet padding.
+   * Parse only the declared Goodix logical frame.
+   */
+  if (data_length < outer_total_length)
+    return FALSE;
+
+  protocol = data + 4;
+
+  if (outer_length < 4)
+    return FALSE;
+
+  if (protocol[0] != expected_command)
+    return FALSE;
+
+  protocol_length =
+    ((guint16) protocol[1]) |
+    ((guint16) protocol[2] << 8);
+
+  /*
+   * The Goodix protocol length includes the final checksum byte.
+   */
+  if (protocol_length < 1)
+    return FALSE;
+
+  protocol_total_length =
+    3U + (gsize) protocol_length;
+
+  /*
+   * The inner protocol frame must consume exactly the outer payload.
+   */
+  if (protocol_total_length != (gsize) outer_length)
+    return FALSE;
+
+  protocol_checksum =
+    goodix5135_checksum_aa (
+      protocol,
+      2U + (gsize) protocol_length);
+
+  if (protocol[2U + protocol_length] != protocol_checksum)
+    return FALSE;
+
+  *payload = protocol + 3;
+  *payload_length = (gsize) protocol_length - 1U;
+
+  return TRUE;
+}
+
+gboolean
+goodix5135_parse_firmware_version_ack (
+  const guint8 *data,
+  gsize         data_length)
+{
+  const guint8 *payload;
+  gsize payload_length;
+  guint8 status;
+
+  if (!goodix5135_parse_wrapped_protocol (
+        data,
+        data_length,
+        GOODIX5135_COMMAND_ACK,
+        &payload,
+        &payload_length))
+    return FALSE;
+
+  if (payload_length != GOODIX5135_ACK_PAYLOAD_LENGTH)
+    return FALSE;
+
+  if (payload[0] != GOODIX5135_COMMAND_FIRMWARE_VERSION)
+    return FALSE;
+
+  status = payload[1];
+
+  /*
+   * Reference semantics:
+   *
+   * bit 0 = ACK structure valid
+   * bit 1 = operation success
+   *
+   * Therefore:
+   *   0x01 = valid negative ACK
+   *   0x03 = valid successful ACK
+   */
+  if ((status & 0x01U) == 0)
+    return FALSE;
+
+  if ((status & 0x02U) == 0)
+    return FALSE;
+
+  return TRUE;
+}
+
+gboolean
+goodix5135_parse_firmware_version_response (
+  const guint8  *data,
+  gsize          data_length,
+  const guint8 **firmware,
+  gsize         *firmware_length)
+{
+  const guint8 *payload;
+  const guint8 *nul;
+  gsize payload_length;
+
+  if (firmware == NULL || firmware_length == NULL)
+    return FALSE;
+
+  if (!goodix5135_parse_wrapped_protocol (
+        data,
+        data_length,
+        GOODIX5135_COMMAND_FIRMWARE_VERSION,
+        &payload,
+        &payload_length))
+    return FALSE;
+
+  if (payload_length == 0)
+    return FALSE;
+
+  nul = memchr (payload, 0, payload_length);
+
+  *firmware = payload;
+
+  if (nul != NULL)
+    *firmware_length = (gsize) (nul - payload);
+  else
+    *firmware_length = payload_length;
+
+  if (*firmware_length == 0)
+    return FALSE;
 
   return TRUE;
 }

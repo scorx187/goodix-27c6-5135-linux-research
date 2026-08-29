@@ -11,6 +11,8 @@
 
 #define GOODIX5135_PACK_FLAGS_MESSAGE_PROTOCOL  0xa0U
 #define GOODIX5135_COMMAND_FIRMWARE_VERSION     0xa8U
+#define GOODIX5135_COMMAND_ACK                  0xb0U
+#define GOODIX5135_ACK_PAYLOAD_LENGTH           2U
 #define GOODIX5135_USB_PACKET_LENGTH            64U
 #define GOODIX5135_FIRMWARE_REQUEST_LENGTH      10U
 
@@ -48,6 +50,37 @@ gboolean goodix5135_build_firmware_version_request (
   guint8 *packet,
   gsize   packet_size,
   gsize  *logical_length);
+
+
+/*
+ * Parse the firmware-version ACK.
+ *
+ * The ACK is accepted only when:
+ *   - wrapped framing/checksums are valid;
+ *   - outer flags are 0xa0;
+ *   - protocol command is 0xb0;
+ *   - acknowledged command is 0xa8;
+ *   - ACK valid bit is set;
+ *   - ACK success bit is set.
+ *
+ * A structurally valid negative ACK must return FALSE.
+ */
+gboolean goodix5135_parse_firmware_version_ack (
+  const guint8 *data,
+  gsize         data_length);
+
+/*
+ * Parse a wrapped command-0xa8 firmware-version response.
+ *
+ * @firmware and @firmware_length are borrowed views into @data.
+ * The returned length stops before the first NUL when present.
+ * No response bytes are logged or copied by this helper.
+ */
+gboolean goodix5135_parse_firmware_version_response (
+  const guint8  *data,
+  gsize          data_length,
+  const guint8 **firmware,
+  gsize         *firmware_length);
 
 /*
  * Parse a fully decrypted command-0x20 response.

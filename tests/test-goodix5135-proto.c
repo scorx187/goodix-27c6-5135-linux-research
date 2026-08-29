@@ -253,6 +253,324 @@ test_firmware_version_request_arguments (void)
       NULL));
 }
 
+static void
+test_firmware_ack_success (void)
+{
+  static const guint8 ack[] = {
+    0xa0, 0x06, 0x00, 0xa6,
+    0xb0, 0x03, 0x00, 0xa8, 0x03, 0x4c,
+  };
+
+  g_assert_true (
+    goodix5135_parse_firmware_version_ack (
+      ack,
+      sizeof (ack)));
+}
+
+static void
+test_firmware_ack_success_padded (void)
+{
+  static const guint8 logical[] = {
+    0xa0, 0x06, 0x00, 0xa6,
+    0xb0, 0x03, 0x00, 0xa8, 0x03, 0x4c,
+  };
+
+  guint8 packet[GOODIX5135_USB_PACKET_LENGTH];
+
+  memset (packet, 0, sizeof (packet));
+  memcpy (packet, logical, sizeof (logical));
+
+  g_assert_true (
+    goodix5135_parse_firmware_version_ack (
+      packet,
+      sizeof (packet)));
+}
+
+static void
+test_firmware_ack_negative (void)
+{
+  /*
+   * a8 01 is structurally valid but success bit 1 is clear.
+   */
+  static const guint8 ack[] = {
+    0xa0, 0x06, 0x00, 0xa6,
+    0xb0, 0x03, 0x00, 0xa8, 0x01, 0x4e,
+  };
+
+  g_assert_false (
+    goodix5135_parse_firmware_version_ack (
+      ack,
+      sizeof (ack)));
+}
+
+static void
+test_firmware_ack_wrong_command (void)
+{
+  /*
+   * Valid successful ACK framing, but acknowledges 0xa6 instead of 0xa8.
+   */
+  static const guint8 ack[] = {
+    0xa0, 0x06, 0x00, 0xa6,
+    0xb0, 0x03, 0x00, 0xa6, 0x03, 0x4e,
+  };
+
+  g_assert_false (
+    goodix5135_parse_firmware_version_ack (
+      ack,
+      sizeof (ack)));
+}
+
+static void
+test_firmware_ack_bad_checksum (void)
+{
+  guint8 ack[] = {
+    0xa0, 0x06, 0x00, 0xa6,
+    0xb0, 0x03, 0x00, 0xa8, 0x03, 0x4c,
+  };
+
+  ack[sizeof (ack) - 1] ^= 0x01;
+
+  g_assert_false (
+    goodix5135_parse_firmware_version_ack (
+      ack,
+      sizeof (ack)));
+}
+
+static void
+test_firmware_ack_truncated (void)
+{
+  static const guint8 ack[] = {
+    0xa0, 0x06, 0x00, 0xa6,
+    0xb0, 0x03, 0x00, 0xa8, 0x03, 0x4c,
+  };
+
+  g_assert_false (
+    goodix5135_parse_firmware_version_ack (
+      ack,
+      sizeof (ack) - 1));
+}
+
+static void
+test_firmware_response_valid (void)
+{
+  static const guint8 response[] = {
+    0xa0, 0x16, 0x00, 0xb6,
+    0xa8, 0x13, 0x00,
+    0x47, 0x46, 0x5f, 0x54, 0x45, 0x53, 0x54, 0x5f,
+    0x41, 0x50, 0x50, 0x5f,
+    0x30, 0x30, 0x30, 0x30, 0x30,
+    0x00,
+    0x34,
+  };
+
+  static const guint8 expected[] = "GF_TEST_APP_00000";
+
+  const guint8 *firmware = NULL;
+  gsize firmware_length = 0;
+
+  g_assert_true (
+    goodix5135_parse_firmware_version_response (
+      response,
+      sizeof (response),
+      &firmware,
+      &firmware_length));
+
+  g_assert_nonnull (firmware);
+
+  g_assert_cmpuint (
+    firmware_length,
+    ==,
+    sizeof (expected) - 1);
+
+  g_assert_cmpint (
+    memcmp (
+      firmware,
+      expected,
+      firmware_length),
+    ==,
+    0);
+}
+
+static void
+test_firmware_response_valid_padded (void)
+{
+  static const guint8 logical[] = {
+    0xa0, 0x16, 0x00, 0xb6,
+    0xa8, 0x13, 0x00,
+    0x47, 0x46, 0x5f, 0x54, 0x45, 0x53, 0x54, 0x5f,
+    0x41, 0x50, 0x50, 0x5f,
+    0x30, 0x30, 0x30, 0x30, 0x30,
+    0x00,
+    0x34,
+  };
+
+  guint8 packet[GOODIX5135_USB_PACKET_LENGTH];
+  const guint8 *firmware = NULL;
+  gsize firmware_length = 0;
+
+  memset (packet, 0, sizeof (packet));
+  memcpy (packet, logical, sizeof (logical));
+
+  g_assert_true (
+    goodix5135_parse_firmware_version_response (
+      packet,
+      sizeof (packet),
+      &firmware,
+      &firmware_length));
+
+  g_assert_cmpuint (firmware_length, ==, 17);
+}
+
+static void
+test_firmware_response_wrong_command (void)
+{
+  guint8 response[] = {
+    0xa0, 0x16, 0x00, 0xb6,
+    0xa8, 0x13, 0x00,
+    0x47, 0x46, 0x5f, 0x54, 0x45, 0x53, 0x54, 0x5f,
+    0x41, 0x50, 0x50, 0x5f,
+    0x30, 0x30, 0x30, 0x30, 0x30,
+    0x00,
+    0x34,
+  };
+
+  const guint8 *firmware = NULL;
+  gsize firmware_length = 0;
+
+  /*
+   * Change command to 0xa6 and recompute the inner checksum so this
+   * tests command rejection, not merely checksum rejection.
+   */
+  response[4] = 0xa6;
+  response[sizeof (response) - 1] = 0x36;
+
+  g_assert_false (
+    goodix5135_parse_firmware_version_response (
+      response,
+      sizeof (response),
+      &firmware,
+      &firmware_length));
+}
+
+static void
+test_firmware_response_bad_outer_checksum (void)
+{
+  guint8 response[] = {
+    0xa0, 0x16, 0x00, 0xb6,
+    0xa8, 0x13, 0x00,
+    0x47, 0x46, 0x5f, 0x54, 0x45, 0x53, 0x54, 0x5f,
+    0x41, 0x50, 0x50, 0x5f,
+    0x30, 0x30, 0x30, 0x30, 0x30,
+    0x00,
+    0x34,
+  };
+
+  const guint8 *firmware = NULL;
+  gsize firmware_length = 0;
+
+  response[3] ^= 0x01;
+
+  g_assert_false (
+    goodix5135_parse_firmware_version_response (
+      response,
+      sizeof (response),
+      &firmware,
+      &firmware_length));
+}
+
+static void
+test_firmware_response_bad_inner_checksum (void)
+{
+  guint8 response[] = {
+    0xa0, 0x16, 0x00, 0xb6,
+    0xa8, 0x13, 0x00,
+    0x47, 0x46, 0x5f, 0x54, 0x45, 0x53, 0x54, 0x5f,
+    0x41, 0x50, 0x50, 0x5f,
+    0x30, 0x30, 0x30, 0x30, 0x30,
+    0x00,
+    0x34,
+  };
+
+  const guint8 *firmware = NULL;
+  gsize firmware_length = 0;
+
+  response[sizeof (response) - 1] ^= 0x01;
+
+  g_assert_false (
+    goodix5135_parse_firmware_version_response (
+      response,
+      sizeof (response),
+      &firmware,
+      &firmware_length));
+}
+
+static void
+test_firmware_response_truncated (void)
+{
+  static const guint8 response[] = {
+    0xa0, 0x16, 0x00, 0xb6,
+    0xa8, 0x13, 0x00,
+    0x47, 0x46, 0x5f, 0x54, 0x45, 0x53, 0x54, 0x5f,
+    0x41, 0x50, 0x50, 0x5f,
+    0x30, 0x30, 0x30, 0x30, 0x30,
+    0x00,
+    0x34,
+  };
+
+  const guint8 *firmware = NULL;
+  gsize firmware_length = 0;
+
+  g_assert_false (
+    goodix5135_parse_firmware_version_response (
+      response,
+      sizeof (response) - 1,
+      &firmware,
+      &firmware_length));
+}
+
+static void
+test_firmware_response_arguments (void)
+{
+  static const guint8 response[] = {
+    0xa0, 0x16, 0x00, 0xb6,
+    0xa8, 0x13, 0x00,
+    0x47, 0x46, 0x5f, 0x54, 0x45, 0x53, 0x54, 0x5f,
+    0x41, 0x50, 0x50, 0x5f,
+    0x30, 0x30, 0x30, 0x30, 0x30,
+    0x00,
+    0x34,
+  };
+
+  const guint8 *firmware = NULL;
+  gsize firmware_length = 0;
+
+  g_assert_false (
+    goodix5135_parse_firmware_version_response (
+      NULL,
+      sizeof (response),
+      &firmware,
+      &firmware_length));
+
+  g_assert_false (
+    goodix5135_parse_firmware_version_response (
+      response,
+      sizeof (response),
+      NULL,
+      &firmware_length));
+
+  g_assert_false (
+    goodix5135_parse_firmware_version_response (
+      response,
+      sizeof (response),
+      &firmware,
+      NULL));
+
+  g_assert_false (
+    goodix5135_parse_firmware_version_ack (
+      NULL,
+      sizeof (response)));
+}
+
 int
 main (int argc, char **argv)
 {
@@ -284,6 +602,46 @@ main (int argc, char **argv)
 
   g_test_add_func ("/goodix5135/proto/firmware-request/arguments",
                    test_firmware_version_request_arguments);
+
+
+  g_test_add_func ("/goodix5135/proto/firmware-ack/success",
+                   test_firmware_ack_success);
+
+  g_test_add_func ("/goodix5135/proto/firmware-ack/success-padded",
+                   test_firmware_ack_success_padded);
+
+  g_test_add_func ("/goodix5135/proto/firmware-ack/negative",
+                   test_firmware_ack_negative);
+
+  g_test_add_func ("/goodix5135/proto/firmware-ack/wrong-command",
+                   test_firmware_ack_wrong_command);
+
+  g_test_add_func ("/goodix5135/proto/firmware-ack/bad-checksum",
+                   test_firmware_ack_bad_checksum);
+
+  g_test_add_func ("/goodix5135/proto/firmware-ack/truncated",
+                   test_firmware_ack_truncated);
+
+  g_test_add_func ("/goodix5135/proto/firmware-response/valid",
+                   test_firmware_response_valid);
+
+  g_test_add_func ("/goodix5135/proto/firmware-response/valid-padded",
+                   test_firmware_response_valid_padded);
+
+  g_test_add_func ("/goodix5135/proto/firmware-response/wrong-command",
+                   test_firmware_response_wrong_command);
+
+  g_test_add_func ("/goodix5135/proto/firmware-response/bad-outer-checksum",
+                   test_firmware_response_bad_outer_checksum);
+
+  g_test_add_func ("/goodix5135/proto/firmware-response/bad-inner-checksum",
+                   test_firmware_response_bad_inner_checksum);
+
+  g_test_add_func ("/goodix5135/proto/firmware-response/truncated",
+                   test_firmware_response_truncated);
+
+  g_test_add_func ("/goodix5135/proto/firmware-response/arguments",
+                   test_firmware_response_arguments);
 
   return g_test_run ();
 }
