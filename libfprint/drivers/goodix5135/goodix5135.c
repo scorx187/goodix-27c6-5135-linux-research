@@ -12,6 +12,7 @@
 
 #define FP_COMPONENT "goodix5135"
 
+#include <gusb.h>
 #include "drivers_api.h"
 
 #include "goodix5135.h"
@@ -34,6 +35,7 @@ struct _FpiDeviceGoodix5135
   Goodix5135FirmwareTransaction firmware_transaction;
   Goodix5135RegisterReadTransaction register_read_transaction;
   Goodix5135McuStateTransaction     mcu_state_transaction;
+  Goodix5135NopTransaction          nop_transaction;
 };
 
 G_DECLARE_FINAL_TYPE (FpiDeviceGoodix5135,
@@ -94,6 +96,12 @@ static const FpIdEntry goodix5135_id_table[] = {
  * Returned bytes are validated structurally only and are not logged.
  */
 #define GOODIX5135_MCU_STATE_QUERY 0x55U
+
+/*
+ * Public Goodix reference waits exactly 0.1 seconds for the optional
+ * NOP ACK. Only an actual USB timed-out error is treated as success.
+ */
+#define GOODIX5135_NOP_ACK_TIMEOUT_MS 100U
 
 static void goodix5135_queue_cleanup_cb (
   FpDevice                       *device,
@@ -162,6 +170,23 @@ static void goodix5135_mcu_state_response_cb (
   gpointer                        user_data);
 
 static void goodix5135_start_mcu_state_transaction (
+  FpDevice *device);
+
+static void goodix5135_nop_out_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data);
+
+static void goodix5135_nop_reply_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data);
+
+static void goodix5135_start_nop_transaction (
   FpDevice *device);
 
 static void
@@ -840,8 +865,6 @@ goodix5135_mcu_state_response_cb (
 {
   FpiDeviceGoodix5135 *self =
     FPI_DEVICE_GOODIX5135 (device);
-  FpImageDevice *dev =
-    FP_IMAGE_DEVICE (device);
   gboolean transport_can_advance;
   gboolean protocol_ok;
   const guint8 *state_data = NULL;
@@ -899,7 +922,190 @@ goodix5135_mcu_state_response_cb (
   state_data = NULL;
   state_length = 0;
 
-  fp_dbg ("Read-only MCU state query 0x55 validated");
+  fp_dbg ("Read-only MCU state query 0x55 validated; starting bounded NOP");
+
+  goodix5135_start_nop_transaction (
+    device);
+}
+
+
+static void
+goodix5135_nop_out_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (device);
+  gboolean transport_can_advance;
+
+  (void) user_data;
+
+  transport_can_advance =
+    goodix5135_async_result_can_advance (
+      completion,
+      error);
+
+  if (transport_can_advance &&
+      (transfer == NULL ||
+       transfer->actual_length !=
+         GOODIX5135_USB_PACKET_LENGTH))
+    transport_can_advance = FALSE;
+
+  g_clear_error (&error);
+
+  if (!goodix5135_nop_transaction_out_complete (
+        &self->nop_transaction,
+        transport_can_advance))
+    {
+      goodix5135_open_transaction_fail (
+        device,
+        "Goodix NOP request transport failed");
+      return;
+    }
+
+  /*
+   * The ACK is optional.
+   *
+   * Public reference:
+   *   protocol.read(timeout=0.1)
+   *
+   * Only G_USB_DEVICE_ERROR_TIMED_OUT is accepted as a
+   * successful no-reply completion.
+   */
+  if (!goodix5135_async_submit (
+        device,
+        &self->io,
+        GOODIX5135_REQUEST_BULK_IN,
+        GOODIX5135_USB_PACKET_LENGTH,
+        GOODIX5135_NOP_ACK_TIMEOUT_MS,
+        NULL,
+        0,
+        goodix5135_nop_reply_cb,
+        NULL))
+    {
+      goodix5135_nop_transaction_reply_complete (
+        &self->nop_transaction,
+        GOODIX5135_NOP_REPLY_TRANSPORT_FAILURE,
+        NULL,
+        0);
+
+      goodix5135_open_transaction_fail (
+        device,
+        "Could not submit Goodix NOP optional-ACK receive");
+    }
+}
+
+
+static void
+goodix5135_nop_reply_cb (
+  FpDevice                       *device,
+  FpiUsbTransfer                 *transfer,
+  Goodix5135RequestCompletion     completion,
+  GError                         *error,
+  gpointer                        user_data)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (device);
+  FpImageDevice *dev =
+    FP_IMAGE_DEVICE (device);
+  Goodix5135NopReplyResult result;
+  gboolean protocol_ok;
+  gboolean received_ok;
+
+  (void) user_data;
+
+  /*
+   * A timeout is special ONLY for NOP.
+   *
+   * Do not generalize this behavior to any other command.
+   */
+  if (error != NULL &&
+      g_error_matches (
+        error,
+        G_USB_DEVICE_ERROR,
+        G_USB_DEVICE_ERROR_TIMED_OUT))
+    {
+      result =
+        GOODIX5135_NOP_REPLY_TIMEOUT;
+
+      protocol_ok =
+        goodix5135_nop_transaction_reply_complete (
+          &self->nop_transaction,
+          result,
+          NULL,
+          0);
+
+      g_clear_error (&error);
+
+      if (!protocol_ok)
+        {
+          goodix5135_open_transaction_fail (
+            device,
+            "Goodix NOP timeout policy rejected");
+          return;
+        }
+
+      fp_dbg ("Bounded NOP completed by expected 100 ms USB timeout");
+    }
+  else
+    {
+      received_ok =
+        goodix5135_in_transfer_can_parse (
+          transfer,
+          completion,
+          error);
+
+      if (received_ok)
+        {
+          result =
+            GOODIX5135_NOP_REPLY_RECEIVED;
+
+          protocol_ok =
+            goodix5135_nop_transaction_reply_complete (
+              &self->nop_transaction,
+              result,
+              transfer->buffer,
+              (gsize) transfer->actual_length);
+        }
+      else
+        {
+          result =
+            GOODIX5135_NOP_REPLY_TRANSPORT_FAILURE;
+
+          protocol_ok =
+            goodix5135_nop_transaction_reply_complete (
+              &self->nop_transaction,
+              result,
+              NULL,
+              0);
+        }
+
+      g_clear_error (&error);
+
+      if (!protocol_ok)
+        {
+          goodix5135_open_transaction_fail (
+            device,
+            received_ok
+              ? "Goodix NOP returned an invalid ACK"
+              : "Goodix NOP optional-ACK transport failed");
+          return;
+        }
+
+      fp_dbg ("Bounded NOP completed with valid ACK");
+    }
+
+  if (self->nop_transaction.state !=
+      GOODIX5135_NOP_TRANSACTION_DONE)
+    {
+      goodix5135_open_transaction_fail (
+        device,
+        "Goodix NOP transaction did not reach DONE");
+      return;
+    }
 
   goodix5135_io_stop (&self->io);
 
@@ -910,6 +1116,67 @@ goodix5135_mcu_state_response_cb (
   fpi_image_device_open_complete (
     dev,
     NULL);
+}
+
+
+static void
+goodix5135_start_nop_transaction (
+  FpDevice *device)
+{
+  FpiDeviceGoodix5135 *self =
+    FPI_DEVICE_GOODIX5135 (device);
+  guint8 packet[GOODIX5135_USB_PACKET_LENGTH];
+  gsize logical_length = 0;
+
+  goodix5135_nop_transaction_init (
+    &self->nop_transaction);
+
+  if (!goodix5135_nop_transaction_begin (
+        &self->nop_transaction,
+        packet,
+        sizeof (packet),
+        &logical_length))
+    {
+      goodix5135_open_transaction_fail (
+        device,
+        "Could not build Goodix NOP request");
+      return;
+    }
+
+  if (logical_length !=
+      GOODIX5135_NOP_REQUEST_LENGTH)
+    {
+      goodix5135_nop_transaction_out_complete (
+        &self->nop_transaction,
+        FALSE);
+
+      goodix5135_open_transaction_fail (
+        device,
+        "Unexpected Goodix NOP request length");
+      return;
+    }
+
+  fp_dbg ("Submitting bounded Goodix NOP");
+
+  if (!goodix5135_async_submit (
+        device,
+        &self->io,
+        GOODIX5135_REQUEST_BULK_OUT,
+        GOODIX5135_USB_PACKET_LENGTH,
+        GOODIX5135_FIRMWARE_IO_TIMEOUT_MS,
+        packet,
+        sizeof (packet),
+        goodix5135_nop_out_cb,
+        NULL))
+    {
+      goodix5135_nop_transaction_out_complete (
+        &self->nop_transaction,
+        FALSE);
+
+      goodix5135_open_transaction_fail (
+        device,
+        "Could not submit Goodix NOP request");
+    }
 }
 
 
@@ -1445,6 +1712,9 @@ fpi_device_goodix5135_init (FpiDeviceGoodix5135 *self)
 
   goodix5135_mcu_state_transaction_init (
     &self->mcu_state_transaction);
+
+  goodix5135_nop_transaction_init (
+    &self->nop_transaction);
 }
 
 static void
