@@ -1179,6 +1179,350 @@ test_register_read_response (void)
 }
 
 
+
+static void
+test_register_transaction_happy_path (void)
+{
+  Goodix5135RegisterReadTransaction transaction;
+  guint8 packet[GOODIX5135_USB_PACKET_LENGTH];
+  gsize logical_length = 0;
+  const guint8 *value = NULL;
+  gsize value_length = 0;
+
+  static const guint8 ack[GOODIX5135_USB_PACKET_LENGTH] = {
+    0xa0, 0x06, 0x00, 0xa6,
+    0xb0, 0x03, 0x00,
+    0x82, 0x01, 0x74,
+  };
+
+  static const guint8 response[GOODIX5135_USB_PACKET_LENGTH] = {
+    0xa0, 0x06, 0x00, 0xa6,
+    0x82, 0x03, 0x00,
+    0x08, 0x08, 0x15,
+  };
+
+  goodix5135_register_read_transaction_init (&transaction);
+
+  g_assert_true (
+    goodix5135_register_read_transaction_begin (
+      &transaction,
+      0x0220,
+      2,
+      packet,
+      sizeof (packet),
+      &logical_length));
+
+  g_assert_cmpint (
+    transaction.state,
+    ==,
+    GOODIX5135_REGISTER_READ_TRANSACTION_WAIT_OUT);
+
+  g_assert_cmpuint (
+    transaction.expected_length,
+    ==,
+    2);
+
+  g_assert_true (
+    goodix5135_register_read_transaction_out_complete (
+      &transaction,
+      TRUE));
+
+  g_assert_true (
+    goodix5135_register_read_transaction_ack_complete (
+      &transaction,
+      TRUE,
+      ack,
+      sizeof (ack)));
+
+  g_assert_true (
+    goodix5135_register_read_transaction_response_complete (
+      &transaction,
+      TRUE,
+      response,
+      sizeof (response),
+      &value,
+      &value_length));
+
+  g_assert_cmpint (
+    transaction.state,
+    ==,
+    GOODIX5135_REGISTER_READ_TRANSACTION_DONE);
+
+  g_assert_nonnull (value);
+  g_assert_cmpuint (value_length, ==, 2);
+  g_assert_cmpuint (value[0], ==, 0x08);
+  g_assert_cmpuint (value[1], ==, 0x08);
+}
+
+
+static void
+test_register_transaction_out_failure (void)
+{
+  Goodix5135RegisterReadTransaction transaction;
+  guint8 packet[GOODIX5135_USB_PACKET_LENGTH];
+  gsize logical_length = 0;
+
+  goodix5135_register_read_transaction_init (&transaction);
+
+  g_assert_true (
+    goodix5135_register_read_transaction_begin (
+      &transaction,
+      0x0220,
+      2,
+      packet,
+      sizeof (packet),
+      &logical_length));
+
+  g_assert_false (
+    goodix5135_register_read_transaction_out_complete (
+      &transaction,
+      FALSE));
+
+  g_assert_cmpint (
+    transaction.state,
+    ==,
+    GOODIX5135_REGISTER_READ_TRANSACTION_FAILED);
+}
+
+
+static void
+test_register_transaction_ack_failure (void)
+{
+  Goodix5135RegisterReadTransaction transaction;
+  guint8 packet[GOODIX5135_USB_PACKET_LENGTH];
+  gsize logical_length = 0;
+
+  goodix5135_register_read_transaction_init (&transaction);
+
+  g_assert_true (
+    goodix5135_register_read_transaction_begin (
+      &transaction,
+      0x0220,
+      2,
+      packet,
+      sizeof (packet),
+      &logical_length));
+
+  g_assert_true (
+    goodix5135_register_read_transaction_out_complete (
+      &transaction,
+      TRUE));
+
+  g_assert_false (
+    goodix5135_register_read_transaction_ack_complete (
+      &transaction,
+      FALSE,
+      NULL,
+      0));
+
+  g_assert_cmpint (
+    transaction.state,
+    ==,
+    GOODIX5135_REGISTER_READ_TRANSACTION_FAILED);
+}
+
+
+static void
+test_register_transaction_negative_ack (void)
+{
+  Goodix5135RegisterReadTransaction transaction;
+  guint8 packet[GOODIX5135_USB_PACKET_LENGTH];
+  gsize logical_length = 0;
+
+  static const guint8 ack[GOODIX5135_USB_PACKET_LENGTH] = {
+    0xa0, 0x06, 0x00, 0xa6,
+    0xb0, 0x03, 0x00,
+    0x82, 0x00, 0x75,
+  };
+
+  goodix5135_register_read_transaction_init (&transaction);
+
+  g_assert_true (
+    goodix5135_register_read_transaction_begin (
+      &transaction,
+      0x0220,
+      2,
+      packet,
+      sizeof (packet),
+      &logical_length));
+
+  g_assert_true (
+    goodix5135_register_read_transaction_out_complete (
+      &transaction,
+      TRUE));
+
+  g_assert_false (
+    goodix5135_register_read_transaction_ack_complete (
+      &transaction,
+      TRUE,
+      ack,
+      sizeof (ack)));
+
+  g_assert_cmpint (
+    transaction.state,
+    ==,
+    GOODIX5135_REGISTER_READ_TRANSACTION_FAILED);
+}
+
+
+static void
+test_register_transaction_response_failure (void)
+{
+  Goodix5135RegisterReadTransaction transaction;
+  guint8 packet[GOODIX5135_USB_PACKET_LENGTH];
+  gsize logical_length = 0;
+  const guint8 *value = NULL;
+  gsize value_length = 0;
+
+  static const guint8 ack[GOODIX5135_USB_PACKET_LENGTH] = {
+    0xa0, 0x06, 0x00, 0xa6,
+    0xb0, 0x03, 0x00,
+    0x82, 0x01, 0x74,
+  };
+
+  goodix5135_register_read_transaction_init (&transaction);
+
+  g_assert_true (
+    goodix5135_register_read_transaction_begin (
+      &transaction,
+      0x0220,
+      2,
+      packet,
+      sizeof (packet),
+      &logical_length));
+
+  g_assert_true (
+    goodix5135_register_read_transaction_out_complete (
+      &transaction,
+      TRUE));
+
+  g_assert_true (
+    goodix5135_register_read_transaction_ack_complete (
+      &transaction,
+      TRUE,
+      ack,
+      sizeof (ack)));
+
+  g_assert_false (
+    goodix5135_register_read_transaction_response_complete (
+      &transaction,
+      FALSE,
+      NULL,
+      0,
+      &value,
+      &value_length));
+
+  g_assert_cmpint (
+    transaction.state,
+    ==,
+    GOODIX5135_REGISTER_READ_TRANSACTION_FAILED);
+}
+
+
+static void
+test_register_transaction_short_response (void)
+{
+  Goodix5135RegisterReadTransaction transaction;
+  guint8 packet[GOODIX5135_USB_PACKET_LENGTH];
+  gsize logical_length = 0;
+  const guint8 *value = NULL;
+  gsize value_length = 0;
+
+  static const guint8 ack[GOODIX5135_USB_PACKET_LENGTH] = {
+    0xa0, 0x06, 0x00, 0xa6,
+    0xb0, 0x03, 0x00,
+    0x82, 0x01, 0x74,
+  };
+
+  static const guint8 response[GOODIX5135_USB_PACKET_LENGTH] = {
+    0xa0, 0x05, 0x00, 0xa5,
+    0x82, 0x02, 0x00,
+    0x08, 0x1e,
+  };
+
+  goodix5135_register_read_transaction_init (&transaction);
+
+  g_assert_true (
+    goodix5135_register_read_transaction_begin (
+      &transaction,
+      0x0220,
+      2,
+      packet,
+      sizeof (packet),
+      &logical_length));
+
+  g_assert_true (
+    goodix5135_register_read_transaction_out_complete (
+      &transaction,
+      TRUE));
+
+  g_assert_true (
+    goodix5135_register_read_transaction_ack_complete (
+      &transaction,
+      TRUE,
+      ack,
+      sizeof (ack)));
+
+  g_assert_false (
+    goodix5135_register_read_transaction_response_complete (
+      &transaction,
+      TRUE,
+      response,
+      sizeof (response),
+      &value,
+      &value_length));
+
+  g_assert_cmpint (
+    transaction.state,
+    ==,
+    GOODIX5135_REGISTER_READ_TRANSACTION_FAILED);
+}
+
+
+static void
+test_register_transaction_invalid_order (void)
+{
+  Goodix5135RegisterReadTransaction transaction;
+
+  goodix5135_register_read_transaction_init (&transaction);
+
+  g_assert_false (
+    goodix5135_register_read_transaction_out_complete (
+      &transaction,
+      TRUE));
+
+  g_assert_cmpint (
+    transaction.state,
+    ==,
+    GOODIX5135_REGISTER_READ_TRANSACTION_FAILED);
+}
+
+
+static void
+test_register_transaction_begin_failure (void)
+{
+  Goodix5135RegisterReadTransaction transaction;
+  guint8 packet[GOODIX5135_USB_PACKET_LENGTH];
+  gsize logical_length = 0;
+
+  goodix5135_register_read_transaction_init (&transaction);
+
+  g_assert_false (
+    goodix5135_register_read_transaction_begin (
+      &transaction,
+      0x0220,
+      0,
+      packet,
+      sizeof (packet),
+      &logical_length));
+
+  g_assert_cmpint (
+    transaction.state,
+    ==,
+    GOODIX5135_REGISTER_READ_TRANSACTION_FAILED);
+}
+
+
 int
 main (int argc, char **argv)
 {
@@ -1302,6 +1646,55 @@ main (int argc, char **argv)
   g_test_add_func ("/goodix5135/proto/register-read-response",
 
                    test_register_read_response);
+
+
+  g_test_add_func ("/goodix5135/proto/register-transaction/happy-path",
+
+
+                   test_register_transaction_happy_path);
+
+
+  g_test_add_func ("/goodix5135/proto/register-transaction/out-failure",
+
+
+                   test_register_transaction_out_failure);
+
+
+  g_test_add_func ("/goodix5135/proto/register-transaction/ack-failure",
+
+
+                   test_register_transaction_ack_failure);
+
+
+  g_test_add_func ("/goodix5135/proto/register-transaction/negative-ack",
+
+
+                   test_register_transaction_negative_ack);
+
+
+  g_test_add_func ("/goodix5135/proto/register-transaction/response-failure",
+
+
+                   test_register_transaction_response_failure);
+
+
+  g_test_add_func ("/goodix5135/proto/register-transaction/short-response",
+
+
+                   test_register_transaction_short_response);
+
+
+  g_test_add_func ("/goodix5135/proto/register-transaction/invalid-order",
+
+
+                   test_register_transaction_invalid_order);
+
+
+  g_test_add_func ("/goodix5135/proto/register-transaction/begin-failure",
+
+
+                   test_register_transaction_begin_failure);
+
 
 
   return g_test_run ();

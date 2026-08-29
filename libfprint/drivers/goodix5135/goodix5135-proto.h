@@ -43,6 +43,22 @@ typedef struct
   Goodix5135FirmwareTransactionState state;
 } Goodix5135FirmwareTransaction;
 
+typedef enum
+{
+  GOODIX5135_REGISTER_READ_TRANSACTION_IDLE = 0,
+  GOODIX5135_REGISTER_READ_TRANSACTION_WAIT_OUT,
+  GOODIX5135_REGISTER_READ_TRANSACTION_WAIT_ACK,
+  GOODIX5135_REGISTER_READ_TRANSACTION_WAIT_RESPONSE,
+  GOODIX5135_REGISTER_READ_TRANSACTION_DONE,
+  GOODIX5135_REGISTER_READ_TRANSACTION_FAILED,
+} Goodix5135RegisterReadTransactionState;
+
+typedef struct
+{
+  Goodix5135RegisterReadTransactionState state;
+  gsize                                  expected_length;
+} Goodix5135RegisterReadTransaction;
+
 typedef struct
 {
   const guint8 *metadata;
@@ -142,6 +158,50 @@ gboolean goodix5135_parse_read_sensor_register_response (
   gsize          minimum_length,
   const guint8 **value,
   gsize         *value_length);
+
+
+/*
+ * Host-only READ_SENSOR_REGISTER transaction controller.
+ *
+ * IDLE
+ *   -> WAIT_OUT
+ *   -> WAIT_ACK
+ *   -> WAIT_RESPONSE
+ *   -> DONE
+ *
+ * Any invalid order, transport error, ACK failure, malformed response,
+ * or short response transitions to FAILED.
+ *
+ * This layer performs no USB operation.
+ */
+void goodix5135_register_read_transaction_init (
+  Goodix5135RegisterReadTransaction *transaction);
+
+gboolean goodix5135_register_read_transaction_begin (
+  Goodix5135RegisterReadTransaction *transaction,
+  guint16                            address,
+  guint8                             read_length,
+  guint8                            *packet,
+  gsize                              packet_size,
+  gsize                             *logical_length);
+
+gboolean goodix5135_register_read_transaction_out_complete (
+  Goodix5135RegisterReadTransaction *transaction,
+  gboolean                           transport_can_advance);
+
+gboolean goodix5135_register_read_transaction_ack_complete (
+  Goodix5135RegisterReadTransaction *transaction,
+  gboolean                           transport_can_advance,
+  const guint8                      *data,
+  gsize                              data_length);
+
+gboolean goodix5135_register_read_transaction_response_complete (
+  Goodix5135RegisterReadTransaction *transaction,
+  gboolean                           transport_can_advance,
+  const guint8                      *data,
+  gsize                              data_length,
+  const guint8                     **value,
+  gsize                             *value_length);
 
 
 /*
