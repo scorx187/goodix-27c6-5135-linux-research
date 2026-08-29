@@ -4768,6 +4768,517 @@ test_cfg70_runtime_arguments (void)
 }
 
 
+
+static void
+test_otp_read_make_response (
+  guint8 *response,
+  gsize   response_size,
+  gsize   payload_length)
+{
+  gsize inner_protocol_length;
+  guint outer_sum;
+  guint inner_sum;
+
+  g_assert_nonnull (response);
+
+  inner_protocol_length =
+    1U +
+    2U +
+    payload_length +
+    1U;
+
+  g_assert_cmpuint (
+    response_size,
+    >=,
+    4U + inner_protocol_length);
+
+  memset (
+    response,
+    0,
+    response_size);
+
+  response[0] =
+    GOODIX5135_PACK_FLAGS_MESSAGE_PROTOCOL;
+
+  response[1] =
+    (guint8) (
+      inner_protocol_length & 0xffU);
+
+  response[2] =
+    (guint8) (
+      (inner_protocol_length >> 8) & 0xffU);
+
+  outer_sum =
+    (guint) response[0] +
+    (guint) response[1] +
+    (guint) response[2];
+
+  response[3] =
+    (guint8) (
+      outer_sum & 0xffU);
+
+  response[4] =
+    GOODIX5135_COMMAND_READ_OTP;
+
+  response[5] =
+    (guint8) (
+      (payload_length + 1U) &
+      0xffU);
+
+  response[6] =
+    (guint8) (
+      ((payload_length + 1U) >> 8) &
+      0xffU);
+
+  for (gsize i = 0;
+       i < payload_length;
+       i++)
+    response[7 + i] =
+      (guint8) i;
+
+  inner_sum = 0;
+
+  for (gsize i = 4;
+       i < 7U + payload_length;
+       i++)
+    inner_sum += response[i];
+
+  response[7 + payload_length] =
+    (guint8) (
+      (0xaaU - inner_sum) & 0xffU);
+}
+
+
+static void
+test_otp_read_request_vector (void)
+{
+  guint8 packet[GOODIX5135_USB_PACKET_LENGTH];
+  gsize logical_length = 0;
+
+  static const guint8 expected[] = {
+    0xa0, 0x06, 0x00, 0xa6,
+    0xa6, 0x03, 0x00,
+    0x00, 0x00,
+    0x01,
+  };
+
+  g_assert_true (
+    goodix5135_build_otp_read_request (
+      packet,
+      sizeof (packet),
+      &logical_length));
+
+  g_assert_cmpuint (
+    logical_length,
+    ==,
+    GOODIX5135_OTP_READ_REQUEST_LENGTH);
+
+  g_assert_cmpmem (
+    packet,
+    logical_length,
+    expected,
+    sizeof (expected));
+}
+
+
+static void
+test_otp_read_request_arguments (void)
+{
+  guint8 packet[GOODIX5135_USB_PACKET_LENGTH];
+  gsize logical_length = 123;
+
+  g_assert_false (
+    goodix5135_build_otp_read_request (
+      NULL,
+      sizeof (packet),
+      &logical_length));
+
+  g_assert_false (
+    goodix5135_build_otp_read_request (
+      packet,
+      GOODIX5135_USB_PACKET_LENGTH - 1,
+      &logical_length));
+
+  g_assert_false (
+    goodix5135_build_otp_read_request (
+      packet,
+      sizeof (packet),
+      NULL));
+}
+
+
+static void
+test_otp_read_ack_success (void)
+{
+  static const guint8 ack[GOODIX5135_USB_PACKET_LENGTH] = {
+    0xa0, 0x06, 0x00, 0xa6,
+    0xb0, 0x03, 0x00,
+    0xa6, 0x01,
+    0x50,
+  };
+
+  g_assert_true (
+    goodix5135_parse_otp_read_ack (
+      ack,
+      sizeof (ack)));
+}
+
+
+static void
+test_otp_read_ack_negative (void)
+{
+  static const guint8 ack[GOODIX5135_USB_PACKET_LENGTH] = {
+    0xa0, 0x06, 0x00, 0xa6,
+    0xb0, 0x03, 0x00,
+    0xa6, 0x00,
+    0x51,
+  };
+
+  g_assert_false (
+    goodix5135_parse_otp_read_ack (
+      ack,
+      sizeof (ack)));
+}
+
+
+static void
+test_otp_read_response_64_bytes (void)
+{
+  guint8 response[
+    GOODIX5135_OTP_READ_RESPONSE_LENGTH
+  ];
+
+  guint8 otp[GOODIX5135_OTP_LENGTH];
+
+  test_otp_read_make_response (
+    response,
+    sizeof (response),
+    GOODIX5135_OTP_LENGTH);
+
+  g_assert_cmpuint (
+    response[0],
+    ==,
+    0xa0);
+
+  g_assert_cmpuint (
+    response[1],
+    ==,
+    0x44);
+
+  g_assert_cmpuint (
+    response[2],
+    ==,
+    0x00);
+
+  g_assert_cmpuint (
+    response[3],
+    ==,
+    0xe4);
+
+  g_assert_cmpuint (
+    response[4],
+    ==,
+    0xa6);
+
+  g_assert_cmpuint (
+    response[5],
+    ==,
+    0x41);
+
+  g_assert_cmpuint (
+    response[6],
+    ==,
+    0x00);
+
+  /*
+   * For synthetic payload 00..3f the parser must return the
+   * exact 64 bytes to caller-owned memory.
+   */
+  g_assert_true (
+    goodix5135_parse_otp_read_response (
+      response,
+      sizeof (response),
+      otp,
+      sizeof (otp)));
+
+  for (gsize i = 0;
+       i < sizeof (otp);
+       i++)
+    g_assert_cmpuint (
+      otp[i],
+      ==,
+      (guint8) i);
+}
+
+
+static void
+test_otp_read_response_wrong_length (void)
+{
+  guint8 response[
+    GOODIX5135_OTP_READ_RESPONSE_LENGTH
+  ];
+
+  guint8 otp[GOODIX5135_OTP_LENGTH];
+
+  memset (
+    otp,
+    0xaa,
+    sizeof (otp));
+
+  test_otp_read_make_response (
+    response,
+    sizeof (response),
+    GOODIX5135_OTP_LENGTH - 1);
+
+  g_assert_false (
+    goodix5135_parse_otp_read_response (
+      response,
+      sizeof (response),
+      otp,
+      sizeof (otp)));
+
+  /*
+   * Rejected input must not leave stale caller contents.
+   */
+  for (gsize i = 0;
+       i < sizeof (otp);
+       i++)
+    g_assert_cmpuint (
+      otp[i],
+      ==,
+      0);
+}
+
+
+static void
+test_otp_read_transaction_happy_path (void)
+{
+  Goodix5135OtpReadTransaction transaction;
+
+  guint8 request[GOODIX5135_USB_PACKET_LENGTH];
+  gsize logical_length = 0;
+
+  guint8 response[
+    GOODIX5135_OTP_READ_RESPONSE_LENGTH
+  ];
+
+  guint8 otp[GOODIX5135_OTP_LENGTH];
+
+  static const guint8 ack[GOODIX5135_USB_PACKET_LENGTH] = {
+    0xa0, 0x06, 0x00, 0xa6,
+    0xb0, 0x03, 0x00,
+    0xa6, 0x01,
+    0x50,
+  };
+
+  test_otp_read_make_response (
+    response,
+    sizeof (response),
+    GOODIX5135_OTP_LENGTH);
+
+  goodix5135_otp_read_transaction_init (
+    &transaction);
+
+  g_assert_true (
+    goodix5135_otp_read_transaction_begin (
+      &transaction,
+      request,
+      sizeof (request),
+      &logical_length));
+
+  g_assert_cmpint (
+    transaction.state,
+    ==,
+    GOODIX5135_OTP_READ_TRANSACTION_WAIT_OUT);
+
+  g_assert_true (
+    goodix5135_otp_read_transaction_out_complete (
+      &transaction,
+      TRUE));
+
+  g_assert_cmpint (
+    transaction.state,
+    ==,
+    GOODIX5135_OTP_READ_TRANSACTION_WAIT_ACK);
+
+  g_assert_true (
+    goodix5135_otp_read_transaction_ack_complete (
+      &transaction,
+      TRUE,
+      ack,
+      sizeof (ack)));
+
+  g_assert_cmpint (
+    transaction.state,
+    ==,
+    GOODIX5135_OTP_READ_TRANSACTION_WAIT_RESPONSE);
+
+  g_assert_true (
+    goodix5135_otp_read_transaction_response_complete (
+      &transaction,
+      TRUE,
+      response,
+      sizeof (response),
+      otp,
+      sizeof (otp)));
+
+  g_assert_cmpint (
+    transaction.state,
+    ==,
+    GOODIX5135_OTP_READ_TRANSACTION_DONE);
+
+  for (gsize i = 0;
+       i < sizeof (otp);
+       i++)
+    g_assert_cmpuint (
+      otp[i],
+      ==,
+      (guint8) i);
+}
+
+
+static void
+test_otp_read_transaction_out_failure (void)
+{
+  Goodix5135OtpReadTransaction transaction;
+
+  guint8 request[GOODIX5135_USB_PACKET_LENGTH];
+  gsize logical_length = 0;
+
+  goodix5135_otp_read_transaction_init (
+    &transaction);
+
+  g_assert_true (
+    goodix5135_otp_read_transaction_begin (
+      &transaction,
+      request,
+      sizeof (request),
+      &logical_length));
+
+  g_assert_false (
+    goodix5135_otp_read_transaction_out_complete (
+      &transaction,
+      FALSE));
+
+  g_assert_cmpint (
+    transaction.state,
+    ==,
+    GOODIX5135_OTP_READ_TRANSACTION_FAILED);
+}
+
+
+static void
+test_otp_read_transaction_ack_failure (void)
+{
+  Goodix5135OtpReadTransaction transaction;
+
+  guint8 request[GOODIX5135_USB_PACKET_LENGTH];
+  gsize logical_length = 0;
+
+  goodix5135_otp_read_transaction_init (
+    &transaction);
+
+  g_assert_true (
+    goodix5135_otp_read_transaction_begin (
+      &transaction,
+      request,
+      sizeof (request),
+      &logical_length));
+
+  g_assert_true (
+    goodix5135_otp_read_transaction_out_complete (
+      &transaction,
+      TRUE));
+
+  g_assert_false (
+    goodix5135_otp_read_transaction_ack_complete (
+      &transaction,
+      FALSE,
+      NULL,
+      0));
+
+  g_assert_cmpint (
+    transaction.state,
+    ==,
+    GOODIX5135_OTP_READ_TRANSACTION_FAILED);
+}
+
+
+static void
+test_otp_read_transaction_response_failure (void)
+{
+  Goodix5135OtpReadTransaction transaction;
+
+  guint8 request[GOODIX5135_USB_PACKET_LENGTH];
+  gsize logical_length = 0;
+
+  guint8 otp[GOODIX5135_OTP_LENGTH];
+
+  static const guint8 ack[GOODIX5135_USB_PACKET_LENGTH] = {
+    0xa0, 0x06, 0x00, 0xa6,
+    0xb0, 0x03, 0x00,
+    0xa6, 0x01,
+    0x50,
+  };
+
+  goodix5135_otp_read_transaction_init (
+    &transaction);
+
+  g_assert_true (
+    goodix5135_otp_read_transaction_begin (
+      &transaction,
+      request,
+      sizeof (request),
+      &logical_length));
+
+  g_assert_true (
+    goodix5135_otp_read_transaction_out_complete (
+      &transaction,
+      TRUE));
+
+  g_assert_true (
+    goodix5135_otp_read_transaction_ack_complete (
+      &transaction,
+      TRUE,
+      ack,
+      sizeof (ack)));
+
+  g_assert_false (
+    goodix5135_otp_read_transaction_response_complete (
+      &transaction,
+      FALSE,
+      NULL,
+      0,
+      otp,
+      sizeof (otp)));
+
+  g_assert_cmpint (
+    transaction.state,
+    ==,
+    GOODIX5135_OTP_READ_TRANSACTION_FAILED);
+}
+
+
+static void
+test_otp_read_transaction_invalid_order (void)
+{
+  Goodix5135OtpReadTransaction transaction;
+
+  goodix5135_otp_read_transaction_init (
+    &transaction);
+
+  g_assert_false (
+    goodix5135_otp_read_transaction_out_complete (
+      &transaction,
+      TRUE));
+
+  g_assert_cmpint (
+    transaction.state,
+    ==,
+    GOODIX5135_OTP_READ_TRANSACTION_FAILED);
+}
+
+
 int
 main (int argc, char **argv)
 {
@@ -6229,6 +6740,271 @@ main (int argc, char **argv)
 
 
                    test_cfg70_runtime_arguments);
+
+
+
+
+
+
+
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/otp-read/request-vector",
+
+
+
+
+
+
+
+
+
+
+
+                   test_otp_read_request_vector);
+
+
+
+
+
+
+
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/otp-read/request-arguments",
+
+
+
+
+
+
+
+
+
+
+
+                   test_otp_read_request_arguments);
+
+
+
+
+
+
+
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/otp-read/ack-success",
+
+
+
+
+
+
+
+
+
+
+
+                   test_otp_read_ack_success);
+
+
+
+
+
+
+
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/otp-read/ack-negative",
+
+
+
+
+
+
+
+
+
+
+
+                   test_otp_read_ack_negative);
+
+
+
+
+
+
+
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/otp-read/response-64-bytes",
+
+
+
+
+
+
+
+
+
+
+
+                   test_otp_read_response_64_bytes);
+
+
+
+
+
+
+
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/otp-read/response-wrong-length",
+
+
+
+
+
+
+
+
+
+
+
+                   test_otp_read_response_wrong_length);
+
+
+
+
+
+
+
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/otp-read-transaction/happy-path",
+
+
+
+
+
+
+
+
+
+
+
+                   test_otp_read_transaction_happy_path);
+
+
+
+
+
+
+
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/otp-read-transaction/out-failure",
+
+
+
+
+
+
+
+
+
+
+
+                   test_otp_read_transaction_out_failure);
+
+
+
+
+
+
+
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/otp-read-transaction/ack-failure",
+
+
+
+
+
+
+
+
+
+
+
+                   test_otp_read_transaction_ack_failure);
+
+
+
+
+
+
+
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/otp-read-transaction/response-failure",
+
+
+
+
+
+
+
+
+
+
+
+                   test_otp_read_transaction_response_failure);
+
+
+
+
+
+
+
+
+
+
+
+  g_test_add_func ("/goodix5135/proto/otp-read-transaction/invalid-order",
+
+
+
+
+
+
+
+
+
+
+
+                   test_otp_read_transaction_invalid_order);
+
 
 
 

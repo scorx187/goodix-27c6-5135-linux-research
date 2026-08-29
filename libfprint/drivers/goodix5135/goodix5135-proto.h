@@ -15,6 +15,7 @@
 #define GOODIX5135_COMMAND_UPLOAD_CONFIG_MCU    0x90U
 #define GOODIX5135_COMMAND_ENABLE_CHIP          0x96U
 #define GOODIX5135_COMMAND_RESET                0xa2U
+#define GOODIX5135_COMMAND_READ_OTP             0xa6U
 #define GOODIX5135_COMMAND_FIRMWARE_VERSION     0xa8U
 #define GOODIX5135_COMMAND_QUERY_MCU_STATE      0xaeU
 #define GOODIX5135_COMMAND_ACK                  0xb0U
@@ -60,6 +61,29 @@
  * No unit-specific OTP bytes live in the source tree.
  */
 #define GOODIX5135_OTP_LENGTH                    64U
+
+/*
+ * READ_OTP 0xa6 request:
+ *
+ *   a0 06 00 a6
+ *   a6 03 00
+ *   00 00
+ *   01
+ *
+ * = 10 logical bytes.
+ *
+ * A 64-byte OTP response occupies:
+ *
+ *   outer wrapper   4
+ *   command         1
+ *   LE16 length     2
+ *   OTP            64
+ *   checksum        1
+ *                 ---
+ *                  72 logical bytes
+ */
+#define GOODIX5135_OTP_READ_REQUEST_LENGTH       10U
+#define GOODIX5135_OTP_READ_RESPONSE_LENGTH      72U
 
 #define GOODIX5135_CFG70_PREFIX_0                0x70U
 #define GOODIX5135_CFG70_PREFIX_1                0x11U
@@ -150,6 +174,22 @@ typedef struct
 {
   Goodix5135ActivationSequenceState state;
 } Goodix5135ActivationSequence;
+
+typedef enum
+{
+  GOODIX5135_OTP_READ_TRANSACTION_IDLE = 0,
+  GOODIX5135_OTP_READ_TRANSACTION_WAIT_OUT,
+  GOODIX5135_OTP_READ_TRANSACTION_WAIT_ACK,
+  GOODIX5135_OTP_READ_TRANSACTION_WAIT_RESPONSE,
+  GOODIX5135_OTP_READ_TRANSACTION_DONE,
+  GOODIX5135_OTP_READ_TRANSACTION_FAILED,
+} Goodix5135OtpReadTransactionState;
+
+typedef struct
+{
+  Goodix5135OtpReadTransactionState state;
+} Goodix5135OtpReadTransaction;
+
 
 typedef struct
 {
@@ -403,6 +443,85 @@ gboolean goodix5135_register_read_transaction_response_complete (
   gsize                              data_length,
   const guint8                     **value,
   gsize                             *value_length);
+
+
+/*
+ * Build READ_OTP command 0xa6.
+ *
+ * Verified public request payload:
+ *
+ *   00 00
+ *
+ * Exact logical request:
+ *
+ *   a0 06 00 a6
+ *   a6 03 00
+ *   00 00
+ *   01
+ *
+ * This helper performs no USB access.
+ */
+gboolean goodix5135_build_otp_read_request (
+  guint8 *packet,
+  gsize   packet_size,
+  gsize  *logical_length);
+
+/*
+ * Parse ACK specifically belonging to READ_OTP 0xa6.
+ */
+gboolean goodix5135_parse_otp_read_ack (
+  const guint8 *data,
+  gsize         data_length);
+
+/*
+ * Parse exactly 64 bytes of OTP from a READ_OTP response.
+ *
+ * OTP is copied only into caller-owned transient memory.
+ * Nothing is logged, persisted, hashed, or printed.
+ */
+gboolean goodix5135_parse_otp_read_response (
+  const guint8 *data,
+  gsize         data_length,
+  guint8       *otp,
+  gsize         otp_size);
+
+/*
+ * Host-only transaction:
+ *
+ * IDLE
+ *  -> WAIT_OUT
+ *  -> WAIT_ACK
+ *  -> WAIT_RESPONSE
+ *  -> DONE
+ *
+ * Any transport/protocol/order failure -> FAILED.
+ */
+void goodix5135_otp_read_transaction_init (
+  Goodix5135OtpReadTransaction *transaction);
+
+gboolean goodix5135_otp_read_transaction_begin (
+  Goodix5135OtpReadTransaction *transaction,
+  guint8                       *packet,
+  gsize                         packet_size,
+  gsize                        *logical_length);
+
+gboolean goodix5135_otp_read_transaction_out_complete (
+  Goodix5135OtpReadTransaction *transaction,
+  gboolean                      transport_can_advance);
+
+gboolean goodix5135_otp_read_transaction_ack_complete (
+  Goodix5135OtpReadTransaction *transaction,
+  gboolean                      transport_can_advance,
+  const guint8                 *data,
+  gsize                         data_length);
+
+gboolean goodix5135_otp_read_transaction_response_complete (
+  Goodix5135OtpReadTransaction *transaction,
+  gboolean                      transport_can_advance,
+  const guint8                 *data,
+  gsize                         data_length,
+  guint8                       *otp,
+  gsize                         otp_size);
 
 
 /*
