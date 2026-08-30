@@ -323,6 +323,27 @@ endforeach
 
 
 if 'goodix5135' in drivers
+    goodix5135_preprocess_test = executable(
+        'test-goodix5135-preprocess',
+        sources: [
+            'test-goodix5135-preprocess.c',
+            '../libfprint/drivers/goodix5135/goodix5135-preprocess.c',
+        ],
+        dependencies: glib_dep,
+        c_args: common_cflags,
+        install: false,
+    )
+
+    test(
+        'goodix5135-preprocess',
+        goodix5135_preprocess_test,
+        suite: ['unit-tests'],
+        env: envs,
+    )
+endif
+
+
+if 'goodix5135' in drivers
     goodix5135_image_test = executable(
         'test-goodix5135-image',
         sources: [
