@@ -1,0 +1,5171 @@
+diff --git a/libfprint/fp-image-device.c b/libfprint/fp-image-device.c
+index 519ad75..60c0d5a 100644
+--- a/libfprint/fp-image-device.c
++++ b/libfprint/fp-image-device.c
+@@ -24,6 +24,9 @@
+ 
+ #define BOZORTH3_DEFAULT_THRESHOLD 40
+ 
++G_STATIC_ASSERT (
++  FPI_IMAGE_DEVICE_ALGORITHM_NBIS == 0);
++
+ /**
+  * SECTION: fp-image-device
+  * @title: FpImageDevice
+@@ -95,28 +98,52 @@ fp_image_device_cancel_action (FpDevice *device)
+     fpi_image_device_deactivate (self, TRUE);
+ }
+ 
++static FpiPrintType
++fp_image_device_algorithm_print_type (FpImageDeviceClass *cls)
++{
++  if (cls->algorithm ==
++      FPI_IMAGE_DEVICE_ALGORITHM_SIGFM)
++    return FPI_PRINT_SIGFM;
++
++  return FPI_PRINT_NBIS;
++}
++
++
+ static void
+ fp_image_device_start_capture_action (FpDevice *device)
+ {
+-  FpImageDevice *self = FP_IMAGE_DEVICE (device);
+-  FpImageDevicePrivate *priv = fp_image_device_get_instance_private (self);
++  FpImageDevice *self =
++    FP_IMAGE_DEVICE (device);
++
++  FpImageDeviceClass *cls =
++    FP_IMAGE_DEVICE_GET_CLASS (self);
++
++  FpImageDevicePrivate *priv =
++    fp_image_device_get_instance_private (
++      self);
++
+   FpiDeviceAction action;
+   FpiPrintType print_type;
+ 
+-  /* There is just one action that we cannot support out
+-   * of the box, which is a capture without first waiting
+-   * for a finger to be on the device.
+-   */
+-  action = fpi_device_get_current_action (device);
++  action =
++    fpi_device_get_current_action (
++      device);
++
+   if (action == FPI_DEVICE_ACTION_CAPTURE)
+     {
+       gboolean wait_for_finger;
+ 
+-      fpi_device_get_capture_data (device, &wait_for_finger);
++      fpi_device_get_capture_data (
++        device,
++        &wait_for_finger);
+ 
+       if (!wait_for_finger)
+         {
+-          fpi_device_action_error (device, fpi_device_error_new (FP_DEVICE_ERROR_NOT_SUPPORTED));
++          fpi_device_action_error (
++            device,
++            fpi_device_error_new (
++              FP_DEVICE_ERROR_NOT_SUPPORTED));
++
+           return;
+         }
+     }
+@@ -124,23 +151,52 @@ fp_image_device_start_capture_action (FpDevice *device)
+     {
+       FpPrint *enroll_print = NULL;
+ 
+-      fpi_device_get_enroll_data (device, &enroll_print);
+-      g_object_get (enroll_print, "fpi-type", &print_type, NULL);
+-      if (print_type != FPI_PRINT_NBIS)
+-        fpi_print_set_type (enroll_print, FPI_PRINT_NBIS);
++      const FpiPrintType expected_type =
++        fp_image_device_algorithm_print_type (
++          cls);
++
++      fpi_device_get_enroll_data (
++        device,
++        &enroll_print);
++
++      g_object_get (
++        enroll_print,
++        "fpi-type",
++        &print_type,
++        NULL);
++
++      if (print_type != FPI_PRINT_UNDEFINED &&
++          print_type != expected_type)
++        {
++          fpi_device_action_error (
++            device,
++            fpi_device_error_new_msg (
++              FP_DEVICE_ERROR_NOT_SUPPORTED,
++              "Enrollment print type does not match image-device algorithm"));
++
++          return;
++        }
++
++      if (print_type != expected_type)
++        fpi_print_set_type (
++          enroll_print,
++          expected_type);
+     }
+ 
+   priv->enroll_stage = 0;
+-  /* The internal state machine guarantees both of these. */
+-  g_assert (!priv->finger_present);
+-  g_assert (!priv->minutiae_scan_active);
+ 
+-  /* And activate the device; we rely on fpi_image_device_activate_complete()
+-   * to be called when done (or immediately). */
+-  fpi_image_device_activate (self);
++  g_assert (
++    !priv->finger_present);
++
++  g_assert (
++    !priv->minutiae_scan_active);
++
++  fpi_image_device_activate (
++    self);
+ }
+ 
+ 
++
+ /*********************************************************/
+ 
+ static void
+diff --git a/libfprint/fp-image.c b/libfprint/fp-image.c
+index f9c60b3..d86a3b9 100644
+--- a/libfprint/fp-image.c
++++ b/libfprint/fp-image.c
+@@ -27,6 +27,7 @@
+ #include <config.h>
+ #include <nbis.h>
+ 
++
+ /**
+  * SECTION: fp-image
+  * @title: FpImage
+@@ -64,6 +65,7 @@ fp_image_finalize (GObject *object)
+   g_clear_pointer (&self->data, g_free);
+   g_clear_pointer (&self->binarized, g_free);
+   g_clear_pointer (&self->minutiae, g_ptr_array_unref);
++  g_clear_pointer (&self->sigfm_info, sigfm_free_info);
+ 
+   G_OBJECT_CLASS (fp_image_parent_class)->finalize (object);
+ }
+@@ -215,6 +217,10 @@ fp_image_detect_minutiae_nbis_finish (FpImage *self,
+       /* Don't let free_minutiae delete the minutiae that we now own. */
+       data->minutiae->num = 0;
+ 
++      g_clear_pointer (
++        &self->sigfm_info,
++        sigfm_free_info);
++
+       return TRUE;
+     }
+ 
+diff --git a/libfprint/fp-print.c b/libfprint/fp-print.c
+index 9232316..fbc9b02 100644
+--- a/libfprint/fp-print.c
++++ b/libfprint/fp-print.c
+@@ -23,6 +23,7 @@
+ #include "fp-print-private.h"
+ #include "fpi-compat.h"
+ #include "fpi-log.h"
++#include "sigfm/sigfm.hpp"
+ 
+ /**
+  * SECTION: fp-print
+@@ -578,6 +579,42 @@ fp_print_compatible (FpPrint *self, FpDevice *device)
+   return TRUE;
+ }
+ 
++static gboolean
++fp_print_sigfm_info_equal (SigfmImgInfo *a,
++                           SigfmImgInfo *b)
++{
++  g_autofree guchar *a_data = NULL;
++  g_autofree guchar *b_data = NULL;
++  gint a_len = 0;
++  gint b_len = 0;
++
++  if (a == NULL || b == NULL)
++    return FALSE;
++
++  a_data =
++    sigfm_serialize_binary (
++      a,
++      &a_len);
++
++  b_data =
++    sigfm_serialize_binary (
++      b,
++      &b_len);
++
++  if (a_data == NULL ||
++      b_data == NULL ||
++      a_len <= 0 ||
++      b_len <= 0 ||
++      a_len != b_len)
++    return FALSE;
++
++  return memcmp (
++           a_data,
++           b_data,
++           (gsize) a_len) == 0;
++}
++
++
+ /**
+  * fp_print_equal:
+  * @self: First #FpPrint
+@@ -606,33 +643,69 @@ fp_print_equal (FpPrint *self, FpPrint *other)
+     return FALSE;
+ 
+   if (self->type == FPI_PRINT_RAW)
+-    {
+-      return g_variant_equal (self->data, other->data);
+-    }
+-  else if (self->type == FPI_PRINT_NBIS)
+-    {
+-      guint i;
++    return g_variant_equal (self->data, other->data);
+ 
++  if (self->type == FPI_PRINT_NBIS)
++    {
+       if (self->prints->len != other->prints->len)
+         return FALSE;
+ 
+-      for (i = 0; i < self->prints->len; i++)
++      for (guint i = 0;
++           i < self->prints->len;
++           i++)
+         {
+-          struct xyt_struct *a = g_ptr_array_index (self->prints, i);
+-          struct xyt_struct *b = g_ptr_array_index (other->prints, i);
+-
+-          if (memcmp (a, b, sizeof (struct xyt_struct)) != 0)
++          struct xyt_struct *a =
++            g_ptr_array_index (
++              self->prints,
++              i);
++
++          struct xyt_struct *b =
++            g_ptr_array_index (
++              other->prints,
++              i);
++
++          if (memcmp (
++                a,
++                b,
++                sizeof (struct xyt_struct)) != 0)
+             return FALSE;
+         }
+ 
+       return TRUE;
+     }
+-  else
++
++  if (self->type == FPI_PRINT_SIGFM)
+     {
+-      g_assert_not_reached ();
++      if (self->prints == NULL ||
++          other->prints == NULL ||
++          self->prints->len != other->prints->len)
++        return FALSE;
++
++      for (guint i = 0;
++           i < self->prints->len;
++           i++)
++        {
++          SigfmImgInfo *a =
++            g_ptr_array_index (
++              self->prints,
++              i);
++
++          SigfmImgInfo *b =
++            g_ptr_array_index (
++              other->prints,
++              i);
++
++          if (!fp_print_sigfm_info_equal (a, b))
++            return FALSE;
++        }
++
++      return TRUE;
+     }
++
++  g_assert_not_reached ();
+ }
+ 
++
+ #define FPI_PRINT_VARIANT_TYPE G_VARIANT_TYPE ("(issbymsmsia{sv}v)")
+ 
+ G_STATIC_ASSERT (sizeof (((struct xyt_struct *) NULL)->xcol[0]) == 4);
+@@ -656,7 +729,10 @@ fp_print_serialize (FpPrint *print,
+                     GError **error)
+ {
+   g_autoptr(GVariant) result = NULL;
+-  GVariantBuilder builder = G_VARIANT_BUILDER_INIT (FPI_PRINT_VARIANT_TYPE);
++  g_autoptr(GPtrArray) sigfm_blobs = NULL;
++  GVariantBuilder builder =
++    G_VARIANT_BUILDER_INIT (
++      FPI_PRINT_VARIANT_TYPE);
+   gsize len;
+ 
+   g_assert (data);
+@@ -667,59 +743,187 @@ fp_print_serialize (FpPrint *print,
+   g_variant_builder_add (&builder, "s", print->device_id);
+   g_variant_builder_add (&builder, "b", print->device_stored);
+ 
+-  /* Metadata */
+   g_variant_builder_add (&builder, "y", print->finger);
+   g_variant_builder_add (&builder, "ms", print->username);
+   g_variant_builder_add (&builder, "ms", print->description);
+-  if (print->enroll_date && g_date_valid (print->enroll_date))
+-    g_variant_builder_add (&builder, "i", g_date_get_julian (print->enroll_date));
++
++  if (print->enroll_date &&
++      g_date_valid (print->enroll_date))
++    g_variant_builder_add (
++      &builder,
++      "i",
++      g_date_get_julian (
++        print->enroll_date));
+   else
+-    g_variant_builder_add (&builder, "i", G_MININT32);
++    g_variant_builder_add (
++      &builder,
++      "i",
++      G_MININT32);
++
++  g_variant_builder_open (
++    &builder,
++    G_VARIANT_TYPE_VARDICT);
+ 
+-  /* Unused a{sv} for expansion */
+-  g_variant_builder_open (&builder, G_VARIANT_TYPE_VARDICT);
+-  g_variant_builder_close (&builder);
++  g_variant_builder_close (
++    &builder);
+ 
+-  /* Insert NBIS print data for type NBIS, otherwise the GVariant directly */
+   if (print->type == FPI_PRINT_NBIS)
+     {
+-      GVariantBuilder nested = G_VARIANT_BUILDER_INIT (G_VARIANT_TYPE ("(a(aiaiai))"));
+-      guint i;
++      GVariantBuilder nested =
++        G_VARIANT_BUILDER_INIT (
++          G_VARIANT_TYPE ("(a(aiaiai))"));
+ 
+-      g_variant_builder_open (&nested, G_VARIANT_TYPE ("a(aiaiai)"));
+-      for (i = 0; i < print->prints->len; i++)
++      g_variant_builder_open (
++        &nested,
++        G_VARIANT_TYPE ("a(aiaiai)"));
++
++      for (guint i = 0;
++           i < print->prints->len;
++           i++)
+         {
+-          struct xyt_struct *xyt = g_ptr_array_index (print->prints, i);
+-
+-          g_variant_builder_open (&nested, G_VARIANT_TYPE ("(aiaiai)"));
+-
+-          g_variant_builder_add_value (&nested,
+-                                       g_variant_new_fixed_array (G_VARIANT_TYPE_INT32,
+-                                                                  xyt->xcol,
+-                                                                  xyt->nrows,
+-                                                                  sizeof (xyt->xcol[0])));
+-          g_variant_builder_add_value (&nested,
+-                                       g_variant_new_fixed_array (G_VARIANT_TYPE_INT32,
+-                                                                  xyt->ycol,
+-                                                                  xyt->nrows,
+-                                                                  sizeof (xyt->ycol[0])));
+-          g_variant_builder_add_value (&nested,
+-                                       g_variant_new_fixed_array (G_VARIANT_TYPE_INT32,
+-                                                                  xyt->thetacol,
+-                                                                  xyt->nrows,
+-                                                                  sizeof (xyt->thetacol[0])));
+-          g_variant_builder_close (&nested);
++          struct xyt_struct *xyt =
++            g_ptr_array_index (
++              print->prints,
++              i);
++
++          g_variant_builder_open (
++            &nested,
++            G_VARIANT_TYPE ("(aiaiai)"));
++
++          g_variant_builder_add_value (
++            &nested,
++            g_variant_new_fixed_array (
++              G_VARIANT_TYPE_INT32,
++              xyt->xcol,
++              xyt->nrows,
++              sizeof (xyt->xcol[0])));
++
++          g_variant_builder_add_value (
++            &nested,
++            g_variant_new_fixed_array (
++              G_VARIANT_TYPE_INT32,
++              xyt->ycol,
++              xyt->nrows,
++              sizeof (xyt->ycol[0])));
++
++          g_variant_builder_add_value (
++            &nested,
++            g_variant_new_fixed_array (
++              G_VARIANT_TYPE_INT32,
++              xyt->thetacol,
++              xyt->nrows,
++              sizeof (xyt->thetacol[0])));
++
++          g_variant_builder_close (
++            &nested);
+         }
+ 
+-      g_variant_builder_close (&nested);
+-      g_variant_builder_add (&builder, "v", g_variant_builder_end (&nested));
++      g_variant_builder_close (
++        &nested);
++
++      g_variant_builder_add (
++        &builder,
++        "v",
++        g_variant_builder_end (
++          &nested));
++    }
++  else if (print->type == FPI_PRINT_SIGFM)
++    {
++      GVariantBuilder nested =
++        G_VARIANT_BUILDER_INIT (
++          G_VARIANT_TYPE ("(a(ay))"));
++
++      if (print->prints == NULL ||
++          print->prints->len == 0)
++        {
++          g_set_error (
++            error,
++            G_IO_ERROR,
++            G_IO_ERROR_INVALID_DATA,
++            "Cannot serialize empty SIGFM print");
++
++          return FALSE;
++        }
++
++      sigfm_blobs =
++        g_ptr_array_new_with_free_func (
++          g_free);
++
++      g_variant_builder_open (
++        &nested,
++        G_VARIANT_TYPE ("a(ay)"));
++
++      for (guint i = 0;
++           i < print->prints->len;
++           i++)
++        {
++          SigfmImgInfo *info =
++            g_ptr_array_index (
++              print->prints,
++              i);
++
++          gint serialized_len = 0;
++
++          guchar *serialized =
++            sigfm_serialize_binary (
++              info,
++              &serialized_len);
++
++          if (serialized == NULL ||
++              serialized_len <= 0)
++            {
++              g_free (serialized);
++
++              g_set_error (
++                error,
++                G_IO_ERROR,
++                G_IO_ERROR_INVALID_DATA,
++                "Could not serialize SIGFM print");
++
++              return FALSE;
++            }
++
++          g_ptr_array_add (
++            sigfm_blobs,
++            serialized);
++
++          g_variant_builder_open (
++            &nested,
++            G_VARIANT_TYPE ("(ay)"));
++
++          g_variant_builder_add_value (
++            &nested,
++            g_variant_new_fixed_array (
++              G_VARIANT_TYPE_BYTE,
++              serialized,
++              (gsize) serialized_len,
++              sizeof (guchar)));
++
++          g_variant_builder_close (
++            &nested);
++        }
++
++      g_variant_builder_close (
++        &nested);
++
++      g_variant_builder_add (
++        &builder,
++        "v",
++        g_variant_builder_end (
++          &nested));
+     }
+   else
+     {
+-      g_variant_builder_add (&builder, "v", g_variant_new_variant (print->data));
++      g_variant_builder_add (
++        &builder,
++        "v",
++        g_variant_new_variant (
++          print->data));
+     }
+ 
+-  result = g_variant_builder_end (&builder);
++  result =
++    g_variant_builder_end (
++      &builder);
+ 
+ #if (G_BYTE_ORDER == G_BIG_ENDIAN)
+   GVariant *tmp;
+@@ -729,7 +933,6 @@ fp_print_serialize (FpPrint *print,
+ #endif
+ 
+   len = g_variant_get_size (result);
+-  /* Add 3 bytes of header */
+   len += 3;
+ 
+   *data = g_malloc (len);
+@@ -740,11 +943,14 @@ fp_print_serialize (FpPrint *print,
+   (*data)[2] = (guchar) '3';
+ 
+   g_variant_get_data (result);
+-  g_variant_store (result, (*data) + 3);
++  g_variant_store (
++    result,
++    (*data) + 3);
+ 
+   return TRUE;
+ }
+ 
++
+ /**
+  * fp_print_deserialize:
+  * @data: (array length=length): The binary data
+@@ -782,19 +988,23 @@ fp_print_deserialize (const guchar *data,
+   if (memcmp (data, "FP3", 3) != 0)
+     goto invalid_format;
+ 
+-  /* NOTE:
+-   * We make sure that we have no variant left over from the parsing at the end
+-   * of this function (meaning we don't need to keep the data around.
+-   */
++  aligned_data =
++    g_malloc (
++      length - 3);
+ 
+-  /* To support GLIB < 2.60 we need to make sure that the memory is aligned correctly.
+-   * We also need to copy the backing store for the raw data that we may keep for
+-   * longer. */
+-  aligned_data = g_malloc (length - 3);
+-  memcpy (aligned_data, data + 3, length - 3);
+-  raw_value = g_variant_new_from_data (FPI_PRINT_VARIANT_TYPE,
+-                                       aligned_data, length - 3,
+-                                       FALSE, g_free, aligned_data);
++  memcpy (
++    aligned_data,
++    data + 3,
++    length - 3);
++
++  raw_value =
++    g_variant_new_from_data (
++      FPI_PRINT_VARIANT_TYPE,
++      aligned_data,
++      length - 3,
++      FALSE,
++      g_free,
++      aligned_data);
+ 
+   if (!raw_value)
+     goto invalid_format;
+@@ -805,102 +1015,255 @@ fp_print_deserialize (const guchar *data,
+   value = g_variant_get_normal_form (raw_value);
+ #endif
+ 
+-  g_variant_get (value,
+-                 "(i&s&sbymsmsi@a{sv}v)",
+-                 &type,
+-                 &driver,
+-                 &device_id,
+-                 &device_stored,
+-                 &finger_int8,
+-                 &username,
+-                 &description,
+-                 &julian_date,
+-                 NULL,
+-                 &print_data);
++  g_variant_get (
++    value,
++    "(i&s&sbymsmsi@a{sv}v)",
++    &type,
++    &driver,
++    &device_id,
++    &device_stored,
++    &finger_int8,
++    &username,
++    &description,
++    &julian_date,
++    NULL,
++    &print_data);
+ 
+   finger = finger_int8;
+ 
+-  /* Assume data is valid at this point if the values are somewhat sane. */
+   if (type == FPI_PRINT_NBIS)
+     {
+-      g_autoptr(GVariant) prints = g_variant_get_child_value (print_data, 0);
+-      guint i;
+-
+-      result = g_object_new (FP_TYPE_PRINT,
+-                             "driver", driver,
+-                             "device-id", device_id,
+-                             "device-stored", device_stored,
+-                             NULL);
++      g_autoptr(GVariant) prints =
++        g_variant_get_child_value (
++          print_data,
++          0);
++
++      result =
++        g_object_new (
++          FP_TYPE_PRINT,
++          "driver", driver,
++          "device-id", device_id,
++          "device-stored", device_stored,
++          NULL);
++
+       g_object_ref_sink (result);
+-      fpi_print_set_type (result, FPI_PRINT_NBIS);
+-      for (i = 0; i < g_variant_n_children (prints); i++)
++
++      fpi_print_set_type (
++        result,
++        FPI_PRINT_NBIS);
++
++      for (guint i = 0;
++           i < g_variant_n_children (prints);
++           i++)
+         {
+           g_autofree struct xyt_struct *xyt = NULL;
+-          const gint32 *xcol, *ycol, *thetacol;
+-          gsize xlen, ylen, thetalen;
++          const gint32 *xcol;
++          const gint32 *ycol;
++          const gint32 *thetacol;
++          gsize xlen;
++          gsize ylen;
++          gsize thetalen;
+           g_autoptr(GVariant) xyt_data = NULL;
+           GVariant *child;
+ 
+-          xyt_data = g_variant_get_child_value (prints, i);
++          xyt_data =
++            g_variant_get_child_value (
++              prints,
++              i);
++
++          child =
++            g_variant_get_child_value (
++              xyt_data,
++              0);
++
++          xcol =
++            g_variant_get_fixed_array (
++              child,
++              &xlen,
++              sizeof (gint32));
+ 
+-          child = g_variant_get_child_value (xyt_data, 0);
+-          xcol = g_variant_get_fixed_array (child, &xlen, sizeof (gint32));
+           g_variant_unref (child);
+ 
+-          child = g_variant_get_child_value (xyt_data, 1);
+-          ycol = g_variant_get_fixed_array (child, &ylen, sizeof (gint32));
++          child =
++            g_variant_get_child_value (
++              xyt_data,
++              1);
++
++          ycol =
++            g_variant_get_fixed_array (
++              child,
++              &ylen,
++              sizeof (gint32));
++
+           g_variant_unref (child);
+ 
+-          child = g_variant_get_child_value (xyt_data, 2);
+-          thetacol = g_variant_get_fixed_array (child, &thetalen, sizeof (gint32));
++          child =
++            g_variant_get_child_value (
++              xyt_data,
++              2);
++
++          thetacol =
++            g_variant_get_fixed_array (
++              child,
++              &thetalen,
++              sizeof (gint32));
++
+           g_variant_unref (child);
+ 
+-          if (xlen != ylen || xlen != thetalen)
++          if (xlen != ylen ||
++              xlen != thetalen)
+             goto invalid_format;
+ 
+-          if (xlen > G_N_ELEMENTS (xyt->xcol))
++          xyt =
++            g_new0 (
++              struct xyt_struct,
++              1);
++
++          if (xlen >
++              G_N_ELEMENTS (
++                xyt->xcol))
+             goto invalid_format;
+ 
+-          xyt = g_new0 (struct xyt_struct, 1);
+           xyt->nrows = xlen;
+-          memcpy (xyt->xcol, xcol, sizeof (xcol[0]) * xlen);
+-          memcpy (xyt->ycol, ycol, sizeof (xcol[0]) * xlen);
+-          memcpy (xyt->thetacol, thetacol, sizeof (xcol[0]) * xlen);
+ 
+-          g_ptr_array_add (result->prints, g_steal_pointer (&xyt));
++          memcpy (
++            xyt->xcol,
++            xcol,
++            sizeof (xcol[0]) * xlen);
++
++          memcpy (
++            xyt->ycol,
++            ycol,
++            sizeof (ycol[0]) * xlen);
++
++          memcpy (
++            xyt->thetacol,
++            thetacol,
++            sizeof (thetacol[0]) * xlen);
++
++          g_ptr_array_add (
++            result->prints,
++            g_steal_pointer (&xyt));
++        }
++    }
++  else if (type == FPI_PRINT_SIGFM)
++    {
++      g_autoptr(GVariant) prints =
++        g_variant_get_child_value (
++          print_data,
++          0);
++
++      if (g_variant_n_children (prints) == 0)
++        goto invalid_format;
++
++      result =
++        g_object_new (
++          FP_TYPE_PRINT,
++          "driver", driver,
++          "device-id", device_id,
++          "device-stored", device_stored,
++          NULL);
++
++      g_object_ref_sink (result);
++
++      fpi_print_set_type (
++        result,
++        FPI_PRINT_SIGFM);
++
++      for (guint i = 0;
++           i < g_variant_n_children (prints);
++           i++)
++        {
++          g_autoptr(GVariant) wrapper = NULL;
++          GVariant *child;
++          gsize serialized_len = 0;
++          const guchar *serialized;
++          SigfmImgInfo *info;
++
++          wrapper =
++            g_variant_get_child_value (
++              prints,
++              i);
++
++          child =
++            g_variant_get_child_value (
++              wrapper,
++              0);
++
++          serialized =
++            g_variant_get_fixed_array (
++              child,
++              &serialized_len,
++              sizeof (guchar));
++
++          g_variant_unref (child);
++
++          if (serialized == NULL ||
++              serialized_len == 0 ||
++              serialized_len > G_MAXINT)
++            goto invalid_format;
++
++          info =
++            sigfm_deserialize_binary (
++              serialized,
++              (gint) serialized_len);
++
++          if (info == NULL)
++            goto invalid_format;
++
++          g_ptr_array_add (
++            result->prints,
++            info);
+         }
+     }
+   else if (type == FPI_PRINT_RAW)
+     {
+-      g_autoptr(GVariant) fp_data = g_variant_get_child_value (print_data, 0);
+-
+-      result = g_object_new (FP_TYPE_PRINT,
+-                             "fpi-type", type,
+-                             "driver", driver,
+-                             "device-id", device_id,
+-                             "device-stored", device_stored,
+-                             "fpi-data", fp_data,
+-                             NULL);
++      g_autoptr(GVariant) fp_data =
++        g_variant_get_child_value (
++          print_data,
++          0);
++
++      result =
++        g_object_new (
++          FP_TYPE_PRINT,
++          "fpi-type", type,
++          "driver", driver,
++          "device-id", device_id,
++          "device-stored", device_stored,
++          "fpi-data", fp_data,
++          NULL);
++
+       g_object_ref_sink (result);
+     }
+   else
+     {
+-      g_warning ("Invalid print type: 0x%X", type);
++      g_warning (
++        "Invalid print type: 0x%X",
++        type);
++
+       goto invalid_format;
+     }
+ 
+-  date = g_date_new_julian (julian_date);
+-  g_object_set (result,
+-                "finger", finger,
+-                "username", username,
+-                "description", description,
+-                "enroll_date", date,
+-                NULL);
++  date =
++    g_date_new_julian (
++      julian_date);
++
++  g_object_set (
++    result,
++    "finger", finger,
++    "username", username,
++    "description", description,
++    "enroll_date", date,
++    NULL);
+ 
+   return g_steal_pointer (&result);
+ 
+ invalid_format:
+-  g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+-               "Data could not be parsed");
++  g_set_error (
++    error,
++    G_IO_ERROR,
++    G_IO_ERROR_INVALID_DATA,
++    "Data could not be parsed");
++
+   return NULL;
+ }
+diff --git a/libfprint/fpi-image-device.c b/libfprint/fpi-image-device.c
+index 8184d3a..bda72c8 100644
+--- a/libfprint/fpi-image-device.c
++++ b/libfprint/fpi-image-device.c
+@@ -21,6 +21,7 @@
+ #include "fpi-log.h"
+ 
+ #include "fp-image-device-private.h"
++#include "fpi-image.h"
+ #include "fp-image-device.h"
+ 
+ /**
+@@ -232,60 +233,184 @@ fp_image_device_maybe_complete_action (FpImageDevice *self, GError *error)
+     }
+ }
+ 
++static FpiPrintType
++fp_image_device_algorithm_print_type (FpImageDeviceClass *cls)
++{
++  if (cls->algorithm ==
++      FPI_IMAGE_DEVICE_ALGORITHM_SIGFM)
++    return FPI_PRINT_SIGFM;
++
++  return FPI_PRINT_NBIS;
++}
++
++
++static FpiMatchResult
++fp_image_device_match_print (FpImageDevice *self,
++                             FpPrint       *template,
++                             FpPrint       *print,
++                             GError       **error)
++{
++  FpImageDeviceClass *cls =
++    FP_IMAGE_DEVICE_GET_CLASS (self);
++
++  FpImageDevicePrivate *priv =
++    fp_image_device_get_instance_private (
++      self);
++
++  if (cls->algorithm ==
++      FPI_IMAGE_DEVICE_ALGORITHM_SIGFM)
++    {
++      if (cls->sigfm_threshold <= 0)
++        {
++          if (error != NULL)
++            *error =
++              fpi_device_error_new_msg (
++                FP_DEVICE_ERROR_GENERAL,
++                "SIGFM selected without a configured threshold");
++
++          return FPI_MATCH_ERROR;
++        }
++
++      return
++        fpi_print_sigfm_match (
++          template,
++          print,
++          cls->sigfm_threshold,
++          error);
++    }
++
++  return
++    fpi_print_bz3_match (
++      template,
++      print,
++      priv->bz3_threshold,
++      error);
++}
++
++
+ static void
+-fpi_image_device_minutiae_detected (GObject *source_object, GAsyncResult *res, gpointer user_data)
++fpi_image_device_features_detected (GObject      *source_object,
++                                    GAsyncResult *res,
++                                    gpointer      user_data)
+ {
+-  g_autoptr(FpImage) image = FP_IMAGE (source_object);
++  g_autoptr(FpImage) image =
++    FP_IMAGE (source_object);
++
+   g_autoptr(FpPrint) print = NULL;
+   GError *error = NULL;
+-  FpImageDevice *self = FP_IMAGE_DEVICE (user_data);
+-  FpDevice *device = FP_DEVICE (self);
++
++  FpImageDevice *self =
++    FP_IMAGE_DEVICE (user_data);
++
++  FpDevice *device =
++    FP_DEVICE (self);
++
++  FpImageDeviceClass *cls =
++    FP_IMAGE_DEVICE_GET_CLASS (self);
++
+   FpImageDevicePrivate *priv;
++
+   FpiDeviceAction action;
+ 
+-  /* Note: We rely on the device to not disappear during an operation. */
+-  priv = fp_image_device_get_instance_private (FP_IMAGE_DEVICE (device));
++  priv =
++    fp_image_device_get_instance_private (
++      self);
++
+   priv->minutiae_scan_active = FALSE;
+ 
+-  if (!fp_image_detect_minutiae_finish (image, res, &error))
+-    {
+-      /* Cancel operation . */
+-      if (g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
++  gboolean extraction_ok;
++
++  if (cls->algorithm ==
++      FPI_IMAGE_DEVICE_ALGORITHM_SIGFM)
++    extraction_ok =
++      fpi_image_extract_sigfm_finish (
++        image,
++        res,
++        &error);
++  else
++    extraction_ok =
++      fp_image_detect_minutiae_finish (
++        image,
++        res,
++        &error);
++
++  if (!extraction_ok)
++    {
++      if (g_error_matches (
++            error,
++            G_IO_ERROR,
++            G_IO_ERROR_CANCELLED))
+         {
+-          fp_image_device_maybe_complete_action (self, g_steal_pointer (&error));
+-          fpi_image_device_deactivate (self, TRUE);
++          fp_image_device_maybe_complete_action (
++            self,
++            g_steal_pointer (&error));
++
++          fpi_image_device_deactivate (
++            self,
++            TRUE);
++
+           return;
+         }
+ 
+-      /* Replace error with a retry condition. */
+-      g_warning ("Failed to detect minutiae: %s", error->message);
+-      g_clear_pointer (&error, g_error_free);
++      g_warning (
++        "Failed to extract fingerprint features: %s",
++        error->message);
++
++      g_clear_pointer (
++        &error,
++        g_error_free);
+ 
+-      error = fpi_device_retry_new_msg (FP_DEVICE_RETRY_GENERAL, "Minutiae detection failed, please retry");
++      error =
++        fpi_device_retry_new_msg (
++          FP_DEVICE_RETRY_GENERAL,
++          "Fingerprint feature extraction failed, please retry");
+     }
+ 
+-  action = fpi_device_get_current_action (device);
++  action =
++    fpi_device_get_current_action (
++      device);
+ 
+   if (action == FPI_DEVICE_ACTION_CAPTURE)
+     {
+-      priv->capture_image = g_steal_pointer (&image);
+-      fp_image_device_maybe_complete_action (self, g_steal_pointer (&error));
++      priv->capture_image =
++        g_steal_pointer (&image);
++
++      fp_image_device_maybe_complete_action (
++        self,
++        g_steal_pointer (&error));
++
+       return;
+     }
+ 
+   if (!error)
+     {
+-      print = fp_print_new (device);
+-      fpi_print_set_type (print, FPI_PRINT_NBIS);
+-      if (!fpi_print_add_from_image (print, image, &error))
++      print =
++        fp_print_new (
++          device);
++
++      fpi_print_set_type (
++        print,
++        fp_image_device_algorithm_print_type (
++          cls));
++
++      if (!fpi_print_add_from_image (
++            print,
++            image,
++            &error))
+         {
+-          g_clear_object (&print);
++          g_clear_object (
++            &print);
+ 
+           if (error->domain != FP_DEVICE_RETRY)
+             {
+-              fp_image_device_maybe_complete_action (self, g_steal_pointer (&error));
+-              /* We might not yet be deactivating, if we are enrolling. */
+-              fpi_image_device_deactivate (self, TRUE);
++              fp_image_device_maybe_complete_action (
++                self,
++                g_steal_pointer (&error));
++
++              fpi_image_device_deactivate (
++                self,
++                TRUE);
++
+               return;
+             }
+         }
+@@ -294,26 +419,42 @@ fpi_image_device_minutiae_detected (GObject *source_object, GAsyncResult *res, g
+   if (action == FPI_DEVICE_ACTION_ENROLL)
+     {
+       FpPrint *enroll_print;
+-      fpi_device_get_enroll_data (device, &enroll_print);
++
++      fpi_device_get_enroll_data (
++        device,
++        &enroll_print);
+ 
+       if (print)
+         {
+-          fpi_print_add_print (enroll_print, print);
++          fpi_print_add_print (
++            enroll_print,
++            print);
++
+           priv->enroll_stage += 1;
+         }
+ 
+-      fpi_device_enroll_progress (device, priv->enroll_stage,
+-                                  g_steal_pointer (&print), error);
++      fpi_device_enroll_progress (
++        device,
++        priv->enroll_stage,
++        g_steal_pointer (&print),
++        error);
+ 
+-      /* Start another scan or deactivate. */
+-      if (priv->enroll_stage == fp_device_get_nr_enroll_stages (device))
++      if (priv->enroll_stage ==
++          fp_device_get_nr_enroll_stages (
++            device))
+         {
+-          fp_image_device_maybe_complete_action (self, g_steal_pointer (&error));
+-          fpi_image_device_deactivate (self, FALSE);
++          fp_image_device_maybe_complete_action (
++            self,
++            g_steal_pointer (&error));
++
++          fpi_image_device_deactivate (
++            self,
++            FALSE);
+         }
+       else
+         {
+-          fp_image_device_enroll_maybe_await_finger_on (FP_IMAGE_DEVICE (device));
++          fp_image_device_enroll_maybe_await_finger_on (
++            self);
+         }
+     }
+   else if (action == FPI_DEVICE_ACTION_VERIFY)
+@@ -321,52 +462,82 @@ fpi_image_device_minutiae_detected (GObject *source_object, GAsyncResult *res, g
+       FpPrint *template;
+       FpiMatchResult result;
+ 
+-      fpi_device_get_verify_data (device, &template);
++      fpi_device_get_verify_data (
++        device,
++        &template);
++
+       if (print)
+-        result = fpi_print_bz3_match (template, print, priv->bz3_threshold, &error);
++        result =
++          fp_image_device_match_print (
++            self,
++            template,
++            print,
++            &error);
+       else
+-        result = FPI_MATCH_ERROR;
++        result =
++          FPI_MATCH_ERROR;
+ 
+-      if (!error || error->domain == FP_DEVICE_RETRY)
+-        fpi_device_verify_report (device, result, g_steal_pointer (&print), g_steal_pointer (&error));
++      if (!error ||
++          error->domain == FP_DEVICE_RETRY)
++        fpi_device_verify_report (
++          device,
++          result,
++          g_steal_pointer (&print),
++          g_steal_pointer (&error));
+ 
+-      fp_image_device_maybe_complete_action (self, g_steal_pointer (&error));
++      fp_image_device_maybe_complete_action (
++        self,
++        g_steal_pointer (&error));
+     }
+   else if (action == FPI_DEVICE_ACTION_IDENTIFY)
+     {
+-      gint i;
+       GPtrArray *templates;
+       FpPrint *result = NULL;
+ 
+-      fpi_device_get_identify_data (device, &templates);
+-      for (i = 0; !error && i < templates->len; i++)
+-        {
+-          FpPrint *template = g_ptr_array_index (templates, i);
++      fpi_device_get_identify_data (
++        device,
++        &templates);
+ 
+-          if (fpi_print_bz3_match (template, print, priv->bz3_threshold, &error) == FPI_MATCH_SUCCESS)
++      for (guint i = 0;
++           !error && i < templates->len;
++           i++)
++        {
++          FpPrint *template =
++            g_ptr_array_index (
++              templates,
++              i);
++
++          if (fp_image_device_match_print (
++                self,
++                template,
++                print,
++                &error)
++              == FPI_MATCH_SUCCESS)
+             {
+               result = template;
+               break;
+             }
+         }
+ 
+-      if (!error || error->domain == FP_DEVICE_RETRY)
+-        fpi_device_identify_report (device, result, g_steal_pointer (&print), g_steal_pointer (&error));
++      if (!error ||
++          error->domain == FP_DEVICE_RETRY)
++        fpi_device_identify_report (
++          device,
++          result,
++          g_steal_pointer (&print),
++          g_steal_pointer (&error));
+ 
+-      fp_image_device_maybe_complete_action (self, g_steal_pointer (&error));
++      fp_image_device_maybe_complete_action (
++        self,
++        g_steal_pointer (&error));
+     }
+   else
+     {
+-      /* XXX: This can be hit currently due to a race condition in the enroll code!
+-       *      In that case we scan a further image even though the minutiae for the previous
+-       *      one have not yet been detected.
+-       *      We need to keep track on the pending minutiae detection and the fact that
+-       *      it will finish eventually (or we may need to retry on error and activate the
+-       *      device again). */
+       g_assert_not_reached ();
+     }
+ }
+ 
++
+ /*********************************************************/
+ /* Private API */
+ 
+@@ -476,35 +647,65 @@ fpi_image_device_report_finger_status (FpImageDevice *self,
+  * one session.
+  */
+ void
+-fpi_image_device_image_captured (FpImageDevice *self, FpImage *image)
++fpi_image_device_image_captured (FpImageDevice *self,
++                                 FpImage       *image)
+ {
+-  FpImageDevicePrivate *priv = fp_image_device_get_instance_private (self);
+-  FpiDeviceAction action;
++  FpImageDevicePrivate *priv =
++    fp_image_device_get_instance_private (
++      self);
+ 
+-  action = fpi_device_get_current_action (FP_DEVICE (self));
++  FpImageDeviceClass *cls =
++    FP_IMAGE_DEVICE_GET_CLASS (
++      self);
+ 
+-  g_return_if_fail (image != NULL);
+-  g_return_if_fail (priv->state == FPI_IMAGE_DEVICE_STATE_CAPTURE);
+-  g_return_if_fail (action == FPI_DEVICE_ACTION_ENROLL ||
+-                    action == FPI_DEVICE_ACTION_VERIFY ||
+-                    action == FPI_DEVICE_ACTION_IDENTIFY ||
+-                    action == FPI_DEVICE_ACTION_CAPTURE);
++  FpiDeviceAction action =
++    fpi_device_get_current_action (
++      FP_DEVICE (self));
++
++  g_return_if_fail (
++    image != NULL);
++
++  g_return_if_fail (
++    priv->state ==
++      FPI_IMAGE_DEVICE_STATE_CAPTURE);
+ 
+-  g_debug ("Image device captured an image");
++  g_return_if_fail (
++    action == FPI_DEVICE_ACTION_ENROLL ||
++    action == FPI_DEVICE_ACTION_VERIFY ||
++    action == FPI_DEVICE_ACTION_IDENTIFY ||
++    action == FPI_DEVICE_ACTION_CAPTURE);
++
++  g_debug (
++    "Image device captured an image");
+ 
+   priv->minutiae_scan_active = TRUE;
+ 
+-  /* XXX: We also detect minutiae in capture mode, we solely do this
+-   *      to normalize the image which will happen as a by-product. */
+-  fp_image_detect_minutiae (image,
+-                            fpi_device_get_cancellable (FP_DEVICE (self)),
+-                            fpi_image_device_minutiae_detected,
+-                            self);
++  if (cls->algorithm ==
++      FPI_IMAGE_DEVICE_ALGORITHM_SIGFM)
++    {
++      fpi_image_extract_sigfm (
++        image,
++        fpi_device_get_cancellable (
++          FP_DEVICE (self)),
++        fpi_image_device_features_detected,
++        self);
++    }
++  else
++    {
++      fp_image_detect_minutiae (
++        image,
++        fpi_device_get_cancellable (
++          FP_DEVICE (self)),
++        fpi_image_device_features_detected,
++        self);
++    }
+ 
+-  /* XXX: This is wrong if we add support for raw capture mode. */
+-  fp_image_device_change_state (self, FPI_IMAGE_DEVICE_STATE_AWAIT_FINGER_OFF);
++  fp_image_device_change_state (
++    self,
++    FPI_IMAGE_DEVICE_STATE_AWAIT_FINGER_OFF);
+ }
+ 
++
+ /**
+  * fpi_image_device_retry_scan:
+  * @self: a #FpImageDevice imaging fingerprint device
+diff --git a/libfprint/fpi-image-device.h b/libfprint/fpi-image-device.h
+index 71472db..c31185b 100644
+--- a/libfprint/fpi-image-device.h
++++ b/libfprint/fpi-image-device.h
+@@ -70,6 +70,19 @@ typedef enum {
+   FPI_IMAGE_DEVICE_STATE_AWAIT_FINGER_OFF,
+ } FpiImageDeviceState;
+ 
++/**
++ * FpiImageDeviceAlgorithm:
++ * @FPI_IMAGE_DEVICE_ALGORITHM_NBIS: use NBIS/Bozorth3
++ * @FPI_IMAGE_DEVICE_ALGORITHM_SIGFM: use SIGFM
++ *
++ * Zero is deliberately NBIS so existing image drivers remain
++ * unchanged unless they explicitly opt into SIGFM.
++ */
++typedef enum {
++  FPI_IMAGE_DEVICE_ALGORITHM_NBIS = 0,
++  FPI_IMAGE_DEVICE_ALGORITHM_SIGFM,
++} FpiImageDeviceAlgorithm;
++
+ /**
+  * FpImageDeviceClass:
+  * @bz3_threshold: Threshold to consider bozorth3 score a match, default: 40
+@@ -104,9 +117,11 @@ struct _FpImageDeviceClass
+ {
+   FpDeviceClass parent_class;
+ 
+-  gint          bz3_threshold;
+-  gint          img_width;
+-  gint          img_height;
++  gint                    bz3_threshold;
++  gint                    img_width;
++  gint                    img_height;
++  FpiImageDeviceAlgorithm algorithm;
++  gint                    sigfm_threshold;
+ 
+   void          (*img_open)     (FpImageDevice *dev);
+   void          (*img_close)    (FpImageDevice *dev);
+diff --git a/libfprint/fpi-image.c b/libfprint/fpi-image.c
+index 98f412a..e4e1af3 100644
+--- a/libfprint/fpi-image.c
++++ b/libfprint/fpi-image.c
+@@ -25,6 +25,7 @@
+ 
+ #include <nbis.h>
+ #include <config.h>
++#include <gio/gio.h>
+ 
+ #ifdef HAVE_PIXMAN
+ #include <pixman.h>
+@@ -152,3 +153,414 @@ fpi_image_resize (FpImage *orig_img,
+   return g_object_ref (orig_img);
+ #endif
+ }
++
++
++#define SIGFM_MIN_MATCHABLE_KEYPOINTS 5
++
++
++typedef struct
++{
++  SigfmImgInfo  *sigfm_info;
++  FpiImageFlags  flags;
++  guint8        *image;
++  gboolean       image_changed;
++} FpiSigfmExtractData;
++
++
++static void
++fpi_sigfm_extract_data_free (FpiSigfmExtractData *data)
++{
++  g_clear_pointer (
++    &data->sigfm_info,
++    sigfm_free_info);
++
++  if (data->image_changed)
++    g_clear_pointer (
++      &data->image,
++      g_free);
++
++  g_free (data);
++}
++
++
++G_DEFINE_AUTOPTR_CLEANUP_FUNC (
++  FpiSigfmExtractData,
++  fpi_sigfm_extract_data_free)
++
++
++static void
++fpi_sigfm_hflip (guint8 *data,
++                 guint   width,
++                 guint   height)
++{
++  for (guint y = 0;
++       y < height;
++       y++)
++    {
++      for (guint x = 0;
++           x < width / 2;
++           x++)
++        {
++          const gsize left =
++            (gsize) y * width + x;
++
++          const gsize right =
++            (gsize) y * width +
++            (width - 1 - x);
++
++          const guint8 tmp =
++            data[left];
++
++          data[left] =
++            data[right];
++
++          data[right] =
++            tmp;
++        }
++    }
++}
++
++
++static void
++fpi_sigfm_vflip (guint8 *data,
++                 guint   width,
++                 guint   height)
++{
++  g_autofree guint8 *row =
++    g_malloc (width);
++
++  for (guint y = 0;
++       y < height / 2;
++       y++)
++    {
++      const gsize top =
++        (gsize) y * width;
++
++      const gsize bottom =
++        (gsize) (height - 1 - y) *
++        width;
++
++      memcpy (
++        row,
++        data + top,
++        width);
++
++      memcpy (
++        data + top,
++        data + bottom,
++        width);
++
++      memcpy (
++        data + bottom,
++        row,
++        width);
++    }
++}
++
++
++static void
++fpi_sigfm_invert (guint8 *data,
++                  guint   width,
++                  guint   height)
++{
++  const gsize len =
++    (gsize) width * height;
++
++  for (gsize i = 0;
++       i < len;
++       i++)
++    data[i] =
++      0xffU - data[i];
++}
++
++
++static void
++fpi_sigfm_extract_thread (GTask        *task,
++                          gpointer      source_object,
++                          gpointer      task_data,
++                          GCancellable *cancellable)
++{
++  g_autoptr(GTimer) timer = NULL;
++  g_autoptr(FpiSigfmExtractData) ret_data = NULL;
++  g_autoptr(GTask) thread_task =
++    g_steal_pointer (&task);
++
++  FpImage *self =
++    FP_IMAGE (source_object);
++
++  const FpiImageFlags transform_flags =
++    FPI_IMAGE_H_FLIPPED |
++    FPI_IMAGE_V_FLIPPED |
++    FPI_IMAGE_COLORS_INVERTED;
++
++  const FpiImageFlags normalized_flags =
++    self->flags & ~transform_flags;
++
++  guint8 *image =
++    self->data;
++
++  (void) task_data;
++  (void) cancellable;
++
++  if ((self->flags &
++       transform_flags) != 0)
++    image =
++      g_memdup2 (
++        self->data,
++        (gsize) self->width *
++        self->height);
++
++  ret_data =
++    g_new0 (
++      FpiSigfmExtractData,
++      1);
++
++  ret_data->flags =
++    normalized_flags;
++
++  ret_data->image =
++    image;
++
++  ret_data->image_changed =
++    image != self->data;
++
++  if (self->flags &
++      FPI_IMAGE_H_FLIPPED)
++    fpi_sigfm_hflip (
++      image,
++      self->width,
++      self->height);
++
++  if (self->flags &
++      FPI_IMAGE_V_FLIPPED)
++    fpi_sigfm_vflip (
++      image,
++      self->width,
++      self->height);
++
++  if (self->flags &
++      FPI_IMAGE_COLORS_INVERTED)
++    fpi_sigfm_invert (
++      image,
++      self->width,
++      self->height);
++
++  timer =
++    g_timer_new ();
++
++  ret_data->sigfm_info =
++    sigfm_extract (
++      image,
++      self->width,
++      self->height);
++
++  g_timer_stop (
++    timer);
++
++  fp_dbg (
++    "SIGFM extraction completed in %f secs",
++    g_timer_elapsed (
++      timer,
++      NULL));
++
++  if (g_task_had_error (
++        thread_task))
++    return;
++
++  if (ret_data->sigfm_info == NULL)
++    {
++      g_task_return_new_error (
++        thread_task,
++        G_IO_ERROR,
++        G_IO_ERROR_FAILED,
++        "SIGFM extraction failed");
++
++      return;
++    }
++
++  if (sigfm_keypoints_count (
++        ret_data->sigfm_info)
++      < SIGFM_MIN_MATCHABLE_KEYPOINTS)
++    {
++      g_task_return_new_error (
++        thread_task,
++        G_IO_ERROR,
++        G_IO_ERROR_FAILED,
++        "Not enough SIGFM keypoints for matching");
++
++      return;
++    }
++
++  g_task_return_pointer (
++    thread_task,
++    g_steal_pointer (&ret_data),
++    (GDestroyNotify)
++      fpi_sigfm_extract_data_free);
++}
++
++
++static gboolean
++fpi_sigfm_extract_finish_data (FpImage *self,
++                               GTask   *task,
++                               GError **error)
++{
++  g_autoptr(FpiSigfmExtractData) data = NULL;
++
++  data =
++    g_task_propagate_pointer (
++      task,
++      error);
++
++  if (data == NULL)
++    return FALSE;
++
++  self->flags =
++    data->flags;
++
++  if (data->image_changed)
++    {
++      g_clear_pointer (
++        &self->data,
++        g_free);
++
++      self->data =
++        g_steal_pointer (
++          &data->image);
++    }
++
++  g_clear_pointer (
++    &self->binarized,
++    g_free);
++
++  g_clear_pointer (
++    &self->minutiae,
++    g_ptr_array_unref);
++
++  g_clear_pointer (
++    &self->sigfm_info,
++    sigfm_free_info);
++
++  self->sigfm_info =
++    g_steal_pointer (
++      &data->sigfm_info);
++
++  return TRUE;
++}
++
++
++SigfmImgInfo *
++fpi_image_get_sigfm_info (FpImage *self)
++{
++  g_return_val_if_fail (
++    FP_IS_IMAGE (self),
++    NULL);
++
++  return self->sigfm_info;
++}
++
++
++void
++fpi_image_extract_sigfm (FpImage            *self,
++                         GCancellable       *cancellable,
++                         GAsyncReadyCallback callback,
++                         gpointer            user_data)
++{
++  g_autoptr(GTask) task = NULL;
++
++  g_return_if_fail (
++    FP_IS_IMAGE (self));
++
++  g_return_if_fail (
++    callback != NULL);
++
++  task =
++    g_task_new (
++      self,
++      cancellable,
++      callback,
++      user_data);
++
++  g_task_set_source_tag (
++    task,
++    fpi_image_extract_sigfm);
++
++  g_task_set_check_cancellable (
++    task,
++    TRUE);
++
++  if (!g_atomic_int_compare_and_exchange (
++        &self->detection_in_progress,
++        FALSE,
++        TRUE))
++    {
++      g_task_return_new_error (
++        task,
++        G_IO_ERROR,
++        G_IO_ERROR_ADDRESS_IN_USE,
++        "Fingerprint feature detection is already in progress");
++
++      return;
++    }
++
++  g_task_run_in_thread (
++    g_steal_pointer (&task),
++    fpi_sigfm_extract_thread);
++}
++
++
++gboolean
++fpi_image_extract_sigfm_finish (FpImage      *self,
++                                GAsyncResult *result,
++                                GError      **error)
++{
++  GTask *task;
++  gboolean changed;
++
++  g_return_val_if_fail (
++    FP_IS_IMAGE (self),
++    FALSE);
++
++  g_return_val_if_fail (
++    g_task_is_valid (
++      result,
++      self),
++    FALSE);
++
++  g_return_val_if_fail (
++    g_task_get_source_tag (
++      G_TASK (result))
++      == fpi_image_extract_sigfm,
++    FALSE);
++
++  task =
++    G_TASK (result);
++
++  changed =
++    g_atomic_int_compare_and_exchange (
++      &self->detection_in_progress,
++      TRUE,
++      FALSE);
++
++  g_assert (
++    changed);
++
++  if (g_task_had_error (
++        task))
++    {
++      gpointer data =
++        g_task_propagate_pointer (
++          task,
++          error);
++
++      g_assert (
++        data == NULL);
++
++      return FALSE;
++    }
++
++  return
++    fpi_sigfm_extract_finish_data (
++      self,
++      task,
++      error);
++}
+diff --git a/libfprint/fpi-image.h b/libfprint/fpi-image.h
+index 0c703fb..6791da6 100644
+--- a/libfprint/fpi-image.h
++++ b/libfprint/fpi-image.h
+@@ -21,6 +21,7 @@
+ #pragma once
+ 
+ #include "fp-image.h"
++#include "sigfm/sigfm.hpp"
+ 
+ /**
+  * FpiImageFlags:
+@@ -67,11 +68,23 @@ struct _FpImage
+   guint8    *data;
+   guint8    *binarized;
+ 
+-  GPtrArray *minutiae;
++  GPtrArray    *minutiae;
++  SigfmImgInfo *sigfm_info;
+ 
+-  gboolean   detection_in_progress;
++  gboolean      detection_in_progress;
+ };
+ 
++SigfmImgInfo *fpi_image_get_sigfm_info (FpImage *self);
++
++void fpi_image_extract_sigfm (FpImage            *self,
++                              GCancellable       *cancellable,
++                              GAsyncReadyCallback callback,
++                              gpointer            user_data);
++
++gboolean fpi_image_extract_sigfm_finish (FpImage      *self,
++                                         GAsyncResult *result,
++                                         GError      **error);
++
+ gint fpi_std_sq_dev (const guint8 *buf,
+                      gint          size);
+ gint fpi_mean_sq_diff_norm (const guint8 *buf1,
+diff --git a/libfprint/fpi-print.c b/libfprint/fpi-print.c
+index 00289b4..e4156fa 100644
+--- a/libfprint/fpi-print.c
++++ b/libfprint/fpi-print.c
+@@ -23,7 +23,9 @@
+ 
+ #include "fp-print-private.h"
+ #include "fpi-device.h"
++#include "fpi-image.h"
+ #include "fpi-compat.h"
++#include "sigfm/sigfm.hpp"
+ 
+ /**
+  * SECTION: fpi-print
+@@ -34,6 +36,14 @@
+  * #FpPrint routines.
+  */
+ 
++static void
++fpi_sigfm_info_free (gpointer data)
++{
++  if (data != NULL)
++    sigfm_free_info ((SigfmImgInfo *) data);
++}
++
++
+ /**
+  * fpi_print_add_print:
+  * @print: A #FpPrint
+@@ -46,13 +56,30 @@
+ void
+ fpi_print_add_print (FpPrint *print, FpPrint *add)
+ {
+-  g_return_if_fail (print->type == FPI_PRINT_NBIS);
+-  g_return_if_fail (add->type == FPI_PRINT_NBIS);
++  gpointer copy = NULL;
++
++  g_return_if_fail (print->type == FPI_PRINT_NBIS ||
++                    print->type == FPI_PRINT_SIGFM);
++  g_return_if_fail (add->type == print->type);
++  g_return_if_fail (add->prints != NULL);
++  g_return_if_fail (add->prints->len == 1);
++
++  if (print->type == FPI_PRINT_NBIS)
++    copy =
++      g_memdup2 (
++        add->prints->pdata[0],
++        sizeof (struct xyt_struct));
++  else
++    copy =
++      sigfm_copy_info (
++        (SigfmImgInfo *) add->prints->pdata[0]);
+ 
+-  g_assert (add->prints->len == 1);
+-  g_ptr_array_add (print->prints, g_memdup2 (add->prints->pdata[0], sizeof (struct xyt_struct)));
++  g_return_if_fail (copy != NULL);
++
++  g_ptr_array_add (print->prints, copy);
+ }
+ 
++
+ /**
+  * fpi_print_set_type:
+  * @print: A #FpPrint
+@@ -67,18 +94,30 @@ fpi_print_set_type (FpPrint     *print,
+                     FpiPrintType type)
+ {
+   g_return_if_fail (FP_IS_PRINT (print));
+-  /* We only allow setting this once! */
+   g_return_if_fail (print->type == FPI_PRINT_UNDEFINED);
+ 
+   print->type = type;
++
+   if (print->type == FPI_PRINT_NBIS)
+     {
+       g_assert_null (print->prints);
+-      print->prints = g_ptr_array_new_with_free_func (g_free);
++      print->prints =
++        g_ptr_array_new_with_free_func (g_free);
++    }
++  else if (print->type == FPI_PRINT_SIGFM)
++    {
++      g_assert_null (print->prints);
++      print->prints =
++        g_ptr_array_new_with_free_func (
++          fpi_sigfm_info_free);
+     }
+-  g_object_notify (G_OBJECT (print), "fpi-type");
++
++  g_object_notify (
++    G_OBJECT (print),
++    "fpi-type");
+ }
+ 
++
+ /**
+  * fpi_print_set_device_stored:
+  * @print: A #FpPrint
+@@ -156,44 +195,120 @@ fpi_print_add_from_image (FpPrint *print,
+                           FpImage *image,
+                           GError **error)
+ {
+-  GPtrArray *minutiae;
+-  struct fp_minutiae _minutiae;
+-  struct xyt_struct *xyt;
+-
+-  if (print->type != FPI_PRINT_NBIS || !image)
++  if (image == NULL ||
++      (print->type != FPI_PRINT_NBIS &&
++       print->type != FPI_PRINT_SIGFM))
+     {
+-      g_set_error (error,
+-                   G_IO_ERROR,
+-                   G_IO_ERROR_INVALID_DATA,
+-                   "Cannot add print data from image!");
++      g_set_error (
++        error,
++        G_IO_ERROR,
++        G_IO_ERROR_INVALID_DATA,
++        "Cannot add print data from image!");
++
+       return FALSE;
+     }
+ 
+-  minutiae = fp_image_get_minutiae (image);
+-  if (!minutiae || minutiae->len == 0)
++  if (print->type == FPI_PRINT_NBIS)
+     {
+-      g_set_error (error,
+-                   G_IO_ERROR,
+-                   G_IO_ERROR_INVALID_DATA,
+-                   "No minutiae found in image or not yet detected!");
+-      return FALSE;
++      GPtrArray *minutiae;
++      struct fp_minutiae wrapped_minutiae;
++      struct xyt_struct *xyt;
++
++      minutiae =
++        fp_image_get_minutiae (
++          image);
++
++      if (minutiae == NULL ||
++          minutiae->len == 0)
++        {
++          g_set_error (
++            error,
++            G_IO_ERROR,
++            G_IO_ERROR_INVALID_DATA,
++            "No minutiae found in image or not yet detected!");
++
++          return FALSE;
++        }
++
++      wrapped_minutiae.num =
++        minutiae->len;
++
++      wrapped_minutiae.list =
++        (struct fp_minutia **)
++          minutiae->pdata;
++
++      wrapped_minutiae.alloc =
++        minutiae->len;
++
++      xyt =
++        g_new0 (
++          struct xyt_struct,
++          1);
++
++      minutiae_to_xyt (
++        &wrapped_minutiae,
++        image->width,
++        image->height,
++        xyt);
++
++      g_ptr_array_add (
++        print->prints,
++        xyt);
++    }
++  else
++    {
++      SigfmImgInfo *info =
++        fpi_image_get_sigfm_info (
++          image);
++
++      SigfmImgInfo *copy;
++
++      if (info == NULL)
++        {
++          g_set_error (
++            error,
++            G_IO_ERROR,
++            G_IO_ERROR_INVALID_DATA,
++            "No SIGFM data found in image or not yet extracted!");
++
++          return FALSE;
++        }
++
++      copy =
++        sigfm_copy_info (
++          info);
++
++      if (copy == NULL)
++        {
++          g_set_error (
++            error,
++            G_IO_ERROR,
++            G_IO_ERROR_FAILED,
++            "Could not copy SIGFM image data");
++
++          return FALSE;
++        }
++
++      g_ptr_array_add (
++        print->prints,
++        copy);
+     }
+ 
+-  _minutiae.num = minutiae->len;
+-  _minutiae.list = (struct fp_minutia **) minutiae->pdata;
+-  _minutiae.alloc = minutiae->len;
++  g_clear_object (
++    &print->image);
+ 
+-  xyt = g_new0 (struct xyt_struct, 1);
+-  minutiae_to_xyt (&_minutiae, image->width, image->height, xyt);
+-  g_ptr_array_add (print->prints, xyt);
++  print->image =
++    g_object_ref (
++      image);
+ 
+-  g_clear_object (&print->image);
+-  print->image = g_object_ref (image);
+-  g_object_notify (G_OBJECT (print), "image");
++  g_object_notify (
++    G_OBJECT (print),
++    "image");
+ 
+   return TRUE;
+ }
+ 
++
+ /**
+  * fpi_print_bz3_match:
+  * @template: A #FpPrint containing one or more prints
+@@ -249,6 +364,100 @@ fpi_print_bz3_match (FpPrint *template, FpPrint *print, gint bz3_threshold, GErr
+   return FPI_MATCH_FAIL;
+ }
+ 
++/**
++ * fpi_print_sigfm_match:
++ * @template: Enrolled SIGFM print collection
++ * @print: Newly scanned SIGFM print
++ * @threshold: SIGFM match threshold
++ * @error: Return location for errors
++ *
++ * No exact SIGFM scores are logged by this helper.
++ */
++FpiMatchResult
++fpi_print_sigfm_match (FpPrint *template,
++                       FpPrint *print,
++                       gint     threshold,
++                       GError **error)
++{
++  SigfmImgInfo *probe;
++
++  if (template == NULL ||
++      print == NULL ||
++      template->type != FPI_PRINT_SIGFM ||
++      print->type != FPI_PRINT_SIGFM)
++    {
++      if (error != NULL)
++        *error =
++          fpi_device_error_new_msg (
++            FP_DEVICE_ERROR_NOT_SUPPORTED,
++            "SIGFM matcher requires SIGFM print data");
++
++      return FPI_MATCH_ERROR;
++    }
++
++  if (threshold <= 0)
++    {
++      if (error != NULL)
++        *error =
++          fpi_device_error_new_msg (
++            FP_DEVICE_ERROR_GENERAL,
++            "SIGFM threshold must be positive");
++
++      return FPI_MATCH_ERROR;
++    }
++
++  if (template->prints == NULL ||
++      template->prints->len == 0 ||
++      print->prints == NULL ||
++      print->prints->len != 1)
++    {
++      if (error != NULL)
++        *error =
++          fpi_device_error_new_msg (
++            FP_DEVICE_ERROR_DATA_INVALID,
++            "Invalid SIGFM print collection");
++
++      return FPI_MATCH_ERROR;
++    }
++
++  probe =
++    g_ptr_array_index (
++      print->prints,
++      0);
++
++  for (guint i = 0;
++       i < template->prints->len;
++       i++)
++    {
++      SigfmImgInfo *enrolled =
++        g_ptr_array_index (
++          template->prints,
++          i);
++
++      const gint score =
++        sigfm_match_score (
++          probe,
++          enrolled);
++
++      if (score < 0)
++        {
++          if (error != NULL)
++            *error =
++              fpi_device_error_new_msg (
++                FP_DEVICE_ERROR_DATA_INVALID,
++                "SIGFM matcher failed");
++
++          return FPI_MATCH_ERROR;
++        }
++
++      if (score >= threshold)
++        return FPI_MATCH_SUCCESS;
++    }
++
++  return FPI_MATCH_FAIL;
++}
++
++
+ /**
+  * fpi_print_generate_user_id:
+  * @print: #FpPrint to generate the ID for
+diff --git a/libfprint/fpi-print.h b/libfprint/fpi-print.h
+index f3e72b4..786670c 100644
+--- a/libfprint/fpi-print.h
++++ b/libfprint/fpi-print.h
+@@ -11,11 +11,13 @@ G_BEGIN_DECLS
+  * @FPI_PRINT_UNDEFINED: Undefined type, this happens prior to enrollment
+  * @FPI_PRINT_RAW: A raw print where the data is directly compared
+  * @FPI_PRINT_NBIS: NBIS minutiae comparison
++ * @FPI_PRINT_SIGFM: SIGFM small-image feature comparison
+  */
+ typedef enum {
+   FPI_PRINT_UNDEFINED = 0,
+   FPI_PRINT_RAW,
+   FPI_PRINT_NBIS,
++  FPI_PRINT_SIGFM,
+ } FpiPrintType;
+ 
+ /**
+@@ -47,6 +49,11 @@ FpiMatchResult fpi_print_bz3_match (FpPrint *temp,
+                                     gint     bz3_threshold,
+                                     GError **error);
+ 
++FpiMatchResult fpi_print_sigfm_match (FpPrint *template,
++                                      FpPrint *print,
++                                      gint     threshold,
++                                      GError **error);
++
+ /* Helpers to encode metadata into user ID strings. */
+ gchar *  fpi_print_generate_user_id (FpPrint *print);
+ gboolean fpi_print_fill_from_user_id (FpPrint    *print,
+diff --git a/libfprint/meson.build b/libfprint/meson.build
+index 26b459e..6f02c06 100644
+--- a/libfprint/meson.build
++++ b/libfprint/meson.build
+@@ -263,6 +263,8 @@ deps += declare_dependency(include_directories: [
+     include_directories('nbis/libfprint-include'),
+ ])
+ 
++subdir('sigfm')
++
+ libnbis = static_library('nbis',
+     nbis_sources,
+     dependencies: deps,
+@@ -281,7 +283,7 @@ libfprint_private = static_library('fprint-private',
+         libfprint_private_sources,
+     ],
+     dependencies: deps,
+-    link_with: libnbis,
++    link_with: [libnbis, libsigfm],
+     install: false)
+ 
+ libfprint_drivers = static_library('fprint-drivers',
+diff --git a/libfprint/sigfm/binary.hpp b/libfprint/sigfm/binary.hpp
+new file mode 100644
+index 0000000..1c779d4
+--- /dev/null
++++ b/libfprint/sigfm/binary.hpp
+@@ -0,0 +1,299 @@
++
++#pragma once
++
++#include "opencv2/core/mat.hpp"
++#include <algorithm>
++#include <array>
++#include <cstddef>
++#include <cstdlib>
++#include <cstring>
++#include <iterator>
++#include <stdexcept>
++#include <type_traits>
++#include <utility>
++#include <vector>
++
++namespace bin {
++using byte = unsigned char;
++
++inline constexpr std::size_t max_serialized_bytes =
++    4U * 1024U * 1024U;
++
++inline constexpr std::size_t max_container_elements =
++    4096U;
++
++inline constexpr std::size_t max_matrix_bytes =
++    4U * 1024U * 1024U;
++
++inline constexpr int sigfm_descriptor_columns =
++    128;
++
++class stream;
++
++template<typename T>
++struct serializer : public std::false_type {
++    void serialize(const T& m, stream& out);
++};
++
++template<typename T>
++struct deserializer : public std::false_type {
++    T deserialize(stream& in);
++};
++class stream {
++public:
++    stream() = default;
++
++    template<
++        typename Iter,
++        std::enable_if_t<std::is_same_v<typename std::iterator_traits<
++                                            std::decay_t<Iter>>::value_type,
++                                        byte>,
++                         bool> = true>
++    stream(Iter begin, Iter end) : store_{begin, end}
++    {
++    }
++
++    template<typename T, std::enable_if_t<serializer<T>::value, bool> = true>
++    constexpr stream& operator<<(T v)
++    {
++        serializer<T>::serialize(v, *this);
++        return *this;
++    }
++
++    template<typename T, std::enable_if_t<deserializer<T>::value, bool> = true>
++    constexpr stream& operator>>(T& v)
++    {
++        v = deserializer<T>::deserialize(*this);
++        return *this;
++    }
++    template<typename T, std::enable_if_t<std::is_trivial_v<T>, bool> = true>
++    constexpr stream& operator<<(T v)
++    {
++        using seg_store = std::array<byte, sizeof(T)>;
++        alignas(T) seg_store s = {};
++        std::memcpy(s.data(), &v, sizeof(T));
++        stream::write(s.begin(), s.end());
++        return *this;
++    }
++
++    template<typename T, std::enable_if_t<std::is_trivial_v<T>, bool> = true>
++    constexpr stream& operator>>(T& v)
++    {
++        using seg_store = std::array<byte, sizeof(T)>;
++        alignas(T) seg_store s = {};
++        if (store_.size() < s.size()) {
++            throw std::runtime_error{"tried to extract from too small stream"};
++        }
++        stream::read(s.begin(), s.end());
++        memcpy(&v, s.data(), sizeof(T));
++        return *this;
++    }
++    template<
++        typename Iter,
++        std::enable_if_t<std::is_same_v<typename std::iterator_traits<
++                                            std::decay_t<Iter>>::value_type,
++                                        byte>,
++                         bool> = true>
++    constexpr stream& write(Iter&& begin, Iter&& end)
++    {
++        std::copy(std::forward<Iter>(begin), std::forward<Iter>(end),
++                  std::back_inserter(store_));
++        return *this;
++    }
++
++    template<typename T, std::enable_if_t<serializer<T>::value, bool> = true>
++    stream& serialize(const T& m, stream& out)
++    {
++        serializer<T>::serialize(m, out);
++        return out;
++    }
++
++    template<
++        typename Iter,
++        std::enable_if_t<std::is_same_v<typename std::iterator_traits<
++                                            std::decay_t<Iter>>::value_type,
++                                        byte>,
++                         bool> = true>
++    constexpr stream& read(Iter&& begin, Iter&& end)
++    {
++        const auto dist =
++            std::distance(begin, end);
++
++        if (dist < 0) {
++            throw std::runtime_error{
++                "invalid negative stream read distance"};
++        }
++
++        return stream::read(
++            begin,
++            static_cast<std::size_t>(dist));
++    }
++
++    template<
++        typename Iter,
++        std::enable_if_t<std::is_same_v<typename std::iterator_traits<
++                                            std::decay_t<Iter>>::value_type,
++                                        byte>,
++                         bool> = true>
++    constexpr stream& read(Iter&& begin, std::size_t dist)
++    {
++        if (dist > store_.size()) {
++            throw std::runtime_error{
++                "tried to read past end of stream"};
++        }
++
++        const auto end =
++            store_.begin() +
++            static_cast<std::ptrdiff_t>(dist);
++
++        std::copy(
++            store_.begin(),
++            end,
++            begin);
++
++        store_.erase(
++            store_.begin(),
++            end);
++
++        return *this;
++    }
++    byte* copy_buffer() const
++    {
++        byte* raw = static_cast<byte*>(malloc(store_.size()));
++        std::copy(store_.begin(), store_.end(), raw);
++        return raw;
++    }
++    std::size_t size() const { return store_.size(); }
++
++private:
++    std::vector<byte> store_;
++};
++
++template<>
++struct serializer<cv::Mat> : public std::true_type {
++    static void serialize(const cv::Mat& m, stream& out)
++    {
++        out << m.type() << m.rows << m.cols;
++        out.write(m.datastart, m.dataend);
++    }
++};
++
++template<>
++struct deserializer<cv::Mat> : public std::true_type {
++    static cv::Mat deserialize(stream& in)
++    {
++        int rows = 0;
++        int cols = 0;
++        int type = 0;
++
++        in >> type >> rows >> cols;
++
++        if (type != CV_32FC1) {
++            throw std::runtime_error{
++                "unexpected SIGFM descriptor type"};
++        }
++
++        if (rows <= 0 ||
++            static_cast<std::size_t>(rows) >
++                max_container_elements) {
++            throw std::runtime_error{
++                "SIGFM descriptor row count out of bounds"};
++        }
++
++        if (cols != sigfm_descriptor_columns) {
++            throw std::runtime_error{
++                "unexpected SIGFM descriptor width"};
++        }
++
++        const std::size_t bytes =
++            static_cast<std::size_t>(rows) *
++            static_cast<std::size_t>(cols) *
++            sizeof(float);
++
++        if (bytes > max_matrix_bytes ||
++            bytes > in.size()) {
++            throw std::runtime_error{
++                "SIGFM descriptor payload out of bounds"};
++        }
++
++        cv::Mat m;
++        m.create(rows, cols, type);
++
++        in.read(
++            m.data,
++            bytes);
++
++        return m;
++    }
++};
++
++template<typename T>
++struct deserializer<cv::Point_<T>> : public std::true_type {
++    static cv::Point2f deserialize(stream& in)
++    {
++        cv::Point_<T> p;
++        in >> p.x >> p.y;
++        return p;
++    }
++};
++template<typename T>
++struct serializer<cv::Point_<T>> : public std::true_type {
++    static void serialize(const cv::Point_<T>& pt, stream& out)
++    {
++        out << pt.x << pt.y;
++    }
++};
++
++template<>
++struct serializer<cv::KeyPoint> : public std::true_type {
++    static void serialize(const cv::KeyPoint& pt, stream& out)
++    {
++        out << pt.class_id << pt.angle << pt.octave << pt.response << pt.size
++            << pt.pt;
++    }
++};
++
++template<>
++struct deserializer<cv::KeyPoint> : public std::true_type {
++    static cv::KeyPoint deserialize(stream& in)
++    {
++        cv::KeyPoint pt;
++        in >> pt.class_id >> pt.angle >> pt.octave >> pt.response >> pt.size >>
++            pt.pt;
++        return pt;
++    }
++};
++
++template<typename T>
++struct serializer<std::vector<T>> : public std::true_type {
++    static void serialize(const std::vector<T>& vs, stream& out)
++    {
++        out << static_cast<std::size_t>(vs.size());
++        std::for_each(vs.begin(), vs.end(),
++                      [&out](const auto& el) { out << el; });
++    }
++};
++
++template<typename T>
++struct deserializer<std::vector<T>> : public std::true_type {
++    static std::vector<T> deserialize(stream& in)
++    {
++        std::size_t size = 0;
++        in >> size;
++
++        if (size > max_container_elements) {
++            throw std::runtime_error{
++                "serialized vector size out of bounds"};
++        }
++
++        std::vector<T> vs;
++        vs.reserve(size);
++        for (std::size_t n = 0; n != size; ++n) {
++            T v;
++            in >> v;
++            vs.emplace_back(std::move(v));
++        }
++        return vs;
++    }
++};
++} // namespace bin
+diff --git a/libfprint/sigfm/img-info.hpp b/libfprint/sigfm/img-info.hpp
+new file mode 100644
+index 0000000..bf270ec
+--- /dev/null
++++ b/libfprint/sigfm/img-info.hpp
+@@ -0,0 +1,10 @@
++
++#pragma once
++
++#include <opencv2/core.hpp>
++#include <vector>
++
++struct SigfmImgInfo {
++    std::vector<cv::KeyPoint> keypoints;
++    cv::Mat descriptors;
++};
+\ No newline at end of file
+diff --git a/libfprint/sigfm/meson.build b/libfprint/sigfm/meson.build
+new file mode 100644
+index 0000000..ea1ed52
+--- /dev/null
++++ b/libfprint/sigfm/meson.build
+@@ -0,0 +1,25 @@
++sigfm_opencv_dep = dependency(
++    'opencv4',
++    required: true,
++    version: '>=4.5.0',
++)
++
++libsigfm = static_library(
++    'sigfm',
++    [
++        'sigfm.cpp',
++    ],
++    dependencies: [
++        sigfm_opencv_dep,
++    ],
++    pic: true,
++    install: false,
++)
++
++sigfm_dep = declare_dependency(
++    link_with: libsigfm,
++    dependencies: [
++        sigfm_opencv_dep,
++    ],
++    include_directories: include_directories('.'),
++)
+diff --git a/libfprint/sigfm/sigfm.cpp b/libfprint/sigfm/sigfm.cpp
+new file mode 100644
+index 0000000..91c218a
+--- /dev/null
++++ b/libfprint/sigfm/sigfm.cpp
+@@ -0,0 +1,456 @@
++// SIGFM algorithm for libfprint
++
++// Copyright (C) 2022 Matthieu CHARETTE <matthieu.charette@gmail.com>
++// Copyright (c) 2022 Natasha England-Elbro <ashenglandelbro@protonmail.com>
++// Copyright (c) 2022 Timur Mangliev <tigrmango@gmail.com>
++
++// This library is free software; you can redistribute it and/or
++// modify it under the terms of the GNU Lesser General Public
++// License as published by the Free Software Foundation; either
++// version 2.1 of the License, or (at your option) any later version.
++
++// This library is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++// Lesser General Public License for more details.
++
++// You should have received a copy of the GNU Lesser General Public
++// License along with this library; if not, write to the Free Software
++// Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
++//
++
++#include "sigfm.hpp"
++#include "binary.hpp"
++#include "img-info.hpp"
++
++#include "opencv2/core/persistence.hpp"
++#include "opencv2/core/types.hpp"
++#include "opencv2/features2d.hpp"
++#include "opencv2/imgcodecs.hpp"
++#include <algorithm>
++#include <cmath>
++#include <cstdio>
++#include <limits>
++#include <filesystem>
++#include <fstream>
++#include <iterator>
++#include <sstream>
++#include <string>
++
++#include <opencv2/opencv.hpp>
++#include <vector>
++
++namespace bin {
++
++template<>
++struct serializer<SigfmImgInfo> : public std::true_type {
++    static void serialize(const SigfmImgInfo& info, stream& out)
++    {
++        out << info.keypoints << info.descriptors;
++    }
++};
++
++template<>
++struct deserializer<SigfmImgInfo> : public std::true_type {
++    static SigfmImgInfo deserialize(stream& in)
++    {
++        SigfmImgInfo info;
++        in >> info.keypoints >> info.descriptors;
++        return info;
++    }
++};
++} // namespace bin
++
++namespace {
++constexpr auto distance_match = 0.75;
++constexpr auto length_match = 0.05;
++constexpr auto angle_match = 0.05;
++constexpr auto min_match = 5;
++struct match {
++    cv::Point2i p1;
++    cv::Point2i p2;
++    match(cv::Point2i ip1, cv::Point2i ip2) : p1{ip1}, p2{ip2} {}
++    match() : p1{cv::Point2i(0, 0)}, p2{cv::Point2i(0, 0)} {}
++    bool operator==(const match& right) const
++    {
++        return std::tie(this->p1, this->p2) == std::tie(right.p1, right.p2);
++    }
++    bool operator<(const match& right) const
++    {
++        return std::tie(this->p1.y, this->p1.x) <
++               std::tie(right.p1.y, right.p1.x);
++    }
++};
++struct angle {
++    double cos;
++    double sin;
++    match corr_matches[2];
++    angle(double cos_, double sin_, match m1, match m2)
++        : cos{cos_}, sin{sin_}, corr_matches{m1, m2}
++    {
++    }
++};
++
++constexpr double geometry_epsilon = 1e-12;
++
++double relative_difference(double left, double right)
++{
++    if (!std::isfinite(left) || !std::isfinite(right)) {
++        return std::numeric_limits<double>::infinity();
++    }
++
++    left = std::abs(left);
++    right = std::abs(right);
++
++    const double maximum = std::max(left, right);
++
++    if (maximum <= geometry_epsilon) {
++        return 0.0;
++    }
++
++    return std::abs(left - right) / maximum;
++}
++
++double clamp_unit(double value)
++{
++    return std::clamp(value, -1.0, 1.0);
++}
++
++bool geometry_angles(const int vec_1[2],
++                     const int vec_2[2],
++                     double* first_angle,
++                     double* second_angle)
++{
++    if (first_angle == nullptr || second_angle == nullptr) {
++        return false;
++    }
++
++    const double length_1 =
++        std::hypot(
++            static_cast<double>(vec_1[0]),
++            static_cast<double>(vec_1[1]));
++
++    const double length_2 =
++        std::hypot(
++            static_cast<double>(vec_2[0]),
++            static_cast<double>(vec_2[1]));
++
++    if (!std::isfinite(length_1) ||
++        !std::isfinite(length_2) ||
++        length_1 <= geometry_epsilon ||
++        length_2 <= geometry_epsilon) {
++        return false;
++    }
++
++    if (relative_difference(length_1, length_2) >
++        length_match) {
++        return false;
++    }
++
++    const double product =
++        length_1 * length_2;
++
++    if (!std::isfinite(product) ||
++        product <= geometry_epsilon) {
++        return false;
++    }
++
++    const double dot =
++        static_cast<double>(vec_1[0]) * vec_2[0] +
++        static_cast<double>(vec_1[1]) * vec_2[1];
++
++    const double cross =
++        static_cast<double>(vec_1[0]) * vec_2[1] -
++        static_cast<double>(vec_1[1]) * vec_2[0];
++
++    const double dot_ratio =
++        clamp_unit(dot / product);
++
++    const double cross_ratio =
++        clamp_unit(cross / product);
++
++    const double calculated_first =
++        M_PI / 2 +
++        std::asin(dot_ratio);
++
++    const double calculated_second =
++        std::acos(cross_ratio);
++
++    if (!std::isfinite(calculated_first) ||
++        !std::isfinite(calculated_second)) {
++        return false;
++    }
++
++    *first_angle = calculated_first;
++    *second_angle = calculated_second;
++
++    return true;
++}
++
++
++bool sigfm_info_valid(const SigfmImgInfo* info)
++{
++    if (info == nullptr) {
++        return false;
++    }
++
++    const std::size_t count =
++        info->keypoints.size();
++
++    if (count == 0 ||
++        count > bin::max_container_elements) {
++        return false;
++    }
++
++    const cv::Mat& descriptors =
++        info->descriptors;
++
++    if (descriptors.empty() ||
++        descriptors.dims != 2 ||
++        descriptors.type() != CV_32FC1 ||
++        descriptors.cols !=
++            bin::sigfm_descriptor_columns ||
++        descriptors.rows !=
++            static_cast<int>(count) ||
++        !descriptors.isContinuous()) {
++        return false;
++    }
++
++    const std::size_t descriptor_bytes =
++        descriptors.total() *
++        descriptors.elemSize();
++
++    if (descriptor_bytes == 0 ||
++        descriptor_bytes >
++            bin::max_matrix_bytes) {
++        return false;
++    }
++
++    for (const auto& keypoint :
++         info->keypoints) {
++        if (!std::isfinite(keypoint.pt.x) ||
++            !std::isfinite(keypoint.pt.y) ||
++            !std::isfinite(keypoint.angle) ||
++            !std::isfinite(keypoint.response) ||
++            !std::isfinite(keypoint.size) ||
++            keypoint.size <= 0.0f) {
++            return false;
++        }
++    }
++
++    if (!cv::checkRange(descriptors)) {
++        return false;
++    }
++
++    return true;
++}
++
++} // namespace
++
++SigfmImgInfo* sigfm_copy_info(SigfmImgInfo* info)
++{
++    if (!sigfm_info_valid(info)) {
++        return nullptr;
++    }
++
++    try {
++        return new SigfmImgInfo{*info};
++    }
++    catch (...) {
++        return nullptr;
++    }
++}
++
++
++int sigfm_keypoints_count(SigfmImgInfo* info)
++{
++    if (info == nullptr ||
++        info->keypoints.size() >
++            static_cast<std::size_t>(
++                std::numeric_limits<int>::max())) {
++        return 0;
++    }
++
++    return static_cast<int>(
++        info->keypoints.size());
++}
++
++
++unsigned char* sigfm_serialize_binary(SigfmImgInfo* info, int* outlen)
++{
++    if (outlen == nullptr) {
++        return nullptr;
++    }
++
++    *outlen = 0;
++
++    if (!sigfm_info_valid(info)) {
++        return nullptr;
++    }
++
++    try {
++        bin::stream s;
++        s << *info;
++
++        if (s.size() == 0 ||
++            s.size() >
++                bin::max_serialized_bytes ||
++            s.size() >
++                static_cast<std::size_t>(
++                    std::numeric_limits<int>::max())) {
++            return nullptr;
++        }
++
++        unsigned char* result =
++            s.copy_buffer();
++
++        if (result == nullptr) {
++            return nullptr;
++        }
++
++        *outlen =
++            static_cast<int>(s.size());
++
++        return result;
++    }
++    catch (...) {
++        return nullptr;
++    }
++}
++
++
++SigfmImgInfo* sigfm_deserialize_binary(const unsigned char* bytes, int len)
++{
++    if (bytes == nullptr ||
++        len <= 0 ||
++        static_cast<std::size_t>(len) >
++            bin::max_serialized_bytes) {
++        return nullptr;
++    }
++
++    try {
++        bin::stream s{
++            bytes,
++            bytes + len};
++
++        auto info =
++            std::make_unique<SigfmImgInfo>();
++
++        s >> *info;
++
++        if (s.size() != 0 ||
++            !sigfm_info_valid(info.get())) {
++            return nullptr;
++        }
++
++        return info.release();
++    }
++    catch (...) {
++        return nullptr;
++    }
++}
++
++SigfmImgInfo* sigfm_extract(const SigfmPix* pix, int width, int height)
++{
++    cv::Mat img;
++    img.create(height, width, CV_8UC1);
++    std::memcpy(img.data, pix, width * height);
++    const auto roi = cv::Mat::ones(cv::Size{img.size[1], img.size[0]}, CV_8UC1);
++    std::vector<cv::KeyPoint> pts;
++
++    cv::Mat descs;
++    cv::SIFT::create()->detectAndCompute(img, roi, pts, descs);
++
++    auto* info = new SigfmImgInfo{pts, descs};
++    return info;
++}
++
++int sigfm_match_score(SigfmImgInfo* frame, SigfmImgInfo* enrolled)
++{
++    if (!sigfm_info_valid(frame) ||
++        !sigfm_info_valid(enrolled)) {
++        return -1;
++    }
++
++    try {
++        std::vector<std::vector<cv::DMatch>> points;
++        auto bfm = cv::BFMatcher::create();
++        bfm->knnMatch(frame->descriptors, enrolled->descriptors, points, 2);
++        std::set<match> matches_unique;
++        int nb_matched = 0;
++        for (const auto& pts : points) {
++            if (pts.size() < 2) {
++                continue;
++            }
++            const cv::DMatch& match_1 = pts.at(0);
++            if (match_1.distance < distance_match * pts.at(1).distance) {
++                matches_unique.emplace(
++                    match{frame->keypoints.at(match_1.queryIdx).pt,
++                          enrolled->keypoints.at(match_1.trainIdx).pt});
++                nb_matched++;
++            }
++        }
++        if (nb_matched < min_match) {
++            return 0;
++        }
++        std::vector<match> matches{matches_unique.begin(),
++                                   matches_unique.end()};
++
++        std::vector<angle> angles;
++        for (std::size_t j = 0; j < matches.size(); j++) {
++            match match_1 = matches[j];
++            for (std::size_t k = j + 1; k < matches.size(); k++) {
++                match match_2 = matches[k];
++
++                int vec_1[2] = {match_1.p1.x - match_2.p1.x,
++                                match_1.p1.y - match_2.p1.y};
++                int vec_2[2] = {match_1.p2.x - match_2.p2.x,
++                                match_1.p2.y - match_2.p2.y};
++
++                double first_angle = 0.0;
++                double second_angle = 0.0;
++
++                if (geometry_angles(
++                        vec_1,
++                        vec_2,
++                        &first_angle,
++                        &second_angle)) {
++                    angles.emplace_back(
++                        angle(
++                            first_angle,
++                            second_angle,
++                            match_1,
++                            match_2));
++                }
++            }
++        }
++
++        if (angles.size() < min_match) {
++            return 0;
++        }
++
++        int count = 0;
++        for (std::size_t j = 0; j < angles.size(); j++) {
++            angle angle_1 = angles[j];
++            for (std::size_t k = j + 1; k < angles.size(); k++) {
++                angle angle_2 = angles[k];
++
++                if (relative_difference(
++                        angle_1.sin,
++                        angle_2.sin) <= angle_match &&
++                    relative_difference(
++                        angle_1.cos,
++                        angle_2.cos) <= angle_match) {
++
++                    count += 1;
++                }
++            }
++        }
++        return count;
++    }
++    catch (...) {
++        return -1;
++    }
++}
++
++void sigfm_free_info(SigfmImgInfo* info) { delete info; }
+diff --git a/libfprint/sigfm/sigfm.hpp b/libfprint/sigfm/sigfm.hpp
+new file mode 100644
+index 0000000..671a2b6
+--- /dev/null
++++ b/libfprint/sigfm/sigfm.hpp
+@@ -0,0 +1,98 @@
++// SIGFM algorithm for libfprint
++
++// Copyright (C) 2022 Matthieu CHARETTE <matthieu.charette@gmail.com>
++// Copyright (c) 2022 Natasha England-Elbro <ashenglandelbro@protonmail.com>
++// Copyright (c) 2022 Timur Mangliev <tigrmango@gmail.com>
++
++// This library is free software; you can redistribute it and/or
++// modify it under the terms of the GNU Lesser General Public
++// License as published by the Free Software Foundation; either
++// version 2.1 of the License, or (at your option) any later version.
++
++// This library is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++// Lesser General Public License for more details.
++
++// You should have received a copy of the GNU Lesser General Public
++// License along with this library; if not, write to the Free Software
++// Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
++//
++
++#pragma once
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++typedef unsigned char SigfmPix;
++/**
++ * @brief Contains information used by the sigfm algorithm for matching
++ * @details Get one from sigfm_extract() and make sure to clean it up with sigfm_free_info()
++ * @struct SigfmImgInfo
++ */
++typedef struct SigfmImgInfo SigfmImgInfo;
++
++/**
++ * @brief Extracts information from an image for later use sigfm_match_score
++ *
++ * @param pix Pixels of the image must be width * height in length
++ * @param width Width of the image
++ * @param height Height of the image
++ * @return SigfmImgInfo* Info that can be used with the API
++ */
++SigfmImgInfo* sigfm_extract(const SigfmPix* pix, int width, int height);
++
++/**
++ * @brief Destroy an SigfmImgInfo
++ * @warning Call this instead of free() or you will get UB!
++ * @param info SigfmImgInfo to destroy
++ */
++void sigfm_free_info(SigfmImgInfo* info);
++
++/**
++ * @brief Score how closely a frame matches another
++ *
++ * @param frame Print to be checked
++ * @param enrolled Canonical print to verify against
++ * @return int Score of how closely they match, values <0 indicate error, 0 means always reject
++ */
++int sigfm_match_score(SigfmImgInfo* frame, SigfmImgInfo* enrolled);
++
++/**
++ * @brief Serialize an image info for storage
++ *
++ * @param info SigfmImgInfo to store
++ * @param outlen output: Length of the returned byte array
++ * @return unsigned* char byte array for storage, should be free'd by the callee
++ */
++unsigned char* sigfm_serialize_binary(SigfmImgInfo* info, int* outlen);
++/**
++ * @brief Deserialize an SigfmImgInfo from storage
++ *
++ * @param bytes Byte array to deserialize from
++ * @param len Length of the byte array
++ * @return SigfmImgInfo* Deserialized info, or NULL if deserialization failed
++ */
++SigfmImgInfo* sigfm_deserialize_binary(const unsigned char* bytes, int len);
++
++/**
++ * @brief Keypoints for an image. Low keypoints generally means the image is
++ * low quality for matching
++ *
++ * @param info
++ * @return int
++ */
++
++int sigfm_keypoints_count(SigfmImgInfo* info);
++
++/**
++ * @brief Copy an SigfmImgInfo
++ *
++ * @param info Source of copy
++ * @return SigfmImgInfo* Newly allocated and copied version of info
++ */
++SigfmImgInfo* sigfm_copy_info(SigfmImgInfo* info);
++
++#ifdef __cplusplus
++}
++#endif
+diff --git a/tests/meson.build b/tests/meson.build
+index 6c52939..2ed23ae 100644
+--- a/tests/meson.build
++++ b/tests/meson.build
+@@ -322,6 +322,84 @@ foreach test_name: unit_tests
+ endforeach
+ 
+ 
++sigfm_robustness_test = executable(
++    'test-sigfm-robustness',
++    sources: [
++        'test-sigfm-robustness.cpp',
++    ],
++    dependencies: [
++        sigfm_dep,
++    ],
++    install: false,
++)
++
++test(
++    'sigfm-robustness',
++    sigfm_robustness_test,
++    suite: ['unit-tests'],
++)
++
++
++sigfm_geometry_hardening_test = executable(
++    'test-sigfm-geometry-hardening',
++    sources: [
++        'test-sigfm-geometry-hardening.cpp',
++    ],
++    dependencies: [
++        sigfm_opencv_dep,
++    ],
++    install: false,
++)
++
++test(
++    'sigfm-geometry-hardening',
++    sigfm_geometry_hardening_test,
++    suite: ['unit-tests'],
++)
++
++
++sigfm_image_core_test = executable(
++    'test-sigfm-image-core',
++    sources: [
++        'test-sigfm-image-core.c',
++    ],
++    dependencies: [
++        libfprint_private_dep,
++        sigfm_dep,
++    ],
++    c_args: common_cflags,
++    install: false,
++)
++
++test(
++    'sigfm-image-core',
++    sigfm_image_core_test,
++    suite: ['unit-tests'],
++    env: envs,
++)
++
++
++sigfm_print_core_test = executable(
++    'test-sigfm-print-core',
++    sources: [
++        'test-sigfm-print-core.c',
++    ],
++    dependencies: [
++        libfprint_private_dep,
++        sigfm_dep,
++    ],
++    c_args: common_cflags,
++    install: false,
++)
++
++test(
++    'sigfm-print-core',
++    sigfm_print_core_test,
++    suite: ['unit-tests'],
++    env: envs,
++)
++
++
+ if 'goodix5135' in drivers
+     goodix5135_conditioning_test = executable(
+         'test-goodix5135-conditioning',
+diff --git a/tests/test-sigfm-geometry-hardening.cpp b/tests/test-sigfm-geometry-hardening.cpp
+new file mode 100644
+index 0000000..cdf76ba
+--- /dev/null
++++ b/tests/test-sigfm-geometry-hardening.cpp
+@@ -0,0 +1,199 @@
++/*
++ * SIGFM geometry hardening host test.
++ *
++ * Synthetic/internal math only.
++ * No fingerprint image, sensor, USB, PSK or FDT.
++ * No matcher scores are printed.
++ */
++
++#include <cmath>
++#include <cstdio>
++#include <limits>
++
++#include "../libfprint/sigfm/sigfm.cpp"
++
++
++static int
++test_comparator ()
++{
++  const match left (
++    cv::Point2i (10, 20),
++    cv::Point2i (1, 1));
++
++  const match right (
++    cv::Point2i (11, 20),
++    cv::Point2i (2, 2));
++
++  const match lower_y (
++    cv::Point2i (99, 19),
++    cv::Point2i (3, 3));
++
++  if (!(left < right))
++    return 1;
++
++  if (right < left)
++    return 2;
++
++  if (!(lower_y < left))
++    return 3;
++
++  return 0;
++}
++
++
++static int
++test_relative_difference ()
++{
++  if (relative_difference (0.0, 0.0) != 0.0)
++    return 10;
++
++  if (relative_difference (1.0, 1.0) != 0.0)
++    return 11;
++
++  const double mismatch =
++    relative_difference (1.0, 2.0);
++
++  if (!std::isfinite (mismatch) ||
++      mismatch <= 0.0)
++    return 12;
++
++  if (!std::isinf (
++        relative_difference (
++          std::numeric_limits<double>::infinity (),
++          1.0)))
++    return 13;
++
++  return 0;
++}
++
++
++static int
++test_clamp ()
++{
++  if (clamp_unit (1.5) != 1.0)
++    return 20;
++
++  if (clamp_unit (-1.5) != -1.0)
++    return 21;
++
++  if (clamp_unit (0.25) != 0.25)
++    return 22;
++
++  return 0;
++}
++
++
++static int
++test_geometry ()
++{
++  double first = 0.0;
++  double second = 0.0;
++
++  const int zero[2] = {
++    0,
++    0
++  };
++
++  const int unit_x[2] = {
++    1,
++    0
++  };
++
++  const int unit_y[2] = {
++    0,
++    1
++  };
++
++  const int double_x[2] = {
++    2,
++    0
++  };
++
++  if (geometry_angles (
++        zero,
++        zero,
++        &first,
++        &second))
++    return 30;
++
++  if (geometry_angles (
++        zero,
++        unit_x,
++        &first,
++        &second))
++    return 31;
++
++  if (!geometry_angles (
++        unit_x,
++        unit_x,
++        &first,
++        &second))
++    return 32;
++
++  if (!std::isfinite (first) ||
++      !std::isfinite (second))
++    return 33;
++
++  if (!geometry_angles (
++        unit_x,
++        unit_y,
++        &first,
++        &second))
++    return 34;
++
++  if (!std::isfinite (first) ||
++      !std::isfinite (second))
++    return 35;
++
++  /*
++   * 1 vs 2 length mismatch exceeds the existing
++   * SIGFM length tolerance and must be rejected.
++   */
++  if (geometry_angles (
++        unit_x,
++        double_x,
++        &first,
++        &second))
++    return 36;
++
++  if (geometry_angles (
++        unit_x,
++        unit_x,
++        nullptr,
++        &second))
++    return 37;
++
++  return 0;
++}
++
++
++int
++main ()
++{
++  int result;
++
++  result = test_comparator ();
++
++  if (result != 0)
++    return result;
++
++  result = test_relative_difference ();
++
++  if (result != 0)
++    return result;
++
++  result = test_clamp ();
++
++  if (result != 0)
++    return result;
++
++  result = test_geometry ();
++
++  if (result != 0)
++    return result;
++
++  std::puts (
++    "SIGFM_GEOMETRY_HARDENING=PASS");
++
++  return 0;
++}
+diff --git a/tests/test-sigfm-image-core.c b/tests/test-sigfm-image-core.c
+new file mode 100644
+index 0000000..47fd5e1
+--- /dev/null
++++ b/tests/test-sigfm-image-core.c
+@@ -0,0 +1,592 @@
++/*
++ * Host-only SIGFM FpImage tests.
++ *
++ * Synthetic pixels only.
++ * No USB, sensor, PSK, FDT or biometric fixture.
++ * No exact SIGFM match scores are printed.
++ */
++
++#include <glib.h>
++#include <string.h>
++
++#include "fp-print-private.h"
++#include "fpi-image.h"
++#include "fpi-image-device.h"
++#include "fpi-print.h"
++#include "sigfm/sigfm.hpp"
++
++
++#define TEST_WIDTH 80
++#define TEST_HEIGHT 64
++
++
++G_STATIC_ASSERT (
++  FPI_PRINT_UNDEFINED == 0);
++
++G_STATIC_ASSERT (
++  FPI_PRINT_RAW == 1);
++
++G_STATIC_ASSERT (
++  FPI_PRINT_NBIS == 2);
++
++G_STATIC_ASSERT (
++  FPI_PRINT_SIGFM == 3);
++
++G_STATIC_ASSERT (
++  FPI_IMAGE_DEVICE_ALGORITHM_NBIS == 0);
++
++
++typedef struct
++{
++  GMainLoop *loop;
++  gboolean   success;
++  GError    *error;
++} ExtractState;
++
++
++static guint8 *
++make_synthetic_image (guint32 seed)
++{
++  guint8 *image =
++    g_new0 (
++      guint8,
++      TEST_WIDTH * TEST_HEIGHT);
++
++  guint32 state = seed;
++
++  for (gint y = 0;
++       y < TEST_HEIGHT;
++       y++)
++    {
++      for (gint x = 0;
++           x < TEST_WIDTH;
++           x++)
++        {
++          state ^= state << 13;
++          state ^= state >> 17;
++          state ^= state << 5;
++
++          guint value =
++            state & 0xffU;
++
++          if (((x / 5) + (y / 5)) & 1)
++            value =
++              MIN (
++                255U,
++                value + 55U);
++
++          if ((x % 13) < 2 ||
++              (y % 11) < 2)
++            value =
++              255U - value;
++
++          if (x > TEST_WIDTH / 4 &&
++              x < (3 * TEST_WIDTH) / 4 &&
++              y > TEST_HEIGHT / 4 &&
++              y < (3 * TEST_HEIGHT) / 4)
++            value =
++              (value * 3U + 127U) /
++              4U;
++
++          image[
++            (gsize) y * TEST_WIDTH +
++            (gsize) x
++          ] =
++            (guint8) value;
++        }
++    }
++
++  return image;
++}
++
++
++static guint8 *
++find_rich_synthetic_image (guint32 base)
++{
++  const guint32 step =
++    0x9e3779b9U;
++
++  for (guint attempt = 0;
++       attempt < 128;
++       attempt++)
++    {
++      g_autofree guint8 *pixels =
++        make_synthetic_image (
++          base + attempt * step);
++
++      SigfmImgInfo *info =
++        sigfm_extract (
++          pixels,
++          TEST_WIDTH,
++          TEST_HEIGHT);
++
++      if (info != NULL)
++        {
++          const gboolean rich =
++            sigfm_keypoints_count (info) >= 25;
++
++          sigfm_free_info (info);
++
++          if (rich)
++            return
++              g_steal_pointer (
++                &pixels);
++        }
++    }
++
++  g_error (
++    "Could not create rich deterministic synthetic image");
++
++  return NULL;
++}
++
++
++static void
++test_hflip (guint8 *pixels)
++{
++  for (gint y = 0;
++       y < TEST_HEIGHT;
++       y++)
++    {
++      for (gint x = 0;
++           x < TEST_WIDTH / 2;
++           x++)
++        {
++          const gsize left =
++            (gsize) y * TEST_WIDTH + x;
++
++          const gsize right =
++            (gsize) y * TEST_WIDTH +
++            (TEST_WIDTH - 1 - x);
++
++          const guint8 tmp =
++            pixels[left];
++
++          pixels[left] =
++            pixels[right];
++
++          pixels[right] =
++            tmp;
++        }
++    }
++}
++
++
++static void
++test_invert (guint8 *pixels)
++{
++  for (gsize i = 0;
++       i < TEST_WIDTH * TEST_HEIGHT;
++       i++)
++    pixels[i] =
++      0xffU - pixels[i];
++}
++
++
++static void
++extract_done_cb (GObject      *source_object,
++                 GAsyncResult *result,
++                 gpointer      user_data)
++{
++  ExtractState *state =
++    user_data;
++
++  state->success =
++    fpi_image_extract_sigfm_finish (
++      FP_IMAGE (source_object),
++      result,
++      &state->error);
++
++  g_main_loop_quit (
++    state->loop);
++}
++
++
++static gboolean
++run_extract (FpImage *image,
++             GError **error)
++{
++  ExtractState state = {0};
++
++  state.loop =
++    g_main_loop_new (
++      NULL,
++      FALSE);
++
++  fpi_image_extract_sigfm (
++    image,
++    NULL,
++    extract_done_cb,
++    &state);
++
++  g_main_loop_run (
++    state.loop);
++
++  g_main_loop_unref (
++    state.loop);
++
++  if (error != NULL)
++    *error =
++      g_steal_pointer (
++        &state.error);
++  else
++    g_clear_error (
++      &state.error);
++
++  return state.success;
++}
++
++
++static gboolean
++sigfm_info_equal (SigfmImgInfo *a,
++                  SigfmImgInfo *b)
++{
++  gint a_len = 0;
++  gint b_len = 0;
++
++  g_autofree guchar *a_data =
++    sigfm_serialize_binary (
++      a,
++      &a_len);
++
++  g_autofree guchar *b_data =
++    sigfm_serialize_binary (
++      b,
++      &b_len);
++
++  if (a_data == NULL ||
++      b_data == NULL ||
++      a_len <= 0 ||
++      b_len != a_len)
++    return FALSE;
++
++  return
++    memcmp (
++      a_data,
++      b_data,
++      (gsize) a_len) == 0;
++}
++
++
++static FpPrint *
++new_empty_sigfm_print (void)
++{
++  FpPrint *print =
++    g_object_new (
++      FP_TYPE_PRINT,
++      "driver", "sigfm-image-test",
++      "device-id", "synthetic-80x64",
++      NULL);
++
++  g_object_ref_sink (
++    print);
++
++  fpi_print_set_type (
++    print,
++    FPI_PRINT_SIGFM);
++
++  return print;
++}
++
++
++static void
++test_extract_and_print_copy (void)
++{
++  g_autofree guint8 *pixels =
++    find_rich_synthetic_image (
++      0x5135cafeU);
++
++  g_autoptr(FpImage) image =
++    fp_image_new (
++      TEST_WIDTH,
++      TEST_HEIGHT);
++
++  memcpy (
++    image->data,
++    pixels,
++    TEST_WIDTH * TEST_HEIGHT);
++
++  g_autoptr(GError) error = NULL;
++
++  g_assert_true (
++    run_extract (
++      image,
++      &error));
++
++  g_assert_no_error (
++    error);
++
++  SigfmImgInfo *image_info =
++    fpi_image_get_sigfm_info (
++      image);
++
++  g_assert_nonnull (
++    image_info);
++
++  g_assert_cmpint (
++    sigfm_keypoints_count (
++      image_info),
++    >=,
++    5);
++
++  g_autoptr(FpPrint) print =
++    new_empty_sigfm_print ();
++
++  g_assert_true (
++    fpi_print_add_from_image (
++      print,
++      image,
++      &error));
++
++  g_assert_no_error (
++    error);
++
++  g_assert_cmpuint (
++    print->prints->len,
++    ==,
++    1);
++
++  SigfmImgInfo *print_info =
++    g_ptr_array_index (
++      print->prints,
++      0);
++
++  g_assert_true (
++    print_info != image_info);
++
++  g_assert_true (
++    sigfm_info_equal (
++      image_info,
++      print_info));
++
++  /*
++   * Remove the retained debugging image on purpose and
++   * then destroy our local image reference. The SIGFM
++   * print representation must remain self-contained.
++   */
++  g_clear_object (
++    &print->image);
++
++  g_clear_object (
++    &image);
++
++  g_autofree guchar *serialized = NULL;
++  gsize serialized_len = 0;
++
++  g_assert_true (
++    fp_print_serialize (
++      print,
++      &serialized,
++      &serialized_len,
++      &error));
++
++  g_assert_no_error (
++    error);
++
++  g_assert_cmpuint (
++    serialized_len,
++    >,
++    3);
++
++  g_autoptr(FpPrint) restored =
++    fp_print_deserialize (
++      serialized,
++      serialized_len,
++      &error);
++
++  g_assert_no_error (
++    error);
++
++  g_assert_nonnull (
++    restored);
++
++  g_assert_true (
++    fp_print_equal (
++      print,
++      restored));
++}
++
++
++static void
++test_extraction_normalizes_flags (void)
++{
++  g_autofree guint8 *base_pixels =
++    find_rich_synthetic_image (
++      0x5135babeU);
++
++  g_autofree guint8 *encoded_pixels =
++    g_memdup2 (
++      base_pixels,
++      TEST_WIDTH * TEST_HEIGHT);
++
++  /*
++   * Build an encoded image whose declared flags undo
++   * these operations during SIGFM extraction.
++   */
++  test_hflip (
++    encoded_pixels);
++
++  test_invert (
++    encoded_pixels);
++
++  g_autoptr(FpImage) base =
++    fp_image_new (
++      TEST_WIDTH,
++      TEST_HEIGHT);
++
++  g_autoptr(FpImage) encoded =
++    fp_image_new (
++      TEST_WIDTH,
++      TEST_HEIGHT);
++
++  memcpy (
++    base->data,
++    base_pixels,
++    TEST_WIDTH * TEST_HEIGHT);
++
++  memcpy (
++    encoded->data,
++    encoded_pixels,
++    TEST_WIDTH * TEST_HEIGHT);
++
++  encoded->flags =
++    FPI_IMAGE_H_FLIPPED |
++    FPI_IMAGE_COLORS_INVERTED;
++
++  g_autoptr(GError) error = NULL;
++
++  g_assert_true (
++    run_extract (
++      base,
++      &error));
++
++  g_assert_no_error (
++    error);
++
++  g_assert_true (
++    run_extract (
++      encoded,
++      &error));
++
++  g_assert_no_error (
++    error);
++
++  g_assert_cmpint (
++    encoded->flags &
++      (FPI_IMAGE_H_FLIPPED |
++       FPI_IMAGE_V_FLIPPED |
++       FPI_IMAGE_COLORS_INVERTED),
++    ==,
++    0);
++
++  g_assert_cmpint (
++    memcmp (
++      encoded->data,
++      base_pixels,
++      TEST_WIDTH * TEST_HEIGHT),
++    ==,
++    0);
++
++  g_assert_true (
++    sigfm_info_equal (
++      fpi_image_get_sigfm_info (
++        base),
++      fpi_image_get_sigfm_info (
++        encoded)));
++}
++
++
++static void
++test_unmatchable_flat_image_rejected (void)
++{
++  g_autoptr(FpImage) image =
++    fp_image_new (
++      TEST_WIDTH,
++      TEST_HEIGHT);
++
++  memset (
++    image->data,
++    0,
++    TEST_WIDTH * TEST_HEIGHT);
++
++  g_autoptr(GError) error = NULL;
++
++  g_assert_false (
++    run_extract (
++      image,
++      &error));
++
++  g_assert_error (
++    error,
++    G_IO_ERROR,
++    G_IO_ERROR_FAILED);
++
++  g_assert_null (
++    fpi_image_get_sigfm_info (
++      image));
++}
++
++
++static void
++test_algorithm_selector_defaults (void)
++{
++  FpImageDeviceClass zero_class;
++
++  memset (
++    &zero_class,
++    0,
++    sizeof (zero_class));
++
++  g_assert_cmpint (
++    zero_class.algorithm,
++    ==,
++    FPI_IMAGE_DEVICE_ALGORITHM_NBIS);
++
++  g_assert_cmpint (
++    zero_class.sigfm_threshold,
++    ==,
++    0);
++
++  zero_class.algorithm =
++    FPI_IMAGE_DEVICE_ALGORITHM_SIGFM;
++
++  zero_class.sigfm_threshold = 1;
++
++  g_assert_cmpint (
++    zero_class.algorithm,
++    ==,
++    FPI_IMAGE_DEVICE_ALGORITHM_SIGFM);
++
++  g_assert_cmpint (
++    zero_class.sigfm_threshold,
++    >,
++    0);
++}
++
++
++int
++main (int argc, char **argv)
++{
++  g_test_init (
++    &argc,
++    &argv,
++    NULL);
++
++  g_test_add_func (
++    "/sigfm/image/extract-and-print-copy",
++    test_extract_and_print_copy);
++
++  g_test_add_func (
++    "/sigfm/image/normalizes-flags",
++    test_extraction_normalizes_flags);
++
++  g_test_add_func (
++    "/sigfm/image/reject-flat",
++    test_unmatchable_flat_image_rejected);
++
++  g_test_add_func (
++    "/sigfm/image/selector-default",
++    test_algorithm_selector_defaults);
++
++  return g_test_run ();
++}
+diff --git a/tests/test-sigfm-print-core.c b/tests/test-sigfm-print-core.c
+new file mode 100644
+index 0000000..b91c55c
+--- /dev/null
++++ b/tests/test-sigfm-print-core.c
+@@ -0,0 +1,445 @@
++/*
++ * Host-only SIGFM print-core tests.
++ *
++ * Synthetic pixels only.
++ * No USB, fingerprint, PSK, FDT or biometric fixture.
++ * Exact matcher scores are never printed.
++ */
++
++#include <glib.h>
++#include <string.h>
++
++#include "fp-print-private.h"
++#include "fpi-print.h"
++#include "sigfm/sigfm.hpp"
++
++
++#define TEST_WIDTH 80
++#define TEST_HEIGHT 64
++
++
++static guint8 *
++make_synthetic_image (guint32 seed)
++{
++  guint8 *image =
++    g_new0 (
++      guint8,
++      TEST_WIDTH * TEST_HEIGHT);
++
++  guint32 state = seed;
++
++  for (gint y = 0;
++       y < TEST_HEIGHT;
++       y++)
++    {
++      for (gint x = 0;
++           x < TEST_WIDTH;
++           x++)
++        {
++          state ^= state << 13;
++          state ^= state >> 17;
++          state ^= state << 5;
++
++          guint value =
++            state & 0xffU;
++
++          if (((x / 5) + (y / 5)) & 1)
++            value =
++              MIN (
++                255U,
++                value + 55U);
++
++          if ((x % 13) < 2 ||
++              (y % 11) < 2)
++            value =
++              255U - value;
++
++          if (x > TEST_WIDTH / 4 &&
++              x < (3 * TEST_WIDTH) / 4 &&
++              y > TEST_HEIGHT / 4 &&
++              y < (3 * TEST_HEIGHT) / 4)
++            value =
++              (value * 3U + 127U) /
++              4U;
++
++          image[
++            (gsize) y * TEST_WIDTH +
++            (gsize) x
++          ] =
++            (guint8) value;
++        }
++    }
++
++  return image;
++}
++
++
++static FpPrint *
++new_empty_sigfm_print (void)
++{
++  FpPrint *print =
++    g_object_new (
++      FP_TYPE_PRINT,
++      "driver", "sigfm-synthetic-test",
++      "device-id", "synthetic-80x64",
++      NULL);
++
++  g_object_ref_sink (print);
++
++  fpi_print_set_type (
++    print,
++    FPI_PRINT_SIGFM);
++
++  return print;
++}
++
++
++static FpPrint *
++new_sigfm_print (guint32 seed)
++{
++  const guint32 step = 0x9e3779b9U;
++
++  for (guint attempt = 0;
++       attempt < 128;
++       attempt++)
++    {
++      const guint32 candidate_seed =
++        seed + attempt * step;
++
++      g_autofree guint8 *image =
++        make_synthetic_image (
++          candidate_seed);
++
++      SigfmImgInfo *info =
++        sigfm_extract (
++          image,
++          TEST_WIDTH,
++          TEST_HEIGHT);
++
++      if (info != NULL &&
++          sigfm_keypoints_count (info) >= 25)
++        {
++          FpPrint *print =
++            new_empty_sigfm_print ();
++
++          g_ptr_array_add (
++            print->prints,
++            info);
++
++          memset (
++            image,
++            0,
++            TEST_WIDTH * TEST_HEIGHT);
++
++          return print;
++        }
++
++      if (info != NULL)
++        sigfm_free_info (info);
++
++      memset (
++        image,
++        0,
++        TEST_WIDTH * TEST_HEIGHT);
++    }
++
++  g_error (
++    "SIGFM deterministic synthetic fixture exhausted");
++
++  return NULL;
++}
++
++
++
++static void
++test_sigfm_copy_collection (void)
++{
++  g_autoptr(FpPrint) sample =
++    new_sigfm_print (
++      0x5135cafeU);
++
++  g_autoptr(FpPrint) collection =
++    new_empty_sigfm_print ();
++
++  fpi_print_add_print (
++    collection,
++    sample);
++
++  g_assert_cmpuint (
++    collection->prints->len,
++    ==,
++    1);
++
++  g_assert_true (
++    g_ptr_array_index (
++      collection->prints,
++      0)
++    !=
++    g_ptr_array_index (
++      sample->prints,
++      0));
++
++  SigfmImgInfo *sample_info =
++    g_ptr_array_index (
++      sample->prints,
++      0);
++
++  SigfmImgInfo *copy_info =
++    g_ptr_array_index (
++      collection->prints,
++      0);
++
++  gint sample_len = 0;
++  gint copy_len = 0;
++
++  g_autofree guchar *sample_serialized =
++    sigfm_serialize_binary (
++      sample_info,
++      &sample_len);
++
++  g_autofree guchar *copy_serialized =
++    sigfm_serialize_binary (
++      copy_info,
++      &copy_len);
++
++  g_assert_nonnull (
++    sample_serialized);
++
++  g_assert_nonnull (
++    copy_serialized);
++
++  g_assert_cmpint (
++    sample_len,
++    >,
++    0);
++
++  g_assert_cmpint (
++    copy_len,
++    ==,
++    sample_len);
++
++  g_assert_cmpint (
++    memcmp (
++      sample_serialized,
++      copy_serialized,
++      (gsize) sample_len),
++    ==,
++    0);
++}
++
++
++static void
++test_sigfm_serialization_roundtrip (void)
++{
++  g_autoptr(FpPrint) a =
++    new_sigfm_print (
++      0x5135cafeU);
++
++  g_autoptr(FpPrint) b =
++    new_sigfm_print (
++      0x51f00d13U);
++
++  g_autoptr(FpPrint) collection =
++    new_empty_sigfm_print ();
++
++  g_autofree guchar *serialized = NULL;
++  gsize serialized_len = 0;
++  g_autoptr(GError) error = NULL;
++
++  fpi_print_add_print (
++    collection,
++    a);
++
++  fpi_print_add_print (
++    collection,
++    b);
++
++  g_assert_cmpuint (
++    collection->prints->len,
++    ==,
++    2);
++
++  g_assert_true (
++    fp_print_serialize (
++      collection,
++      &serialized,
++      &serialized_len,
++      &error));
++
++  g_assert_no_error (error);
++  g_assert_nonnull (serialized);
++  g_assert_cmpuint (
++    serialized_len,
++    >,
++    3);
++
++  g_autoptr(FpPrint) restored =
++    fp_print_deserialize (
++      serialized,
++      serialized_len,
++      &error);
++
++  g_assert_no_error (error);
++  g_assert_nonnull (restored);
++
++  g_assert_cmpint (
++    restored->type,
++    ==,
++    FPI_PRINT_SIGFM);
++
++  g_assert_cmpuint (
++    restored->prints->len,
++    ==,
++    2);
++
++  g_assert_true (
++    fp_print_equal (
++      collection,
++      restored));
++}
++
++
++static void
++test_sigfm_same_different (void)
++{
++  g_autoptr(FpPrint) enrolled =
++    new_sigfm_print (
++      0x5135cafeU);
++
++  g_autoptr(FpPrint) same =
++    new_sigfm_print (
++      0x5135cafeU);
++
++  SigfmImgInfo *enrolled_info =
++    g_ptr_array_index (
++      enrolled->prints,
++      0);
++
++  SigfmImgInfo *same_info =
++    g_ptr_array_index (
++      same->prints,
++      0);
++
++  const gint same_score =
++    sigfm_match_score (
++      same_info,
++      enrolled_info);
++
++  if (same_score <= 0)
++    g_error (
++      "SIGFM synthetic same-case failed");
++
++  g_autoptr(FpPrint) different = NULL;
++  gint different_score = -1;
++
++  const guint32 negative_base =
++    0xa5c3f117U;
++
++  const guint32 negative_step =
++    0x7f4a7c15U;
++
++  for (guint attempt = 0;
++       attempt < 64;
++       attempt++)
++    {
++      g_autoptr(FpPrint) candidate =
++        new_sigfm_print (
++          negative_base +
++          attempt * negative_step);
++
++      SigfmImgInfo *candidate_info =
++        g_ptr_array_index (
++          candidate->prints,
++          0);
++
++      const gint candidate_score =
++        sigfm_match_score (
++          candidate_info,
++          enrolled_info);
++
++      if (candidate_score >= 0 &&
++          candidate_score < same_score)
++        {
++          different_score =
++            candidate_score;
++
++          different =
++            g_steal_pointer (
++              &candidate);
++
++          break;
++        }
++    }
++
++  if (different == NULL ||
++      different_score < 0 ||
++      different_score >= same_score)
++    g_error (
++      "SIGFM synthetic negative-case search failed");
++
++  const gint threshold =
++    different_score +
++    ((same_score -
++      different_score +
++      1) / 2);
++
++  if (threshold <= different_score ||
++      threshold > same_score)
++    g_error (
++      "SIGFM synthetic threshold derivation failed");
++
++  g_autoptr(GError) error = NULL;
++
++  FpiMatchResult result =
++    fpi_print_sigfm_match (
++      enrolled,
++      same,
++      threshold,
++      &error);
++
++  g_assert_no_error (error);
++
++  g_assert_cmpint (
++    result,
++    ==,
++    FPI_MATCH_SUCCESS);
++
++  result =
++    fpi_print_sigfm_match (
++      enrolled,
++      different,
++      threshold,
++      &error);
++
++  g_assert_no_error (error);
++
++  g_assert_cmpint (
++    result,
++    ==,
++    FPI_MATCH_FAIL);
++}
++
++
++
++int
++main (int argc, char **argv)
++{
++  g_test_init (
++    &argc,
++    &argv,
++    NULL);
++
++  g_test_add_func (
++    "/sigfm/print/copy-collection",
++    test_sigfm_copy_collection);
++
++  g_test_add_func (
++    "/sigfm/print/serialization-roundtrip",
++    test_sigfm_serialization_roundtrip);
++
++  g_test_add_func (
++    "/sigfm/print/same-different",
++    test_sigfm_same_different);
++
++  return g_test_run ();
++}
+diff --git a/tests/test-sigfm-robustness.cpp b/tests/test-sigfm-robustness.cpp
+new file mode 100644
+index 0000000..bf319e8
+--- /dev/null
++++ b/tests/test-sigfm-robustness.cpp
+@@ -0,0 +1,620 @@
++/*
++ * SIGFM parser/resource hardening tests.
++ *
++ * No biometric input.
++ * No hardware.
++ * No exact match scores printed.
++ */
++
++#include <array>
++#include <cmath>
++#include <cstddef>
++#include <cstdint>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <limits>
++#include <stdexcept>
++#include <vector>
++
++#include "../libfprint/sigfm/binary.hpp"
++#include "../libfprint/sigfm/img-info.hpp"
++#include "../libfprint/sigfm/sigfm.hpp"
++
++
++static SigfmImgInfo
++make_valid_info (std::size_t count)
++{
++  SigfmImgInfo info;
++
++  info.keypoints.reserve (
++    count);
++
++  for (std::size_t i = 0;
++       i < count;
++       i++)
++    {
++      info.keypoints.emplace_back (
++        cv::Point2f (
++          static_cast<float> (i + 1),
++          static_cast<float> (i + 2)),
++        1.5f,
++        45.0f,
++        0.5f,
++        0,
++        static_cast<int> (i));
++    }
++
++  info.descriptors =
++    cv::Mat::zeros (
++      static_cast<int> (count),
++      128,
++      CV_32FC1);
++
++  for (int row = 0;
++       row < info.descriptors.rows;
++       row++)
++    {
++      float *ptr =
++        info.descriptors.ptr<float> (
++          row);
++
++      for (int col = 0;
++           col < info.descriptors.cols;
++           col++)
++        ptr[col] =
++          static_cast<float> (
++            (row + 1) * (col + 3)) /
++          1000.0f;
++    }
++
++  return info;
++}
++
++
++static int
++test_stream_bounds ()
++{
++  const std::array<unsigned char, 2> source = {{
++    0x11,
++    0x22
++  }};
++
++  std::array<unsigned char, 3> destination = {{}};
++
++  try
++    {
++      bin::stream stream (
++        source.begin (),
++        source.end ());
++
++      stream.read (
++        destination.begin (),
++        destination.size ());
++
++      return 1;
++    }
++  catch (const std::runtime_error&)
++    {
++    }
++
++  return 0;
++}
++
++
++static int
++test_null_api ()
++{
++  int len = 123;
++
++  if (sigfm_copy_info (nullptr) != nullptr)
++    return 10;
++
++  if (sigfm_keypoints_count (nullptr) != 0)
++    return 11;
++
++  if (sigfm_serialize_binary (
++        nullptr,
++        &len) != nullptr)
++    return 12;
++
++  if (len != 0)
++    return 13;
++
++  if (sigfm_deserialize_binary (
++        nullptr,
++        1) != nullptr)
++    return 14;
++
++  if (sigfm_match_score (
++        nullptr,
++        nullptr) >= 0)
++    return 15;
++
++  return 0;
++}
++
++
++static int
++test_valid_roundtrip ()
++{
++  SigfmImgInfo info =
++    make_valid_info (6);
++
++  int len = 0;
++
++  unsigned char *blob =
++    sigfm_serialize_binary (
++      &info,
++      &len);
++
++  if (blob == nullptr ||
++      len <= 0)
++    return 20;
++
++  SigfmImgInfo *restored =
++    sigfm_deserialize_binary (
++      blob,
++      len);
++
++  if (restored == nullptr)
++    {
++      std::free (blob);
++      return 21;
++    }
++
++  if (sigfm_keypoints_count (
++        restored) != 6)
++    {
++      sigfm_free_info (
++        restored);
++
++      std::free (blob);
++
++      return 22;
++    }
++
++  SigfmImgInfo *copy =
++    sigfm_copy_info (
++      restored);
++
++  if (copy == nullptr)
++    {
++      sigfm_free_info (
++        restored);
++
++      std::free (blob);
++
++      return 23;
++    }
++
++  const int score =
++    sigfm_match_score (
++      restored,
++      copy);
++
++  if (score < 0)
++    {
++      sigfm_free_info (
++        copy);
++
++      sigfm_free_info (
++        restored);
++
++      std::free (blob);
++
++      return 24;
++    }
++
++  sigfm_free_info (
++    copy);
++
++  sigfm_free_info (
++    restored);
++
++  std::free (blob);
++
++  return 0;
++}
++
++
++static int
++test_truncation_and_trailing ()
++{
++  SigfmImgInfo info =
++    make_valid_info (6);
++
++  int len = 0;
++
++  unsigned char *raw =
++    sigfm_serialize_binary (
++      &info,
++      &len);
++
++  if (raw == nullptr ||
++      len <= 1)
++    return 30;
++
++  /*
++   * Every strict prefix must fail safely.
++   */
++  for (int cut = 1;
++       cut < len;
++       cut++)
++    {
++      SigfmImgInfo *candidate =
++        sigfm_deserialize_binary (
++          raw,
++          cut);
++
++      if (candidate != nullptr)
++        {
++          sigfm_free_info (
++            candidate);
++
++          std::free (raw);
++
++          return 31;
++        }
++    }
++
++  std::vector<unsigned char> trailing (
++    raw,
++    raw + len);
++
++  trailing.push_back (
++    0xa5);
++
++  if (sigfm_deserialize_binary (
++        trailing.data (),
++        static_cast<int> (
++          trailing.size ())) != nullptr)
++    {
++      std::free (raw);
++      return 32;
++    }
++
++  if (sigfm_deserialize_binary (
++        raw,
++        0) != nullptr)
++    {
++      std::free (raw);
++      return 33;
++    }
++
++  if (sigfm_deserialize_binary (
++        raw,
++        -1) != nullptr)
++    {
++      std::free (raw);
++      return 34;
++    }
++
++  /*
++   * Must reject before reading past the actual buffer.
++   */
++  if (sigfm_deserialize_binary (
++        raw,
++        static_cast<int> (
++          bin::max_serialized_bytes + 1U))
++      != nullptr)
++    {
++      std::free (raw);
++      return 35;
++    }
++
++  std::free (raw);
++
++  return 0;
++}
++
++
++static int
++test_resource_bombs ()
++{
++  constexpr std::size_t count = 6;
++
++  SigfmImgInfo info =
++    make_valid_info (count);
++
++  int len = 0;
++
++  unsigned char *raw =
++    sigfm_serialize_binary (
++      &info,
++      &len);
++
++  if (raw == nullptr ||
++      len <= 0)
++    return 40;
++
++  std::vector<unsigned char> blob (
++    raw,
++    raw + len);
++
++  std::free (raw);
++
++  /*
++   * First field is vector<size_t> count.
++   * Simulate attacker requesting enormous reserve().
++   */
++  {
++    auto mutated = blob;
++
++    const std::size_t huge =
++      std::numeric_limits<std::size_t>::max ();
++
++    std::memcpy (
++      mutated.data (),
++      &huge,
++      sizeof (huge));
++
++    if (sigfm_deserialize_binary (
++          mutated.data (),
++          static_cast<int> (
++            mutated.size ())) != nullptr)
++      return 41;
++  }
++
++  /*
++   * Serialized KeyPoint:
++   * int class_id
++   * float angle
++   * int octave
++   * float response
++   * float size
++   * float x
++   * float y
++   */
++  constexpr std::size_t keypoint_bytes =
++    sizeof (int) * 2U +
++    sizeof (float) * 5U;
++
++  const std::size_t mat_offset =
++    sizeof (std::size_t) +
++    count * keypoint_bytes;
++
++  if (mat_offset +
++      3U * sizeof (int) >
++      blob.size ())
++    return 42;
++
++  /*
++   * Matrix header is:
++   * type, rows, cols
++   */
++  {
++    auto mutated = blob;
++
++    const int huge_rows =
++      std::numeric_limits<int>::max ();
++
++    std::memcpy (
++      mutated.data () +
++        mat_offset +
++        sizeof (int),
++      &huge_rows,
++      sizeof (huge_rows));
++
++    if (sigfm_deserialize_binary (
++          mutated.data (),
++          static_cast<int> (
++            mutated.size ())) != nullptr)
++      return 43;
++  }
++
++  {
++    auto mutated = blob;
++
++    const int bad_type =
++      CV_8UC1;
++
++    std::memcpy (
++      mutated.data () +
++        mat_offset,
++      &bad_type,
++      sizeof (bad_type));
++
++    if (sigfm_deserialize_binary (
++          mutated.data (),
++          static_cast<int> (
++            mutated.size ())) != nullptr)
++      return 44;
++  }
++
++  {
++    auto mutated = blob;
++
++    const int bad_cols =
++      64;
++
++    std::memcpy (
++      mutated.data () +
++        mat_offset +
++        2U * sizeof (int),
++      &bad_cols,
++      sizeof (bad_cols));
++
++    if (sigfm_deserialize_binary (
++          mutated.data (),
++          static_cast<int> (
++            mutated.size ())) != nullptr)
++      return 45;
++  }
++
++  return 0;
++}
++
++
++static int
++test_invalid_logical_objects ()
++{
++  int len = 99;
++
++  {
++    SigfmImgInfo bad =
++      make_valid_info (6);
++
++    bad.descriptors =
++      cv::Mat::zeros (
++        6,
++        64,
++        CV_32FC1);
++
++    if (sigfm_serialize_binary (
++          &bad,
++          &len) != nullptr ||
++        len != 0)
++      return 50;
++  }
++
++  {
++    SigfmImgInfo bad =
++      make_valid_info (6);
++
++    bad.descriptors =
++      cv::Mat::zeros (
++        5,
++        128,
++        CV_32FC1);
++
++    if (sigfm_serialize_binary (
++          &bad,
++          &len) != nullptr ||
++        len != 0)
++      return 51;
++  }
++
++  {
++    SigfmImgInfo bad =
++      make_valid_info (6);
++
++    bad.keypoints[0].pt.x =
++      std::numeric_limits<float>::quiet_NaN ();
++
++    if (sigfm_serialize_binary (
++          &bad,
++          &len) != nullptr ||
++        len != 0)
++      return 52;
++  }
++
++  {
++    SigfmImgInfo bad =
++      make_valid_info (6);
++
++    bad.descriptors.at<float> (
++      0,
++      0) =
++        std::numeric_limits<float>::quiet_NaN ();
++
++    if (sigfm_serialize_binary (
++          &bad,
++          &len) != nullptr ||
++        len != 0)
++      return 53;
++  }
++
++  {
++    SigfmImgInfo bad;
++
++    bad.keypoints.resize (
++      bin::max_container_elements + 1U);
++
++    if (sigfm_serialize_binary (
++          &bad,
++          &len) != nullptr ||
++        len != 0)
++      return 54;
++  }
++
++  return 0;
++}
++
++
++static int
++test_deterministic_mutation_sweep ()
++{
++  SigfmImgInfo info =
++    make_valid_info (6);
++
++  int len = 0;
++
++  unsigned char *raw =
++    sigfm_serialize_binary (
++      &info,
++      &len);
++
++  if (raw == nullptr ||
++      len <= 0)
++    return 60;
++
++  std::vector<unsigned char> original (
++    raw,
++    raw + len);
++
++  std::free (raw);
++
++  for (std::size_t i = 0;
++       i < original.size ();
++       i++)
++    {
++      auto mutated =
++        original;
++
++      mutated[i] ^=
++        0xffU;
++
++      SigfmImgInfo *candidate =
++        sigfm_deserialize_binary (
++          mutated.data (),
++          static_cast<int> (
++            mutated.size ()));
++
++      if (candidate != nullptr)
++        sigfm_free_info (
++          candidate);
++    }
++
++  return 0;
++}
++
++
++int
++main ()
++{
++  int rc;
++
++  rc = test_stream_bounds ();
++  if (rc != 0)
++    return rc;
++
++  rc = test_null_api ();
++  if (rc != 0)
++    return rc;
++
++  rc = test_valid_roundtrip ();
++  if (rc != 0)
++    return rc;
++
++  rc = test_truncation_and_trailing ();
++  if (rc != 0)
++    return rc;
++
++  rc = test_resource_bombs ();
++  if (rc != 0)
++    return rc;
++
++  rc = test_invalid_logical_objects ();
++  if (rc != 0)
++    return rc;
++
++  rc = test_deterministic_mutation_sweep ();
++  if (rc != 0)
++    return rc;
++
++  std::puts (
++    "SIGFM_ROBUSTNESS=PASS");
++
++  return 0;
++}
