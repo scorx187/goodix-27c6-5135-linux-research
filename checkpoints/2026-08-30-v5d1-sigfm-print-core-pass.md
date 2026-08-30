@@ -22,6 +22,14 @@ SHA-256:
 
 The patch was exported from the isolated worktree after staging all paths with `git diff --cached --binary`; unlike the earlier V5C export mistake, the V5D1 patch includes the new untracked SIGFM/test files. Patch path count: **11**.
 
+The exact patch artifact is now also stored on GitHub on branch `progress/v5c-sigfm-2026-08-30`:
+
+- `patches/v5d1/goodix5135-v5d1-sigfm-print-core.patch`
+- `patches/v5d1/goodix5135-v5d1-sigfm-print-core.patch.sha256`
+- storage commit: `86787340a43cbd0105ffb4d6e716d647d889d93e`
+
+The GitHub `.sha256` file records the same expected digest `7c5e8f2216195071c2e4375f3b8dd40e0ef83832f06cbb3ae80290adb26165ea`.
+
 ## Scope proven by the successful run
 
 V5D1 adds host-side SIGFM print representation support only:
