@@ -3531,6 +3531,25 @@ goodix5135_capture_up_response_cb (
       goodix5135_capture_runtime_reset (
         self);
 
+      if (self->deactivating)
+        {
+          /*
+           * libfprint already completed the operation, but sensor-side
+           * FDT-up cleanup has now reached a valid finger-off response.
+           *
+           * Stop the logical I/O generation here. The async drain
+           * callback will complete deactivation after this callback
+           * returns and pending reaches zero.
+           */
+          fp_dbg (
+            "Native FpImage lifecycle: FDT-up cleanup completed during deactivation");
+
+          goodix5135_io_stop (
+            &self->io);
+
+          return;
+        }
+
       fp_dbg (
         "Native FpImage stage: reporting finger absent");
 
@@ -8079,6 +8098,30 @@ goodix5135_deactivate (FpImageDevice *dev)
    * Once real asynchronous transfers exist, their callbacks will drain
    * io.pending and call goodix5135_maybe_finish_deactivate().
    */
+  if (goodix5135_fpimage_test_requested () &&
+      (
+        self->capture_runtime_state ==
+          GOODIX5135_CAPTURE_RUNTIME_WAIT_UP_OUT ||
+        self->capture_runtime_state ==
+          GOODIX5135_CAPTURE_RUNTIME_WAIT_UP_ACK ||
+        self->capture_runtime_state ==
+          GOODIX5135_CAPTURE_RUNTIME_WAIT_UP_RESPONSE
+      ))
+    {
+      /*
+       * libfprint may request deactivation immediately after accepting
+       * the final image while the already-started FDT-up cleanup chain
+       * still has pending work.
+       *
+       * Keep this logical I/O generation alive only long enough for
+       * 0x34 OUT -> ACK -> finger-off response to complete.
+       */
+      fp_dbg (
+        "Native FpImage lifecycle: deferring I/O stop until FDT-up cleanup completes");
+
+      return;
+    }
+
   goodix5135_io_stop (&self->io);
 
   fp_dbg ("Stopping host I/O lifecycle generation %" G_GUINT64_FORMAT
