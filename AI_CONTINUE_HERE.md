@@ -10,6 +10,7 @@ Read this file, then read:
 
 - `handoffs/CURRENT_WORK_HANDOFF_2026-08-31.md`
 - `checkpoints/2026-08-31-v5d4b-bank-attempt-disk-full.md`
+- `scripts/v5d4b-bank-after-disk-cleanup.sh`
 
 Do **not** infer state from older chat history. The handoff above is the canonical continuation state.
 
@@ -60,7 +61,7 @@ The banking script then executed its safe rollback and restored the real local b
 ## Next action
 
 1. Check/free disk space, especially the filesystem backing `/tmp` and the repository/build directory.
-2. Re-run the V5D4B banking step from the exact clean baseline using the verified cumulative patch.
+2. Re-run the guarded banking script in `scripts/v5d4b-bank-after-disk-cleanup.sh` from the exact clean baseline using the verified cumulative patch.
 3. Build and run all host regressions again.
 4. Commit only after every gate passes.
 5. Back up the new banked commit SHA to GitHub.
