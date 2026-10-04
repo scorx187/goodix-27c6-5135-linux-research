@@ -1,6 +1,6 @@
 # AI CONTINUE HERE — Goodix 27c6:5135
 
-**Updated:** 2026-08-31
+**Updated:** 2026-10-04
 
 This is the entry point for a new ChatGPT/AI session.
 
@@ -8,71 +8,77 @@ This is the entry point for a new ChatGPT/AI session.
 
 Read this file, then read:
 
-- `handoffs/CURRENT_WORK_HANDOFF_2026-08-31.md`
-- `checkpoints/2026-08-31-v5d4b-bank-attempt-disk-full.md`
-- `scripts/v5d4b-bank-after-disk-cleanup.sh`
+- `checkpoints/2026-10-04-v5d6-sigfm-optin.md`
+- `handoffs/CURRENT_WORK_HANDOFF_2026-08-31.md` for older historical detail only
 
-Do **not** infer state from older chat history. The handoff above is the canonical continuation state.
+The 2026-10-04 checkpoint supersedes the old V5D4B disk-full blocker.
 
 ## Current one-line status
 
-The hardened host-only SIGFM stack through **V5D4B** is fully built/tested and backed up as a cumulative 20-path patch, but the attempt to bank it into the real local libfprint branch was safely rolled back because the machine ran out of disk space during Meson setup.
+The hardened SIGFM host stack is now banked into the real local libfprint branch, the `5` versus `25` keypoint semantics are resolved, and Goodix5135 explicitly opts into SIGFM with an initial threshold of `12` and `30` enrollment stages. All current host gates pass. The next milestone is the first guarded live SIGFM enrollment/verification experiment.
 
-## Exact current local libfprint baseline
+## Exact current local libfprint state
 
 - repo: `~/libfprint`
 - branch: `goodix-27c6-5135-chicagohu`
-- HEAD: `37ac6876fd6d248b48a7892410cf75144f3882e5`
+- HEAD: `e2c0eb96cb18f6787d4721bb238271a100f15d5f`
 - expected working tree: CLEAN
-- mirrored GitHub branch: `libfprint/goodix-27c6-5135-37ac6876`
+- GitHub mirror: `libfprint/goodix-27c6-5135-e2c0eb96`
 
-The mirror is verified to point to the exact SHA above.
+Important commits:
 
-## Latest cumulative artifact
+- V5D4B banked host SIGFM stack: `8ef22cd196d827d6a7213ed3173c2285961f4247`
+- V5D5 template-quality gate restoration: `0e7beb4c245b6313bfbeb556c60c2ed47b731a40`
+- V5D6 Goodix SIGFM opt-in: `e2c0eb96cb18f6787d4721bb238271a100f15d5f`
 
-- local filename: `~/goodix5135-v5d4b-sigfm-parser-hardening.patch`
-- GitHub: `patches/v5d4/goodix5135-v5d4b-sigfm-parser-hardening.patch`
-- SHA256: `9b503c9b969c5848f7319fb86b8cdb8259be564ad6d858a41b669b0fffdaf632`
-- cumulative paths: 20
-- patch applies cleanly to `37ac6876fd6d248b48a7892410cf75144f3882e5`
+## Current SIGFM policy
 
-## What is already green
+- template extraction quality gate: `25` keypoints
+- matcher internal minimum correspondence/geometric support: `5`
+- Goodix5135 SIGFM threshold candidate: `12`
+- Goodix5135 enrollment stages: `30`
+- sensor geometry: `80x64`
 
-- V5D1 SIGFM print core: PASS
-- V5D2 FpImage SIGFM + generic algorithm selector: PASS
-- V5D3 comparator/geometry hardening: PASS
-- V5D4B parser/resource/malformed-data hardening: PASS
-- SIGFM robustness test: PASS
-- SIGFM geometry test: PASS
-- SIGFM image core: PASS
-- SIGFM print core: PASS
-- libfprint `fpi-device`: PASS
-- Goodix regressions: **9/9 PASS**
-- hardware used during V5D1–V5D4B host work: NO
+Do not merge the `25` and `5` concepts again. The threshold `12` is an initial sensor-family-informed candidate, not a final FAR/FRR claim.
 
-## Current blocker
+## Host verification
 
-Banking failed only because:
+Fresh targeted V5D6 result: **14/14 PASS**.
 
-`OSError: [Errno 28] No space left on device`
+Passed:
 
-The banking script then executed its safe rollback and restored the real local branch to `37ac6876...`, clean.
+- SIGFM robustness
+- SIGFM geometry hardening
+- SIGFM image core
+- SIGFM print core
+- `fpi-device`
+- all nine Goodix5135 regression suites
+
+No hardware was touched during V5D4B banking, V5D5, or V5D6 host verification.
+
+## Live-runtime position
+
+The existing guarded native TLS/FDT/image/FpImage path remains in place. SIGFM exact match scores are not logged by the matcher helper.
+
+At the 2026-10-04 checkpoint, the Harb Agent process did not have the three private runtime input environment variables set. Do not automatically discover or expose private PSK/FDT material. Reuse the locally held private inputs only through an explicit guarded local setup that does not print, hash, upload, or commit them.
+
+No live SIGFM fingerprint run has happened yet.
 
 ## Next action
 
-1. Check/free disk space, especially the filesystem backing `/tmp` and the repository/build directory.
-2. Re-run the guarded banking script in `scripts/v5d4b-bank-after-disk-cleanup.sh` from the exact clean baseline using the verified cumulative patch.
-3. Build and run all host regressions again.
-4. Commit only after every gate passes.
-5. Back up the new banked commit SHA to GitHub.
-6. **Do not perform a live fingerprint run yet.** First resolve the runtime SIGFM keypoint gate (`5` vs preserved upstream extraction gate `25`) and choose a separate SIGFM threshold through host-only evidence.
+1. Prepare the existing guarded live FpImage runtime with the locally held private inputs without exposing them.
+2. Run a controlled SIGFM enrollment/verification experiment from the uninstalled development build.
+3. Do not rerun consumed V3 or V4/V4b experiments.
+4. Do not print exact live keypoint/minutiae counts or SIGFM/BZ3 scores.
+5. If live matching is healthy, move toward ordinary `fprintd-enroll` and `fprintd-verify` use.
+6. Then complete cold-boot, reboot, suspend/resume, cancellation/timeout, Windows Hello compatibility, and privacy/logging safety gates.
 
 ## Hard safety/privacy rules
 
 Never print, persist, commit, upload, publish, or hash sensitive device/biometric material including plaintext PSK, PSK files/hashes, full OTP, fingerprint images/raw/templates, Goodix cache/calibration data, proprietary Goodix binaries, Windows biometric DB, process dumps, or full unit-specific runtime config/hash.
 
-Never print exact live minutiae counts or exact SIGFM/BZ3 scores. No firmware erase/flash, PSK rewrite, arbitrary persistent sensor writes, or Windows enrollment deletion shortcuts.
+Never print exact live minutiae/keypoint counts or exact SIGFM/BZ3 scores. No firmware erase/flash, PSK rewrite/reprovision, arbitrary persistent sensor writes, or Windows enrollment deletion shortcuts.
 
 ## Draft PR
 
-Research Draft PR #2 is intentionally still draft. Do not merge unless explicitly requested.
+Research Draft PR #2 remains intentionally draft. Do not merge unless explicitly requested.
