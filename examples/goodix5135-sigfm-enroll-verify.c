@@ -173,12 +173,7 @@ main (void)
   g_print ("LIVE_SIGFM_ENROLL_CLEANUP=LIFT_FINGER_AND_WAIT\n");
   fflush (stdout);
 
-  /*
-   * Enrollment completion can be delivered before the final image-device
-   * deactivation and FDT-up finger-off cleanup have drained. Keep the same
-   * OPEN/TLS session and service the default main context for a bounded
-   * period before VERIFY reactivates the device.
-   */
+  /* Enrollment completion can precede final finger-off cleanup. */
   drain_main_context_for_ms (5000U);
 
   g_print ("LIVE_SIGFM_ENROLL_CLEANUP=DRAINED\n");
@@ -203,6 +198,15 @@ main (void)
     g_print ("LIVE_SIGFM_VERIFY=SAME_FINGER_MATCH\n");
   else
     g_print ("LIVE_SIGFM_VERIFY=SAME_FINGER_NO_MATCH\n");
+
+  g_print ("LIVE_SIGFM_VERIFY_CLEANUP=LIFT_FINGER_AND_WAIT\n");
+  fflush (stdout);
+
+  /* Verification result can also precede the final finger-off cleanup. */
+  drain_main_context_for_ms (5000U);
+
+  g_print ("LIVE_SIGFM_VERIFY_CLEANUP=DRAINED\n");
+  fflush (stdout);
 
   if (!fp_device_close_sync (device, NULL, &error))
     {
