@@ -1,0 +1,69 @@
+diff --git a/libfprint/fpi-print.c b/libfprint/fpi-print.c
+--- a/libfprint/fpi-print.c
++++ b/libfprint/fpi-print.c
+@@ -365,6 +365,27 @@ fpi_print_bz3_match (FpPrint *template, FpPrint *print, gint bz3_threshold, GEr
+   return FPI_MATCH_FAIL;
+ }
+ 
++static const gchar *
++sigfm_coarse_score_bucket (gint score)
++{
++  if (score <= 0)
++    return "ZERO";
++
++  if (score <= 4)
++    return "ONE_TO_FOUR";
++
++  if (score <= 9)
++    return "FIVE_TO_NINE";
++
++  if (score <= 19)
++    return "TEN_TO_NINETEEN";
++
++  return "TWENTY_PLUS";
++}
++
+ /**
+  * fpi_print_sigfm_match:
+  * @template: Enrolled SIGFM print collection
+@@ -380,6 +401,12 @@ fpi_print_sigfm_match (FpPrint *template,
+                        GError **error)
+ {
+   SigfmImgInfo *probe;
++  gboolean coarse_diagnostics;
++  gboolean matched = FALSE;
++  gint best_score = 0;
++
++  coarse_diagnostics =
++    g_strcmp0 (g_getenv ("LIBFPRINT_SIGFM_COARSE_DIAGNOSTICS"), "COARSE_ONLY") == 0;
+ 
+   if (template == NULL ||
+       print == NULL ||
+@@ -439,6 +466,9 @@ fpi_print_sigfm_match (FpPrint *template,
+           enrolled);
+ 
+       if (score < 0)
+@@ -451,10 +481,23 @@ fpi_print_sigfm_match (FpPrint *template,
+           return FPI_MATCH_ERROR;
+         }
+ 
++      if (score > best_score)
++        best_score = score;
++
+       if (score >= threshold)
+-        return FPI_MATCH_SUCCESS;
++        {
++          if (!coarse_diagnostics)
++            return FPI_MATCH_SUCCESS;
++
++          matched = TRUE;
++        }
+     }
+ 
+-  return FPI_MATCH_FAIL;
++  if (coarse_diagnostics)
++    g_print ("SIGFM_MATCH_BEST_BUCKET=%s\n",
++             sigfm_coarse_score_bucket (best_score));
++
++  return matched ? FPI_MATCH_SUCCESS : FPI_MATCH_FAIL;
+ }
