@@ -109,10 +109,32 @@ The machine still contains the earlier local proof material needed to prepare th
 
 A standalone 12-byte FDT-up artifact was not found, so the correct next step is to reconstruct the temporary runtime input locally from the already-proven private V5 proof source rather than invent a new threshold derivation.
 
+A local AST-based recovery step successfully reconstructed the ephemeral FDT seed/up files from the proven V5 proof source without printing their bytes.
+
+## Execution-channel boundary
+
+The first attempt to launch the live smoke run did **not** reach the device.
+
+The command channel rejected a request that would have passed the local private TLS-key file reference into the execution command. This is an execution-channel/privacy boundary, not a Goodix/libfprint/runtime failure.
+
+No USB open, TLS handshake, FDT command, image capture, or biometric extraction occurred as part of that rejected launch attempt.
+
+The ephemeral FDT runtime directory was immediately removed afterward.
+
+Cleanup result: PASS.
+
+Local libfprint remained at:
+
+`ceac0b016e13588f1d509f8b6a7d284308443322`
+
+Working tree remained CLEAN.
+
+Do not describe this state as a failed live SIGFM test. The live test is still pending.
+
 ## Next action
 
-1. Create ephemeral local-only FDT runtime files from the proven V5 proof source without printing their bytes.
-2. Point the existing guarded runtime environment at those ephemeral files and the existing local TLS key reference.
+1. Recreate ephemeral local-only FDT runtime files from the proven V5 proof source without printing their bytes.
+2. Launch the smoke harness from a local execution context that can reference the existing private TLS key without exposing it to a remote command channel.
 3. Run `examples/goodix5135-sigfm-smoke`.
 4. Ask for one finger placement only.
 5. Require `LIVE_SIGFM_FIRST_STAGE=PASS` and final `LIVE_SIGFM_SMOKE=PASS`.
