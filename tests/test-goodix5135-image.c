@@ -9,6 +9,9 @@
 #include <string.h>
 
 #include "../libfprint/drivers/goodix5135/goodix5135-image.h"
+#include "../libfprint/drivers/goodix5135/goodix5135.h"
+G_STATIC_ASSERT (GOODIX5135_SIGFM_THRESHOLD == 12);
+G_STATIC_ASSERT (GOODIX5135_ENROLL_STAGES == 30);
 
 static void
 test_crc32_mpeg2 (void)

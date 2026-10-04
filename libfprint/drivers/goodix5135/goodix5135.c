@@ -8372,10 +8372,8 @@ fpi_device_goodix5135_class_init (FpiDeviceGoodix5135Class *klass)
    */
   img_class->img_width = GOODIX5135_IMAGE_WIDTH;
   img_class->img_height = GOODIX5135_IMAGE_HEIGHT;
-
-  /*
-   * Placeholder inherited from common image-device drivers.
-   * It is NOT claimed to be the final Chicago matcher threshold.
-   */
-  img_class->bz3_threshold = 24;
+  /* Small-area ChicagoHU matching policy. */
+  dev_class->nr_enroll_stages = GOODIX5135_ENROLL_STAGES;
+  img_class->algorithm = FPI_IMAGE_DEVICE_ALGORITHM_SIGFM;
+  img_class->sigfm_threshold = GOODIX5135_SIGFM_THRESHOLD;
 }
