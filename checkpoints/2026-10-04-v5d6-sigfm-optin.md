@@ -106,27 +106,69 @@ Result: 14 passed, 0 failed.
 
 No hardware access occurred during V5D5 or V5D6 host work.
 
+## Runtime-path audit after V5D6
+
+The Goodix SIGFM class configuration was audited before any live biometric run.
+
+The audit confirmed that the implementation intentionally reads SIGFM policy directly from `FpImageDeviceClass` at runtime:
+
+- `FpImageDeviceClass.algorithm` selects SIGFM extraction and print type;
+- `FpImageDeviceClass.sigfm_threshold` is passed directly to `fpi_print_sigfm_match()`;
+- Goodix5135 sets both fields in its class init;
+- the NBIS-only `bz3_threshold` remains in `FpImageDevicePrivate` for the legacy NBIS path.
+
+Therefore the absence of duplicate `algorithm` / `sigfm_threshold` fields in `FpImageDevicePrivate` is not a bug and no extra runtime copy is required.
+
+This audit prevents a false live test in which a class constant might otherwise have been mistaken for an active runtime setting.
+
+## Live-input recovery status
+
+The development machine still contains the earlier local FDT proof script and its local per-unit references.
+
+Only file names, sizes, and redacted references were inspected. No private FDT bytes, PSK contents, fingerprint pixels, templates, or exact biometric scores were printed or committed.
+
+Important findings:
+
+- the previously used local TLS key file still exists;
+- the old `fdt_probe_5135_v5.py` script still contains references to the proven local `goodix.dat` source and the proven unit-specific FDT-up calibration;
+- no standalone 12-byte FDT-up artifact was found, so the proven calibration should be reconstructed locally from the old private script rather than replaced with a guessed generic derivation;
+- existing local fingerprint image artifacts were intentionally not opened or analyzed during this recovery step.
+
+The first attempt to prepare ephemeral runtime FDT files stopped before any hardware activity because the system Python environment did not include the local Goodix dependencies. No USB transaction occurred.
+
+The Goodix development virtual environment itself is still healthy and imports its USB dependency successfully.
+
 ## Live-runtime readiness
 
-The development build contains the existing guarded native FpImage/TLS/FDT/image pipeline. The SIGFM matcher helper does not log exact SIGFM scores.
+The development build contains the existing guarded native TLS/FDT/image/FpImage path. The SIGFM matcher helper does not log exact SIGFM scores.
 
-The three private runtime input environment variables required by the existing guarded live path were not set in the Harb Agent process environment during this checkpoint. No attempt was made to discover, print, upload, hash, or otherwise expose their private contents automatically.
-
-Therefore no live SIGFM fingerprint run has been performed yet.
+No live SIGFM fingerprint run has been performed yet.
 
 ## Next action
 
-Prepare the existing guarded live FpImage path using the locally held private inputs without exposing them, then perform the first controlled SIGFM enrollment/verification experiment from the uninstalled development build.
+Prepare the existing guarded live FpImage path using the proven locally held private inputs without exposing them, then run a minimal one-stage SIGFM smoke test before full enrollment.
 
-The first live run must preserve these rules:
+The preferred first proof is:
 
-- do not rerun consumed V3 or V4/V4b experiments;
-- do not print exact live SIGFM scores or exact live keypoint/minutiae counts;
-- do not persist raw fingerprint images or intermediate biometric payloads;
-- do not modify the established FDT/manual/up behavior as part of the matcher experiment;
-- no firmware erase/flash;
-- no PSK rewrite/reprovision;
-- no arbitrary persistent sensor writes;
-- preserve Windows Hello compatibility.
+`USB -> TLS -> FDT -> image decode -> FpImage -> SIGFM extraction`
 
-After a successful controlled SIGFM run, proceed toward ordinary `fprintd-enroll` / `fprintd-verify` integration and then the reboot/suspend/cancellation safety matrix.
+The smoke test should:
+
+- require only one successful finger placement if possible;
+- persist no fingerprint image or template;
+- print no exact live keypoint/minutiae count or SIGFM score;
+- clear temporary biometric/FDT material after completion;
+- preserve the already-proven FDT/manual/up behavior;
+- leave firmware, PSK provisioning, and Windows Hello state untouched.
+
+After the smoke test passes, proceed to a controlled 30-stage SIGFM enrollment and genuine/impostor verification trials to calibrate threshold `12` for this exact unit.
+
+Then move toward ordinary `fprintd-enroll` / `fprintd-verify` integration and the reboot/suspend/cancellation safety matrix.
+
+## Hard safety/privacy rules
+
+Never print, persist to Git, upload, publish, or hash sensitive device/biometric material including plaintext PSK, PSK files/hashes, full OTP, fingerprint images/raw/templates, unit-specific FDT values, Goodix cache/calibration data, proprietary Goodix binaries, Windows biometric DB, process dumps, or full unit-specific runtime config/hash.
+
+Never print exact live biometric scores or exact live feature counts.
+
+No firmware erase/flash, PSK rewrite/reprovision, arbitrary persistent sensor writes, or Windows enrollment deletion shortcuts.
