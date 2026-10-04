@@ -6,6 +6,7 @@ examples = [
     'manage-prints',
     'verify',
     'clear-storage',
+    'goodix5135-sigfm-smoke',
 ]
 
 foreach example: examples
