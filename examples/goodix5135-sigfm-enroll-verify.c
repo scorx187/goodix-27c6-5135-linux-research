@@ -62,6 +62,23 @@ find_target_device (FpContext *context)
 }
 
 static void
+drain_main_context_for_ms (guint milliseconds)
+{
+  gint64 deadline = g_get_monotonic_time () + ((gint64) milliseconds * 1000);
+
+  while (g_get_monotonic_time () < deadline)
+    {
+      while (g_main_context_iteration (NULL, FALSE))
+        ;
+
+      g_usleep (10000);
+    }
+
+  while (g_main_context_iteration (NULL, FALSE))
+    ;
+}
+
+static void
 enroll_progress_cb (FpDevice *device,
                     gint      completed_stages,
                     FpPrint  *print,
@@ -153,6 +170,18 @@ main (void)
     }
 
   g_print ("LIVE_SIGFM_ENROLL=PASS\n");
+  g_print ("LIVE_SIGFM_ENROLL_CLEANUP=LIFT_FINGER_AND_WAIT\n");
+  fflush (stdout);
+
+  /*
+   * Enrollment completion can be delivered before the final image-device
+   * deactivation and FDT-up finger-off cleanup have drained. Keep the same
+   * OPEN/TLS session and service the default main context for a bounded
+   * period before VERIFY reactivates the device.
+   */
+  drain_main_context_for_ms (5000U);
+
+  g_print ("LIVE_SIGFM_ENROLL_CLEANUP=DRAINED\n");
   g_print ("LIVE_SIGFM_VERIFY=READY_SAME_FINGER\n");
   fflush (stdout);
 
