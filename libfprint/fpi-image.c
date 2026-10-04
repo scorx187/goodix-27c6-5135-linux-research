@@ -155,7 +155,7 @@ fpi_image_resize (FpImage *orig_img,
 }
 
 
-#define SIGFM_MIN_MATCHABLE_KEYPOINTS 5
+#define SIGFM_MIN_TEMPLATE_KEYPOINTS 25
 
 
 typedef struct
@@ -380,7 +380,7 @@ fpi_sigfm_extract_thread (GTask        *task,
 
   if (sigfm_keypoints_count (
         ret_data->sigfm_info)
-      < SIGFM_MIN_MATCHABLE_KEYPOINTS)
+      < SIGFM_MIN_TEMPLATE_KEYPOINTS)
     {
       g_task_return_new_error (
         thread_task,

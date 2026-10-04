@@ -327,7 +327,7 @@ test_extract_and_print_copy (void)
     sigfm_keypoints_count (
       image_info),
     >=,
-    5);
+    25);
 
   g_autoptr(FpPrint) print =
     new_empty_sigfm_print ();
