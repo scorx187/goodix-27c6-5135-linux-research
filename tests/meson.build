@@ -322,6 +322,84 @@ foreach test_name: unit_tests
 endforeach
 
 
+sigfm_robustness_test = executable(
+    'test-sigfm-robustness',
+    sources: [
+        'test-sigfm-robustness.cpp',
+    ],
+    dependencies: [
+        sigfm_dep,
+    ],
+    install: false,
+)
+
+test(
+    'sigfm-robustness',
+    sigfm_robustness_test,
+    suite: ['unit-tests'],
+)
+
+
+sigfm_geometry_hardening_test = executable(
+    'test-sigfm-geometry-hardening',
+    sources: [
+        'test-sigfm-geometry-hardening.cpp',
+    ],
+    dependencies: [
+        sigfm_opencv_dep,
+    ],
+    install: false,
+)
+
+test(
+    'sigfm-geometry-hardening',
+    sigfm_geometry_hardening_test,
+    suite: ['unit-tests'],
+)
+
+
+sigfm_image_core_test = executable(
+    'test-sigfm-image-core',
+    sources: [
+        'test-sigfm-image-core.c',
+    ],
+    dependencies: [
+        libfprint_private_dep,
+        sigfm_dep,
+    ],
+    c_args: common_cflags,
+    install: false,
+)
+
+test(
+    'sigfm-image-core',
+    sigfm_image_core_test,
+    suite: ['unit-tests'],
+    env: envs,
+)
+
+
+sigfm_print_core_test = executable(
+    'test-sigfm-print-core',
+    sources: [
+        'test-sigfm-print-core.c',
+    ],
+    dependencies: [
+        libfprint_private_dep,
+        sigfm_dep,
+    ],
+    c_args: common_cflags,
+    install: false,
+)
+
+test(
+    'sigfm-print-core',
+    sigfm_print_core_test,
+    suite: ['unit-tests'],
+    env: envs,
+)
+
+
 if 'goodix5135' in drivers
     goodix5135_conditioning_test = executable(
         'test-goodix5135-conditioning',

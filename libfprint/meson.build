@@ -263,6 +263,8 @@ deps += declare_dependency(include_directories: [
     include_directories('nbis/libfprint-include'),
 ])
 
+subdir('sigfm')
+
 libnbis = static_library('nbis',
     nbis_sources,
     dependencies: deps,
@@ -281,7 +283,7 @@ libfprint_private = static_library('fprint-private',
         libfprint_private_sources,
     ],
     dependencies: deps,
-    link_with: libnbis,
+    link_with: [libnbis, libsigfm],
     install: false)
 
 libfprint_drivers = static_library('fprint-drivers',

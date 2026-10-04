@@ -21,6 +21,7 @@
 #pragma once
 
 #include "fp-image.h"
+#include "sigfm/sigfm.hpp"
 
 /**
  * FpiImageFlags:
@@ -67,10 +68,22 @@ struct _FpImage
   guint8    *data;
   guint8    *binarized;
 
-  GPtrArray *minutiae;
+  GPtrArray    *minutiae;
+  SigfmImgInfo *sigfm_info;
 
-  gboolean   detection_in_progress;
+  gboolean      detection_in_progress;
 };
+
+SigfmImgInfo *fpi_image_get_sigfm_info (FpImage *self);
+
+void fpi_image_extract_sigfm (FpImage            *self,
+                              GCancellable       *cancellable,
+                              GAsyncReadyCallback callback,
+                              gpointer            user_data);
+
+gboolean fpi_image_extract_sigfm_finish (FpImage      *self,
+                                         GAsyncResult *result,
+                                         GError      **error);
 
 gint fpi_std_sq_dev (const guint8 *buf,
                      gint          size);

@@ -27,6 +27,7 @@
 #include <config.h>
 #include <nbis.h>
 
+
 /**
  * SECTION: fp-image
  * @title: FpImage
@@ -64,6 +65,7 @@ fp_image_finalize (GObject *object)
   g_clear_pointer (&self->data, g_free);
   g_clear_pointer (&self->binarized, g_free);
   g_clear_pointer (&self->minutiae, g_ptr_array_unref);
+  g_clear_pointer (&self->sigfm_info, sigfm_free_info);
 
   G_OBJECT_CLASS (fp_image_parent_class)->finalize (object);
 }
@@ -214,6 +216,10 @@ fp_image_detect_minutiae_nbis_finish (FpImage *self,
 
       /* Don't let free_minutiae delete the minutiae that we now own. */
       data->minutiae->num = 0;
+
+      g_clear_pointer (
+        &self->sigfm_info,
+        sigfm_free_info);
 
       return TRUE;
     }

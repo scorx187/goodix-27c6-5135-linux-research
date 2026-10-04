@@ -24,6 +24,9 @@
 
 #define BOZORTH3_DEFAULT_THRESHOLD 40
 
+G_STATIC_ASSERT (
+  FPI_IMAGE_DEVICE_ALGORITHM_NBIS == 0);
+
 /**
  * SECTION: fp-image-device
  * @title: FpImageDevice
@@ -95,28 +98,52 @@ fp_image_device_cancel_action (FpDevice *device)
     fpi_image_device_deactivate (self, TRUE);
 }
 
+static FpiPrintType
+fp_image_device_algorithm_print_type (FpImageDeviceClass *cls)
+{
+  if (cls->algorithm ==
+      FPI_IMAGE_DEVICE_ALGORITHM_SIGFM)
+    return FPI_PRINT_SIGFM;
+
+  return FPI_PRINT_NBIS;
+}
+
+
 static void
 fp_image_device_start_capture_action (FpDevice *device)
 {
-  FpImageDevice *self = FP_IMAGE_DEVICE (device);
-  FpImageDevicePrivate *priv = fp_image_device_get_instance_private (self);
+  FpImageDevice *self =
+    FP_IMAGE_DEVICE (device);
+
+  FpImageDeviceClass *cls =
+    FP_IMAGE_DEVICE_GET_CLASS (self);
+
+  FpImageDevicePrivate *priv =
+    fp_image_device_get_instance_private (
+      self);
+
   FpiDeviceAction action;
   FpiPrintType print_type;
 
-  /* There is just one action that we cannot support out
-   * of the box, which is a capture without first waiting
-   * for a finger to be on the device.
-   */
-  action = fpi_device_get_current_action (device);
+  action =
+    fpi_device_get_current_action (
+      device);
+
   if (action == FPI_DEVICE_ACTION_CAPTURE)
     {
       gboolean wait_for_finger;
 
-      fpi_device_get_capture_data (device, &wait_for_finger);
+      fpi_device_get_capture_data (
+        device,
+        &wait_for_finger);
 
       if (!wait_for_finger)
         {
-          fpi_device_action_error (device, fpi_device_error_new (FP_DEVICE_ERROR_NOT_SUPPORTED));
+          fpi_device_action_error (
+            device,
+            fpi_device_error_new (
+              FP_DEVICE_ERROR_NOT_SUPPORTED));
+
           return;
         }
     }
@@ -124,21 +151,50 @@ fp_image_device_start_capture_action (FpDevice *device)
     {
       FpPrint *enroll_print = NULL;
 
-      fpi_device_get_enroll_data (device, &enroll_print);
-      g_object_get (enroll_print, "fpi-type", &print_type, NULL);
-      if (print_type != FPI_PRINT_NBIS)
-        fpi_print_set_type (enroll_print, FPI_PRINT_NBIS);
+      const FpiPrintType expected_type =
+        fp_image_device_algorithm_print_type (
+          cls);
+
+      fpi_device_get_enroll_data (
+        device,
+        &enroll_print);
+
+      g_object_get (
+        enroll_print,
+        "fpi-type",
+        &print_type,
+        NULL);
+
+      if (print_type != FPI_PRINT_UNDEFINED &&
+          print_type != expected_type)
+        {
+          fpi_device_action_error (
+            device,
+            fpi_device_error_new_msg (
+              FP_DEVICE_ERROR_NOT_SUPPORTED,
+              "Enrollment print type does not match image-device algorithm"));
+
+          return;
+        }
+
+      if (print_type != expected_type)
+        fpi_print_set_type (
+          enroll_print,
+          expected_type);
     }
 
   priv->enroll_stage = 0;
-  /* The internal state machine guarantees both of these. */
-  g_assert (!priv->finger_present);
-  g_assert (!priv->minutiae_scan_active);
 
-  /* And activate the device; we rely on fpi_image_device_activate_complete()
-   * to be called when done (or immediately). */
-  fpi_image_device_activate (self);
+  g_assert (
+    !priv->finger_present);
+
+  g_assert (
+    !priv->minutiae_scan_active);
+
+  fpi_image_device_activate (
+    self);
 }
+
 
 
 /*********************************************************/

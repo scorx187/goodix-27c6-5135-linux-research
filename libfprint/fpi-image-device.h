@@ -71,6 +71,19 @@ typedef enum {
 } FpiImageDeviceState;
 
 /**
+ * FpiImageDeviceAlgorithm:
+ * @FPI_IMAGE_DEVICE_ALGORITHM_NBIS: use NBIS/Bozorth3
+ * @FPI_IMAGE_DEVICE_ALGORITHM_SIGFM: use SIGFM
+ *
+ * Zero is deliberately NBIS so existing image drivers remain
+ * unchanged unless they explicitly opt into SIGFM.
+ */
+typedef enum {
+  FPI_IMAGE_DEVICE_ALGORITHM_NBIS = 0,
+  FPI_IMAGE_DEVICE_ALGORITHM_SIGFM,
+} FpiImageDeviceAlgorithm;
+
+/**
  * FpImageDeviceClass:
  * @bz3_threshold: Threshold to consider bozorth3 score a match, default: 40
  * @img_width: Width of the image, only provide if constant
@@ -104,9 +117,11 @@ struct _FpImageDeviceClass
 {
   FpDeviceClass parent_class;
 
-  gint          bz3_threshold;
-  gint          img_width;
-  gint          img_height;
+  gint                    bz3_threshold;
+  gint                    img_width;
+  gint                    img_height;
+  FpiImageDeviceAlgorithm algorithm;
+  gint                    sigfm_threshold;
 
   void          (*img_open)     (FpImageDevice *dev);
   void          (*img_close)    (FpImageDevice *dev);
