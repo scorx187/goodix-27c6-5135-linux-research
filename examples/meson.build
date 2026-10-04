@@ -7,6 +7,7 @@ examples = [
     'verify',
     'clear-storage',
     'goodix5135-sigfm-smoke',
+    'goodix5135-sigfm-enroll-verify',
 ]
 
 foreach example: examples
