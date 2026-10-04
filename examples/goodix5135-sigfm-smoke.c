@@ -8,6 +8,7 @@
 
 #include <glib.h>
 #include <libfprint/fprint.h>
+#include <stdio.h>
 #include <string.h>
 
 #define TARGET_DRIVER "goodix5135"
@@ -129,6 +130,9 @@ main (void)
 
   template_print = fp_print_new (device);
   fp_print_set_finger (template_print, FP_FINGER_RIGHT_INDEX);
+
+  g_print ("LIVE_SIGFM_SMOKE=READY_FOR_FINGER\n");
+  fflush (stdout);
 
   result_print =
     fp_device_enroll_sync (device,
