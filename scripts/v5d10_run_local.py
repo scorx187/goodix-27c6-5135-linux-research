@@ -13,11 +13,49 @@ REPO = pathlib.Path('/home/sam/libfprint')
 BUILD = pathlib.Path('/tmp/goodix5135-v5d6-sigfm-optin')
 BINARY = BUILD / 'examples/goodix5135-sigfm-calibration'
 EXPECTED_HEAD = '2631f371e57ff7cb353b1c9389d277064e08c74c'
+STATE_DIR = pathlib.Path('/home/sam/.local/state/goodix5135')
+LOG_FILE = STATE_DIR / 'last-v5d10.log'
+
+
+class Tee:
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, data):
+        for stream in self.streams:
+            stream.write(data)
+            stream.flush()
+        return len(data)
+
+    def flush(self):
+        for stream in self.streams:
+            stream.flush()
 
 
 def fail(message, code=1):
     print(f'SETUP_FAIL={message}')
     raise SystemExit(code)
+
+
+def run_streamed(argv, *, cwd=None, env=None, check=False):
+    process = subprocess.Popen(
+        argv,
+        cwd=cwd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+
+    assert process.stdout is not None
+    for line in process.stdout:
+        print(line, end='')
+
+    rc = process.wait()
+    if check and rc != 0:
+        raise subprocess.CalledProcessError(rc, argv)
+    return rc
 
 
 def recover_refs():
@@ -85,6 +123,17 @@ def resolve_private(raw):
 
 
 def main():
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    os.chmod(STATE_DIR, 0o700)
+
+    log = LOG_FILE.open('w', buffering=1)
+    os.chmod(LOG_FILE, 0o600)
+    sys.stdout = Tee(sys.__stdout__, log)
+    sys.stderr = Tee(sys.__stderr__, log)
+
+    print(f'LOCAL_SAFE_LOG={LOG_FILE}')
+    print('LOCAL_SAFE_LOG_PRIVATE_VALUES=NO')
+
     if not PROBE.is_file():
         fail('V5_PROBE_NOT_FOUND')
     if not REPO.is_dir():
@@ -152,7 +201,7 @@ def main():
         print('PRIVATE_VALUES_PRINTED=NO')
         print('V5D10_BUILDING=YES')
 
-        subprocess.run(
+        run_streamed(
             ['ninja', '-C', str(BUILD), 'examples/goodix5135-sigfm-calibration'],
             check=True,
         )
@@ -180,16 +229,17 @@ def main():
         print('================================================')
         print()
 
-        result = subprocess.run(
+        rc = run_streamed(
             ['meson', 'devenv', '-C', str(BUILD), str(BINARY)],
             cwd=REPO,
             env=env,
         )
 
         print()
-        print(f'LOCAL_V5D10_EXIT={result.returncode}')
-        print('LOCAL_V5D10_RESULT=' + ('PASS' if result.returncode == 0 else 'REVIEW'))
-        return result.returncode
+        print(f'LOCAL_V5D10_EXIT={rc}')
+        print('LOCAL_V5D10_RESULT=' + ('PASS' if rc == 0 else 'REVIEW'))
+        print(f'LOCAL_SAFE_LOG={LOG_FILE}')
+        return rc
 
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
