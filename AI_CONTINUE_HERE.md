@@ -2,34 +2,37 @@
 
 **Updated:** 2026-10-04
 
-This is the entry point for a new ChatGPT/AI session.
+This is the canonical entry point for the next ChatGPT/AI development session.
 
 ## Read first
 
-Read this file, then read:
+Read this file, then:
 
-- `checkpoints/2026-10-04-v5d6-sigfm-optin.md`
-- `handoffs/CURRENT_WORK_HANDOFF_2026-08-31.md` for older historical detail only
+1. `checkpoints/2026-10-04-v5d7-live-sigfm-smoke-harness.md`
+2. `checkpoints/2026-10-04-v5d6-sigfm-optin.md`
+3. `handoffs/CURRENT_WORK_HANDOFF_2026-08-31.md` for older historical detail only
+4. `docs/SAFETY.md`
 
-The 2026-10-04 checkpoint supersedes the old V5D4B disk-full blocker.
+The 2026-10-04 checkpoints supersede the old V5D4B disk-full blocker.
 
 ## Current one-line status
 
-The hardened SIGFM host stack is now banked into the real local libfprint branch, the `5` versus `25` keypoint semantics are resolved, and Goodix5135 explicitly opts into SIGFM with an initial threshold of `12` and `30` enrollment stages. All current host gates pass. The next milestone is the first guarded live SIGFM enrollment/verification experiment.
+The hardened SIGFM stack is banked, Goodix5135 explicitly uses SIGFM with the `25` extraction-quality gate, matcher-internal `5` correspondence minimum, initial match threshold `12`, and 30 enrollment stages. A guarded one-stage live SIGFM smoke harness is now built, tested host-side, and mirrored to GitHub. The next milestone is its first live one-touch run using the already-proven local private TLS/FDT inputs.
 
 ## Exact current local libfprint state
 
 - repo: `~/libfprint`
 - branch: `goodix-27c6-5135-chicagohu`
-- HEAD: `e2c0eb96cb18f6787d4721bb238271a100f15d5f`
+- HEAD: `ceac0b016e13588f1d509f8b6a7d284308443322`
 - expected working tree: CLEAN
-- GitHub mirror: `libfprint/goodix-27c6-5135-e2c0eb96`
+- GitHub mirror: `libfprint/goodix-27c6-5135-ceac0b01`
 
 Important commits:
 
 - V5D4B banked host SIGFM stack: `8ef22cd196d827d6a7213ed3173c2285961f4247`
 - V5D5 template-quality gate restoration: `0e7beb4c245b6313bfbeb556c60c2ed47b731a40`
 - V5D6 Goodix SIGFM opt-in: `e2c0eb96cb18f6787d4721bb238271a100f15d5f`
+- V5D7 guarded one-stage live smoke harness: `ceac0b016e13588f1d509f8b6a7d284308443322`
 
 ## Current SIGFM policy
 
@@ -39,45 +42,73 @@ Important commits:
 - Goodix5135 enrollment stages: `30`
 - sensor geometry: `80x64`
 
-Do not merge the `25` and `5` concepts again. The threshold `12` is an initial sensor-family-informed candidate, not a final FAR/FRR claim.
+Do not merge the `25` and `5` concepts again. Threshold `12` is an evidence-based starting candidate, not a final FAR/FRR claim for this exact unit.
 
-## Host verification
+## Runtime audit
 
-Fresh targeted V5D6 result: **14/14 PASS**.
+SIGFM configuration is intentionally class-based at runtime:
 
-Passed:
+- `FpImageDeviceClass.algorithm` selects SIGFM extraction and print type;
+- `FpImageDeviceClass.sigfm_threshold` is passed to `fpi_print_sigfm_match()`;
+- Goodix5135 sets both fields in class init;
+- the private `bz3_threshold` remains NBIS-specific.
 
-- SIGFM robustness
-- SIGFM geometry hardening
-- SIGFM image core
-- SIGFM print core
-- `fpi-device`
-- all nine Goodix5135 regression suites
+Do not add duplicate private algorithm/threshold fields unless a future dynamic-threshold requirement specifically needs them.
 
-No hardware was touched during V5D4B banking, V5D5, or V5D6 host verification.
+## V5D7 smoke harness
 
-## Live-runtime position
+Executable:
 
-The existing guarded native TLS/FDT/image/FpImage path remains in place. SIGFM exact match scores are not logged by the matcher helper.
+`examples/goodix5135-sigfm-smoke`
 
-At the 2026-10-04 checkpoint, the Harb Agent process did not have the three private runtime input environment variables set. Do not automatically discover or expose private PSK/FDT material. Reuse the locally held private inputs only through an explicit guarded local setup that does not print, hash, upload, or commit them.
+Purpose:
 
-No live SIGFM fingerprint run has happened yet.
+`USB -> TLS -> FDT -> image decode -> FpImage -> SIGFM extraction`
 
-## Next action
+Behavior:
 
-1. Prepare the existing guarded live FpImage runtime with the locally held private inputs without exposing them.
-2. Run a controlled SIGFM enrollment/verification experiment from the uninstalled development build.
-3. Do not rerun consumed V3 or V4/V4b experiments.
-4. Do not print exact live keypoint/minutiae counts or SIGFM/BZ3 scores.
-5. If live matching is healthy, move toward ordinary `fprintd-enroll` and `fprintd-verify` use.
-6. Then complete cold-boot, reboot, suspend/resume, cancellation/timeout, Windows Hello compatibility, and privacy/logging safety gates.
+- refuses to run without all explicit live guards;
+- stops after the first successful enrollment stage;
+- does not save a fingerprint image;
+- does not serialize/persist a template;
+- does not print exact SIGFM scores or live keypoint/minutiae counts.
+
+No-guard safety test: PASS, expected exit code `2` before device access.
+
+Fresh host regression result after V5D7: **14/14 PASS**.
+
+## Live-input recovery state
+
+The development machine still holds the earlier proven local material. Private bytes were not printed or committed.
+
+Confirmed at metadata/redacted-reference level:
+
+- the previously used local TLS key reference still exists;
+- the old V5 FDT proof script still carries the proven local `goodix.dat` reference and per-unit FDT-up calibration;
+- no standalone 12-byte FDT-up artifact was found;
+- existing local fingerprint-image artifacts were deliberately not opened or analyzed.
+
+The correct next step is to reconstruct ephemeral FDT runtime files from the already-proven local V5 proof source, not to invent a generic FDT-up derivation.
+
+## Exact next action
+
+1. Prepare ephemeral local-only FDT seed/up files from the proven V5 proof source without printing their values.
+2. Use the existing local TLS key reference without copying/publishing its contents.
+3. Set the existing guarded runtime environment.
+4. Run `examples/goodix5135-sigfm-smoke`.
+5. Require one successful finger placement and `LIVE_SIGFM_FIRST_STAGE=PASS` / `LIVE_SIGFM_SMOKE=PASS`.
+6. Remove ephemeral FDT files after the run.
+7. If the smoke test passes, proceed to controlled 30-stage enrollment.
+8. Then run genuine/impostor verification trials to calibrate threshold `12` before ordinary `fprintd-enroll` / `fprintd-verify` integration.
+9. Finish reboot, suspend/resume, cancellation/timeout, Windows Hello compatibility, and privacy/logging gates.
 
 ## Hard safety/privacy rules
 
-Never print, persist, commit, upload, publish, or hash sensitive device/biometric material including plaintext PSK, PSK files/hashes, full OTP, fingerprint images/raw/templates, Goodix cache/calibration data, proprietary Goodix binaries, Windows biometric DB, process dumps, or full unit-specific runtime config/hash.
+Never print, persist to Git, upload, publish, or hash sensitive device/biometric material including plaintext PSK, PSK files/hashes, full OTP, fingerprint images/raw/templates, unit-specific FDT values, Goodix cache/calibration data, proprietary Goodix binaries, Windows biometric DB, process dumps, or full unit-specific runtime config/hash.
 
-Never print exact live minutiae/keypoint counts or exact SIGFM/BZ3 scores. No firmware erase/flash, PSK rewrite/reprovision, arbitrary persistent sensor writes, or Windows enrollment deletion shortcuts.
+Never print exact live biometric scores or exact live feature counts.
+
+No firmware erase/flash, PSK rewrite/reprovision, arbitrary persistent sensor writes, or Windows enrollment deletion shortcuts.
 
 ## Draft PR
 
